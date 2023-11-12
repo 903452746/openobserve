@@ -28,7 +28,7 @@ use crate::common::{
     },
     meta::{
         common::FileKey,
-        search::Session as SearchSession,
+        search::{SearchType, Session as SearchSession},
         stream::{PartitionTimeLevel, ScanStats, StreamParams},
         StreamType,
     },
@@ -48,7 +48,7 @@ pub(crate) async fn create_context(
     org_id: &str,
     stream_name: &str,
     time_range: (i64, i64),
-    filters: &[(&str, &str)],
+    filters: &[(&str, Vec<&str>)],
 ) -> Result<(SessionContext, Arc<Schema>, ScanStats)> {
     // check if we are allowed to search
     if db::compact::retention::is_deleting_stream(org_id, stream_name, StreamType::Metrics, None) {
@@ -130,6 +130,7 @@ pub(crate) async fn create_context(
     let session = SearchSession {
         id: session_id.to_string(),
         storage_type: StorageType::Memory,
+        search_type: SearchType::Normal,
     };
 
     let ctx = register_table(
@@ -149,7 +150,7 @@ async fn get_file_list(
     stream_name: &str,
     time_level: PartitionTimeLevel,
     time_range: (i64, i64),
-    filters: &[(&str, &str)],
+    filters: &[(&str, Vec<&str>)],
 ) -> Result<Vec<FileKey>> {
     let (time_min, time_max) = time_range;
     let results = match file_list::query(

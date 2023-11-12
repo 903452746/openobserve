@@ -69,6 +69,7 @@ mod tests {
                 stream_type: crate::common::meta::StreamType::Logs,
                 count: 0,
                 is_ingest_time: false,
+                parent_alert_deleted: false,
             },
         )
         .await;
@@ -76,10 +77,10 @@ mod tests {
         assert!(resp.is_ok());
 
         let resp = crate::service::alerts::get_alert(
-            "dummy".to_string(),
-            "TestStream".to_string(),
+            "dummy",
+            "TestStream",
             crate::common::meta::StreamType::Logs,
-            "TestAlert".to_string(),
+            "TestAlert",
         )
         .await;
 

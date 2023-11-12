@@ -1,11 +1,9 @@
 <template>
   <div class="q-pa-md">
     <div class="text-subtitle1 q-pb-sm">
-      You need minimum PowerShell 6 to run the install script. you can check
+      You need minimum PowerShell 6 to run the install script, you can check
       your PowerShell version by running
-      <code
-        class="q-px-xs q-py-xs text-subtitle1"
-        style="border-radius: 4px"
+      <code class="q-px-xs q-py-xs text-subtitle1" style="border-radius: 4px"
         >$PSVersionTable.PSVersion</code
       >
       in your terminal.
@@ -28,8 +26,22 @@ Major  Minor  Patch  PreReleaseLabel BuildLabel
       >
     </div>
 
-    <div class="text-subtitle1 q-pl-xs q-mt-md">From powershell terminal:</div>
+    <div class="text-subtitle1 q-pl-xs q-mt-md">
+      Run the powershell terminal as administrator and execute the following
+      command:
+    </div>
     <ContentCopy class="q-mt-sm" :content="getCommand" />
+    <br />
+    <hr />
+    <div>
+      <div class="text-subtitle1 q-pl-xs q-mt-md">
+        Once you have installed the OpenObserve collector, it will:
+        <ol>
+          <li>Collect logs from Windows event log</li>
+          <li>Collect metrics from Windows performance counters</li>
+        </ol>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -76,7 +88,7 @@ const accessKey = computed(() => {
 });
 
 const getCommand = computed(() => {
-  return `Invoke-WebRequest -Uri https://raw.githubusercontent.com/openobserve/agents/main/windows/install.ps1 -OutFile install.ps1 ; .\install.ps1 -URL ${endpoint.value.url}/api/${props.currOrgIdentifier}/ -AUTH_KEY ${accessKey.value}`;
+  return `Invoke-WebRequest -Uri https://raw.githubusercontent.com/openobserve/agents/main/windows/install.ps1 -OutFile install.ps1 ; .\\install.ps1 -URL ${endpoint.value.url}/api/${props.currOrgIdentifier}/ -AUTH_KEY ${accessKey.value}`;
 });
 </script>
 
