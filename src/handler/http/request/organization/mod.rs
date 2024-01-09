@@ -1,35 +1,38 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{collections::HashSet, io::Error};
 
 use actix_web::{get, post, put, web, HttpResponse, Result};
-use actix_web_httpauth::extractors::basic::BasicAuth;
-use std::collections::HashSet;
-use std::io::Error;
 
-use crate::common::infra::config::{STREAM_SCHEMAS, USERS};
-use crate::common::meta::organization::{
-    OrgDetails, OrgUser, OrganizationResponse, PasscodeResponse, RumIngestionResponse, CUSTOM,
-    DEFAULT_ORG, THRESHOLD,
+use crate::{
+    common::{
+        infra::config::{STREAM_SCHEMAS, USERS},
+        meta::organization::{
+            OrgDetails, OrgUser, OrganizationResponse, PasscodeResponse, RumIngestionResponse,
+            CUSTOM, DEFAULT_ORG, THRESHOLD,
+        },
+        utils::auth::{is_root_user, UserEmail},
+    },
+    service::organization::{self, get_passcode, get_rum_token, update_passcode, update_rum_token},
 };
-use crate::common::utils::auth::is_root_user;
-use crate::service::organization::{self, update_passcode};
-use crate::service::organization::{get_passcode, get_rum_token, update_rum_token};
 
 pub mod es;
 pub mod settings;
 
-/** GetOrganizations */
+/// GetOrganizations
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -41,12 +44,12 @@ pub mod settings;
         ("org_id" = String, Path, description = "Organization name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = OrganizationResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = OrganizationResponse),
     )
 )]
 #[get("/{org_id}/organizations")]
-pub async fn organizations(credentials: BasicAuth) -> Result<HttpResponse, Error> {
-    let user_id = credentials.user_id();
+pub async fn organizations(user_email: UserEmail) -> Result<HttpResponse, Error> {
+    let user_id = user_email.user_id.as_str();
     let mut id = 0;
 
     let mut orgs: Vec<OrgDetails> = vec![];
@@ -124,7 +127,7 @@ pub async fn organizations(credentials: BasicAuth) -> Result<HttpResponse, Error
     Ok(HttpResponse::Ok().json(org_response))
 }
 
-/** GetOrganizationSummary */
+/// GetOrganizationSummary
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -136,7 +139,7 @@ pub async fn organizations(credentials: BasicAuth) -> Result<HttpResponse, Error
         ("org_id" = String, Path, description = "Organization name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = OrgSummary),
+        (status = 200, description = "Success", content_type = "application/json", body = OrgSummary),
     )
 )]
 #[get("/{org_id}/summary")]
@@ -146,7 +149,7 @@ async fn org_summary(org_id: web::Path<String>) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(org_summary))
 }
 
-/** GetIngestToken */
+/// GetIngestToken
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -158,16 +161,16 @@ async fn org_summary(org_id: web::Path<String>) -> Result<HttpResponse, Error> {
         ("org_id" = String, Path, description = "Organization name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = PasscodeResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = PasscodeResponse),
     )
 )]
 #[get("/{org_id}/organizations/passcode")]
 async fn get_user_passcode(
-    credentials: BasicAuth,
+    user_email: UserEmail,
     org_id: web::Path<String>,
 ) -> Result<HttpResponse, Error> {
     let org = org_id.into_inner();
-    let user_id = credentials.user_id();
+    let user_id = user_email.user_id.as_str();
     let mut org_id = Some(org.as_str());
     if is_root_user(user_id) {
         org_id = None;
@@ -176,7 +179,7 @@ async fn get_user_passcode(
     Ok(HttpResponse::Ok().json(PasscodeResponse { data: passcode }))
 }
 
-/** UpdateIngestToken */
+/// UpdateIngestToken
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -188,16 +191,16 @@ async fn get_user_passcode(
         ("org_id" = String, Path, description = "Organization name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = PasscodeResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = PasscodeResponse),
     )
 )]
 #[put("/{org_id}/organizations/passcode")]
 async fn update_user_passcode(
-    credentials: BasicAuth,
+    user_email: UserEmail,
     org_id: web::Path<String>,
 ) -> Result<HttpResponse, Error> {
     let org = org_id.into_inner();
-    let user_id = credentials.user_id();
+    let user_id = user_email.user_id.as_str();
     let mut org_id = Some(org.as_str());
     if is_root_user(user_id) {
         org_id = None;
@@ -206,7 +209,7 @@ async fn update_user_passcode(
     Ok(HttpResponse::Ok().json(PasscodeResponse { data: passcode }))
 }
 
-/** GetRumIngestToken */
+/// GetRumIngestToken
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -218,16 +221,16 @@ async fn update_user_passcode(
         ("org_id" = String, Path, description = "Organization name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = RumIngestionResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = RumIngestionResponse),
     )
 )]
 #[get("/{org_id}/organizations/rumtoken")]
 async fn get_user_rumtoken(
-    credentials: BasicAuth,
+    user_email: UserEmail,
     org_id: web::Path<String>,
 ) -> Result<HttpResponse, Error> {
     let org = org_id.into_inner();
-    let user_id = credentials.user_id();
+    let user_id = user_email.user_id.as_str();
     let mut org_id = Some(org.as_str());
     if is_root_user(user_id) {
         org_id = None;
@@ -236,7 +239,7 @@ async fn get_user_rumtoken(
     Ok(HttpResponse::Ok().json(RumIngestionResponse { data: rumtoken }))
 }
 
-/** UpdateRumIngestToken */
+/// UpdateRumIngestToken
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -248,16 +251,16 @@ async fn get_user_rumtoken(
         ("org_id" = String, Path, description = "Organization name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = RumIngestionResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = RumIngestionResponse),
     )
 )]
 #[put("/{org_id}/organizations/rumtoken")]
 async fn update_user_rumtoken(
-    credentials: BasicAuth,
+    user_email: UserEmail,
     org_id: web::Path<String>,
 ) -> Result<HttpResponse, Error> {
     let org = org_id.into_inner();
-    let user_id = credentials.user_id();
+    let user_id = user_email.user_id.as_str();
     let mut org_id = Some(org.as_str());
     if is_root_user(user_id) {
         org_id = None;
@@ -266,7 +269,7 @@ async fn update_user_rumtoken(
     Ok(HttpResponse::Ok().json(RumIngestionResponse { data: rumtoken }))
 }
 
-/** CreateRumIngestToken */
+/// CreateRumIngestToken
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -278,16 +281,16 @@ async fn update_user_rumtoken(
         ("org_id" = String, Path, description = "Organization name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = RumIngestionResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = RumIngestionResponse),
     )
 )]
 #[post("/{org_id}/organizations/rumtoken")]
 async fn create_user_rumtoken(
-    credentials: BasicAuth,
+    user_email: UserEmail,
     org_id: web::Path<String>,
 ) -> Result<HttpResponse, Error> {
     let org = org_id.into_inner();
-    let user_id = credentials.user_id();
+    let user_id = user_email.user_id.as_str();
     let mut org_id = Some(org.as_str());
     if is_root_user(user_id) {
         org_id = None;

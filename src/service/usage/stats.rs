@@ -1,37 +1,41 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use once_cell::sync::Lazy;
-use reqwest::Client;
 use std::{collections::HashMap, sync::Arc};
 
+use config::{meta::stream::StreamType, CONFIG};
+use once_cell::sync::Lazy;
+use reqwest::Client;
+
 use super::ingestion_service;
-use crate::common::{
-    infra::{
-        cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-        config::CONFIG,
-        db as infra_db, dist_lock,
+use crate::{
+    common::{
+        infra::{
+            cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
+            db as infra_db, dist_lock,
+        },
+        meta::{
+            self,
+            search::Request,
+            usage::{Stats, UsageEvent, STATS_STREAM, USAGE_STREAM},
+        },
+        utils::json,
     },
-    meta::{
-        self,
-        search::Request,
-        usage::{Stats, UsageEvent, STATS_STREAM, USAGE_STREAM},
-    },
-    utils::json,
+    handler::grpc::cluster_rpc,
+    service::{db, search as SearchService},
 };
-use crate::handler::grpc::cluster_rpc;
-use crate::service::{db, search as SearchService};
 
 pub static CLIENT: Lazy<Arc<Client>> = Lazy::new(|| Arc::new(Client::new()));
 
@@ -43,7 +47,7 @@ pub async fn publish_stats() -> Result<(), anyhow::Error> {
         // get the working node for the organization
         let (_offset, node) = get_last_stats_offset(&org_id).await;
         if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::error!("[STATS] for organization {org_id} are being calculated by {node}");
+            log::warn!("[STATS] for organization {org_id} are being calculated by {node}");
             continue;
         }
 
@@ -52,7 +56,7 @@ pub async fn publish_stats() -> Result<(), anyhow::Error> {
 
         let (last_query_ts, node) = get_last_stats_offset(&org_id).await;
         if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::error!("[STATS] for organization {org_id} are being calculated by {node}");
+            log::warn!("[STATS] for organization {org_id} are being calculated by {node}");
             continue;
         }
         // release lock
@@ -61,9 +65,17 @@ pub async fn publish_stats() -> Result<(), anyhow::Error> {
         let current_ts = chrono::Utc::now().timestamp_micros();
 
         let sql = if CONFIG.common.usage_report_compressed_size {
-            format!("SELECT sum(num_records) as records ,sum(size) as original_size, org_id , stream_type  ,stream_name ,min(min_ts) as min_ts , max(max_ts) as max_ts, sum(compressed_size) as compressed_size  FROM \"{USAGE_STREAM}\" where _timestamp between {last_query_ts} and {current_ts} and event = \'{}\' and org_id = \'{}\' group by  org_id , stream_type ,stream_name",UsageEvent::Ingestion, org_id)
+            format!(
+                "SELECT sum(num_records) as records ,sum(size) as original_size, org_id , stream_type  ,stream_name ,min(min_ts) as min_ts , max(max_ts) as max_ts, sum(compressed_size) as compressed_size  FROM \"{USAGE_STREAM}\" where _timestamp between {last_query_ts} and {current_ts} and event = \'{}\' and org_id = \'{}\' group by  org_id , stream_type ,stream_name",
+                UsageEvent::Ingestion,
+                org_id
+            )
         } else {
-            format!("SELECT sum(num_records) as records ,sum(size) as original_size, org_id , stream_type  ,stream_name FROM \"{USAGE_STREAM}\" where _timestamp between {last_query_ts} and {current_ts} and event = \'{}\' and org_id = \'{}\' group by  org_id , stream_type ,stream_name",UsageEvent::Ingestion, org_id)
+            format!(
+                "SELECT sum(num_records) as records ,sum(size) as original_size, org_id , stream_type  ,stream_name FROM \"{USAGE_STREAM}\" where _timestamp between {last_query_ts} and {current_ts} and event = \'{}\' and org_id = \'{}\' group by  org_id , stream_type ,stream_name",
+                UsageEvent::Ingestion,
+                org_id
+            )
         };
 
         let query = meta::search::Query {
@@ -80,7 +92,7 @@ pub async fn publish_stats() -> Result<(), anyhow::Error> {
             timeout: 0,
         };
         // do search
-        match SearchService::search(&CONFIG.common.usage_org, meta::StreamType::Logs, &req).await {
+        match SearchService::search("", &CONFIG.common.usage_org, StreamType::Logs, &req).await {
             Ok(res) => {
                 if !res.hits.is_empty() {
                     match report_stats(res.hits, &org_id, last_query_ts, current_ts).await {
@@ -112,13 +124,13 @@ pub async fn publish_stats() -> Result<(), anyhow::Error> {
         }
     }
     // set cache expiry
-    /*  let expiry_ts = chrono::Utc::now()
-        + chrono::Duration::minutes(
-            (CONFIG.limit.calculate_stats_interval - 2)
-                .try_into()
-                .unwrap(),
-        );
-    set_cache_expiry(expiry_ts.timestamp_micros()).await; */
+    //  let expiry_ts = chrono::Utc::now()
+    // + chrono::Duration::minutes(
+    // (CONFIG.limit.calculate_stats_interval - 2)
+    // .try_into()
+    // .unwrap(),
+    // );
+    // set_cache_expiry(expiry_ts.timestamp_micros()).await;
     Ok(())
 }
 
@@ -127,9 +139,13 @@ async fn get_last_stats(
     stats_ts: i64,
 ) -> std::result::Result<Vec<json::Value>, anyhow::Error> {
     let sql = if CONFIG.common.usage_report_compressed_size {
-        format!("SELECT records ,original_size, org_id , stream_type ,stream_name ,min_ts , max_ts, compressed_size FROM \"{STATS_STREAM}\" where _timestamp ={stats_ts} and org_id = \'{org_id}\'")
+        format!(
+            "SELECT records ,original_size, org_id , stream_type ,stream_name ,min_ts , max_ts, compressed_size FROM \"{STATS_STREAM}\" where _timestamp ={stats_ts} and org_id = \'{org_id}\'"
+        )
     } else {
-        format!("SELECT records ,original_size, org_id , stream_type ,stream_name ,min_ts , max_ts FROM \"{STATS_STREAM}\" where _timestamp ={stats_ts} and org_id = \'{org_id}\'")
+        format!(
+            "SELECT records ,original_size, org_id , stream_type ,stream_name ,min_ts , max_ts FROM \"{STATS_STREAM}\" where _timestamp ={stats_ts} and org_id = \'{org_id}\'"
+        )
     };
 
     let query = meta::search::Query {
@@ -145,7 +161,7 @@ async fn get_last_stats(
         encoding: meta::search::RequestEncoding::Empty,
         timeout: 0,
     };
-    match SearchService::search(&CONFIG.common.usage_org, meta::StreamType::Logs, &req).await {
+    match SearchService::search("", &CONFIG.common.usage_org, StreamType::Logs, &req).await {
         Ok(res) => Ok(res.hits),
         Err(err) => match &err {
             crate::common::infra::errors::Error::ErrorCode(
@@ -162,7 +178,7 @@ async fn report_stats(
     last_query_ts: i64,
     curr_ts: i64,
 ) -> Result<(), anyhow::Error> {
-    //get existing stats
+    // get existing stats
     let existing_stats = get_last_stats(org_id, last_query_ts).await?;
 
     let mut report_data_map = to_map(report_data);
@@ -233,7 +249,7 @@ async fn report_stats(
 }
 
 async fn get_last_stats_offset(org_id: &str) -> (i64, String) {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/stats/last_updated/org/{org_id}");
     let value = match db.get(&key).await {
         Ok(ret) => String::from_utf8_lossy(&ret).to_string(),
@@ -254,7 +270,7 @@ pub async fn set_last_stats_offset(
     offset: i64,
     node: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let val = if let Some(node) = node {
         format!("{};{}", offset, node)
     } else {
@@ -266,7 +282,7 @@ pub async fn set_last_stats_offset(
 }
 
 pub async fn _set_cache_expiry(offset: i64) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/stats/cache_expiry".to_string();
     db.put(&key, offset.to_string().into(), infra_db::NO_NEED_WATCH)
         .await?;

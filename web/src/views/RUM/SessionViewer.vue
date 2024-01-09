@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -35,11 +36,11 @@
           style="font-size: 20px"
         >
           <q-icon name="language" size="20px" class="q-pr-xs" />
-          {{ getSessionDetails.ip }}
+          {{ sessionDetails.ip }}
         </div>
         <div class="text-caption ellipsis q-pr-xs row items-center q-mr-md">
           <q-icon name="calendar_month" size="16px" class="q-pr-xs" />
-          {{ getSessionDetails.date }}
+          {{ sessionDetails.date }}
         </div>
       </div>
       <q-separator class="full-width q-mt-sm" />
@@ -57,7 +58,7 @@
         <q-separator vertical class="full-height" />
         <PlayerEventsSidebar
           :events="segmentEvents"
-          :sessionDetails="getSessionDetails"
+          :sessionDetails="sessionDetails"
           @event-emitted="handleSidebarEvent"
         />
       </div>
@@ -109,6 +110,17 @@ const session_end_time = 1692884769270;
 
 const getSessionId = computed(() => router.currentRoute.value.params.id);
 
+const sessionDetails = ref({
+  date: "",
+  browser: "",
+  os: "",
+  ip: "",
+  user_email: "",
+  city: "",
+  country: "",
+  id: "",
+});
+
 onBeforeMount(async () => {
   sessionId.value = router.currentRoute.value.params.id as string;
   await getSession();
@@ -116,8 +128,8 @@ onBeforeMount(async () => {
   getSessionEvents();
 });
 
-const getSessionDetails = computed(() => {
-  return {
+const getSessionDetails = () => {
+  sessionDetails.value = {
     date: getFormattedDate(sessionState.data.selectedSession?.start_time),
     browser: sessionState.data.selectedSession?.browser,
     os: sessionState.data.selectedSession?.os,
@@ -127,17 +139,23 @@ const getSessionDetails = computed(() => {
     country: sessionState.data.selectedSession?.country || "Unknown",
     id: sessionState.data.selectedSession?.session_id,
   };
-});
+};
 
 const getSession = () => {
   return new Promise((resolve) => {
     let geoFields = "";
 
-    if (performanceState.data.streams["_sessionreplay"]["geo_info_country"]) {
+    if (
+      performanceState.data.streams["_sessionreplay"]["schema"][
+        "geo_info_country"
+      ]
+    ) {
       geoFields += "min(geo_info_city) as city,";
     }
 
-    if (performanceState.data.streams["_sessionreplay"]["geo_info_city"]) {
+    if (
+      performanceState.data.streams["_sessionreplay"]["schema"]["geo_info_city"]
+    ) {
       geoFields += "min(geo_info_country) as country,";
     }
 
@@ -165,12 +183,16 @@ const getSession = () => {
         if (res.data.hits.length === 0) {
           return;
         }
+
         sessionState.data.selectedSession = {
+          ...sessionState.data.selectedSession,
           ...res.data.hits[0],
           type: res.data.hits[0].source,
           time_spent: res.data.hits[0].end_time - res.data.hits[0].start_time,
           timestamp: res.data.hits[0].zo_sql_timestamp,
         };
+
+        getSessionDetails();
       })
       .finally(() => {
         isLoading.value.pop();
@@ -259,6 +281,13 @@ const getSessionEvents = () => {
     })
     .then((res) => {
       const events = ["action", "view", "error"];
+
+      if (
+        !sessionDetails.value.user_email ||
+        sessionDetails.value.user_email === "Unknown User"
+      )
+        sessionDetails.value.user_email = res.data.hits[0].usr_email;
+
       segmentEvents.value = res.data.hits.filter((hit: any) => {
         return (
           !!events.includes(hit.type) &&

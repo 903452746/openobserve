@@ -1,48 +1,22 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="tabContent q-ma-md">
-    <div class="tabContent__head">
-      <div class="copy_action">
-        <q-btn
-          data-test="vector-copy-btn"
-          flat
-          round
-          size="0.5rem"
-          padding="0.6rem"
-          color="grey"
-          icon="content_copy"
-          @click="$emit('copy-to-clipboard-fn', vectorContent)"
-        />
-      </div>
-    </div>
-    <pre ref="vectorContent" data-test="vector-content-text">
-[sinks.zinc]
-type = "http"
-inputs = [ source or transform id ]
-uri = "{{ endpoint.url }}/api/{{ currOrgIdentifier }}/default/_json"
-method = "post"
-auth.strategy = "basic"
-auth.user = "{{ currUserEmail }}"
-auth.password = "{{ store.state.organizationData.organizationPasscode }}"
-compression = "gzip"
-encoding.codec = "json"
-encoding.timestamp_format = "rfc3339"
-healthcheck.enabled = false</pre
-    >
+  <div class="q-ma-md">
+    <CopyContent class="q-mt-sm" :content="content" />
   </div>
 </template>
 
@@ -51,7 +25,7 @@ import { defineComponent, ref, type Ref } from "vue";
 import config from "../../../aws-exports";
 import { useStore } from "vuex";
 import { getImageURL } from "../../../utils/zincutils";
-import type { Endpoint } from "@/ts/interfaces";
+import CopyContent from "@/components/CopyContent.vue";
 export default defineComponent({
   name: "vector-mechanism",
   props: {
@@ -62,6 +36,7 @@ export default defineComponent({
       type: String,
     },
   },
+  components: { CopyContent },
   setup() {
     const store = useStore();
     const endpoint: any = ref({
@@ -79,12 +54,23 @@ export default defineComponent({
       protocol: url.protocol.replace(":", ""),
       tls: url.protocol === "https:" ? "On" : "Off",
     };
-    const vectorContent = ref(null);
+    const content = `[sinks.zinc]
+type = "http"
+inputs = [ source or transform id ]
+uri = "${endpoint.value.url}/api/${store.state.selectedOrganization.identifier}/default/_json"
+method = "post"
+auth.strategy = "basic"
+auth.user = "[EMAIL]"
+auth.password = "[PASSCODE]"
+compression = "gzip"
+encoding.codec = "json"
+encoding.timestamp_format = "rfc3339"
+healthcheck.enabled = false`;
     return {
       store,
       config,
       endpoint,
-      vectorContent,
+      content,
       getImageURL,
     };
   },

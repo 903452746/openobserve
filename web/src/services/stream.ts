@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
-
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-
-//      http:www.apache.org/licenses/LICENSE-2.0
-
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import http from "./http";
 
@@ -70,6 +71,27 @@ const stream = {
     if (query_context) url = url + `&sql=${query_context}`;
     if (query_fn?.trim()) url = url + `&query_fn=${query_fn}`;
     if (type) url += "&type=" + type;
+    return http().get(url);
+  },
+
+  // Thia API is just used for service_name and operation_name fields
+  tracesFieldValues: ({
+    org_identifier,
+    stream_name,
+    fields,
+    size,
+    start_time,
+    end_time,
+    filter,
+    type,
+    keyword,
+  }: any) => {
+    const fieldsString = fields.join(",");
+    let url = `/api/${org_identifier}/${stream_name}/_values?fields=${fieldsString}&size=${size}&start_time=${start_time}&end_time=${end_time}`;
+    if (filter) url = url + `&filter=${filter}`;
+    if (type) url += "&type=" + type;
+    if (keyword) url += "&keyword=" + keyword;
+
     return http().get(url);
   },
 

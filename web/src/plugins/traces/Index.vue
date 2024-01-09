@@ -1,30 +1,32 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <!-- eslint-disable vue/attribute-hyphenation -->
 <!-- eslint-disable vue/v-on-event-hyphenation -->
 <template>
-  <q-page class="tracePage" id="tracePage">
+  <q-page class="tracePage" id="tracePage" style="min-height: auto">
     <div id="tracesSecondLevel">
       <search-bar
         data-test="logs-search-bar"
         ref="searchBarRef"
         :fieldValues="fieldValues"
-        :key="searchObj.data.stream.streamLists.length"
+        :isLoading="searchObj.loading"
         @searchdata="searchData"
         @onChangeTimezone="refreshTimezone"
+        @shareLink="copyTracesUrl"
       />
       <div
         id="tracesThirdLevel"
@@ -40,6 +42,7 @@
         >
           <template #before v-if="searchObj.meta.showFields">
             <index-list
+              ref="indexListRef"
               data-test="logs-search-index-list"
               :key="searchObj.data.stream.streamLists"
             />
@@ -138,10 +141,10 @@
             >
               <search-result
                 ref="searchResultRef"
-                @update:datetime="searchData"
+                @update:datetime="setHistogramDate"
                 @update:scroll="getMoreData"
-                @search:timeboxed="searchAroundData"
                 @get:traceDetails="getTraceDetails"
+                @shareLink="copyTracesUrl"
               />
             </div>
           </template>
@@ -159,9 +162,9 @@ import {
   onDeactivated,
   onActivated,
   onBeforeMount,
-  watch,
+  nextTick,
 } from "vue";
-import { useQuasar, date } from "quasar";
+import { useQuasar, date, copyToClipboard } from "quasar";
 import { useStore } from "vuex";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
@@ -170,7 +173,6 @@ import SearchBar from "./SearchBar.vue";
 import IndexList from "./IndexList.vue";
 import SearchResult from "./SearchResult.vue";
 import useTraces from "@/composables/useTraces";
-import { deepKeys, byString } from "@/utils/json";
 import { Parser } from "node-sql-parser/build/mysql";
 
 import streamService from "@/services/stream";
@@ -178,26 +180,17 @@ import searchService from "@/services/search";
 import TransformService from "@/services/jstransform";
 import {
   b64EncodeUnicode,
-  useLocalTraceFilterField,
   verifyOrganizationStatus,
   b64DecodeUnicode,
   formatTimeWithSuffix,
   timestampToTimezoneDate,
-  histogramDateTimezone,
 } from "@/utils/zincutils";
 import segment from "@/services/segment_analytics";
 import config from "@/aws-exports";
 import { logsErrorMessage } from "@/utils/common";
-import { number } from "@intlify/core-base";
-import { stringLiteral } from "@babel/types";
 import useNotifications from "@/composables/useNotifications";
 import { getConsumableRelativeTime } from "@/utils/date";
 import { cloneDeep } from "lodash-es";
-import {
-  getDurationObjectFromParams,
-  getQueryParamsForDuration,
-} from "@/utils/date";
-import useSqlSuggestions from "@/composables/useSuggestions";
 
 export default defineComponent({
   name: "PageSearch",
@@ -207,6 +200,14 @@ export default defineComponent({
     SearchResult,
   },
   methods: {
+    async setHistogramDate(date: any) {
+      this.searchBarRef.dateTimeRef.setCustomDate("absolute", date);
+      await nextTick();
+      await nextTick();
+      await nextTick();
+
+      this.searchData();
+    },
     searchData() {
       if (
         !(
@@ -219,6 +220,7 @@ export default defineComponent({
       if (this.searchObj.loading == false) {
         this.searchObj.loading = true;
         this.searchObj.runQuery = true;
+        this.indexListRef.filterExpandedFieldValues();
       }
 
       if (config.isCloud == "true") {
@@ -236,17 +238,7 @@ export default defineComponent({
       }
     },
     getMoreData() {
-      if (
-        this.searchObj.meta.refreshInterval == 0 &&
-        this.searchObj.data.queryResults.total >
-          this.searchObj.data.queryResults.from &&
-        this.searchObj.data.queryResults.total >
-          this.searchObj.data.queryResults.size &&
-        this.searchObj.data.queryResults.total >
-          this.searchObj.data.queryResults.size +
-            this.searchObj.data.queryResults.from
-      ) {
-        this.searchObj.loading = true;
+      if (this.searchObj.meta.refreshInterval == 0) {
         this.getQueryData();
 
         if (config.isCloud == "true") {
@@ -267,52 +259,18 @@ export default defineComponent({
     const $q = useQuasar();
     const { t } = useI18n();
     const { searchObj, resetSearchObj } = useTraces();
-    let dismiss = null;
     let refreshIntervalID = 0;
     const searchResultRef = ref(null);
     const searchBarRef = ref(null);
     const parser = new Parser();
     const fieldValues = ref({});
     const { showErrorNotification } = useNotifications();
+    const serviceColorIndex = ref(0);
+    const colors = ref(["#b7885e", "#1ab8be", "#ffcb99", "#f89570", "#839ae2"]);
+    const indexListRef = ref(null);
 
     searchObj.organizationIdetifier =
       store.state.selectedOrganization.identifier;
-
-    function ErrorException(message) {
-      searchObj.loading = false;
-      // searchObj.data.errorMsg = message;
-      $q.notify({
-        type: "negative",
-        message: message,
-        timeout: 10000,
-        actions: [
-          {
-            icon: "cancel",
-            color: "white",
-            handler: () => {
-              /* ... */
-            },
-          },
-        ],
-      });
-    }
-
-    function Notify() {
-      return $q.notify({
-        type: "positive",
-        message: "Waiting for response...",
-        timeout: 10000,
-        actions: [
-          {
-            icon: "cancel",
-            color: "white",
-            handler: () => {
-              /* ... */
-            },
-          },
-        ],
-      });
-    }
 
     function getQueryTransform() {
       try {
@@ -378,6 +336,16 @@ export default defineComponent({
                 data: [],
               };
             }
+
+            extractFields();
+
+            if (
+              searchObj.data.editorValue &&
+              searchObj.data.stream.selectedStreamFields.length
+            )
+              nextTick(() => {
+                restoreFilters(searchObj.data.editorValue);
+              });
           })
           .catch((e) => {
             searchObj.loading = false;
@@ -513,7 +481,7 @@ export default defineComponent({
     const getDefaultRequest = () => {
       return {
         query: {
-          sql: `select min(${store.state.zoConfig.timestamp_column}) as zo_sql_timestamp, min(start_time) as start_time, service_name, operation_name, count(span_id) as spans, max(duration) as duration, trace_id [QUERY_FUNCTIONS] from "[INDEX_NAME]" [WHERE_CLAUSE] group by trace_id, service_name, operation_name order by zo_sql_timestamp DESC`,
+          sql: `select min(${store.state.zoConfig.timestamp_column}) as zo_sql_timestamp, min(start_time/1000) as trace_start_time, max(end_time/1000) as trace_end_time, min(service_name) as service_name, min(operation_name) as operation_name, count(trace_id) as spans, SUM(CASE WHEN span_status='ERROR' THEN 1 ELSE 0 END) as errors, max(duration) as duration, trace_id [QUERY_FUNCTIONS] from "[INDEX_NAME]" [WHERE_CLAUSE] group by trace_id order by zo_sql_timestamp DESC`,
           start_time: (new Date().getTime() - 900000) * 1000,
           end_time: new Date().getTime() * 1000,
           from: 0,
@@ -521,58 +489,6 @@ export default defineComponent({
         },
         encoding: "base64",
       };
-    };
-
-    const getISOTimestamp = (date: any) => {
-      return new Date(date.toISOString()).getTime() * 1000;
-    };
-
-    // Function to return {chartInterval : "1 day", chartKeyFormat : "YYYY-MM-DD"}
-    const getChartSettings = (timestamps: {
-      start_time: number | string;
-      end_time: number | string;
-    }) => {
-      if (
-        timestamps.start_time != "Invalid Date" &&
-        timestamps.end_time != "Invalid Date"
-      ) {
-        const chartSettings = {
-          chartInterval: "10 second",
-          chartKeyFormat: "HH:mm:ss",
-        };
-
-        if (timestamps.end_time - timestamps.start_time >= 1000 * 60 * 30) {
-          chartSettings.chartInterval = "15 second";
-          chartSettings.chartKeyFormat = "HH:mm:ss";
-        }
-        if (timestamps.end_time - timestamps.start_time >= 1000 * 60 * 60) {
-          chartSettings.chartInterval = "30 second";
-          chartSettings.chartKeyFormat = "HH:mm:ss";
-        }
-        if (timestamps.end_time - timestamps.start_time >= 1000 * 3600 * 2) {
-          chartSettings.chartInterval = "1 minute";
-          chartSettings.chartKeyFormat = "MM-DD HH:mm";
-        }
-        if (timestamps.end_time - timestamps.start_time >= 1000 * 3600 * 6) {
-          chartSettings.chartInterval = "5 minute";
-          chartSettings.chartKeyFormat = "MM-DD HH:mm";
-        }
-        if (timestamps.end_time - timestamps.start_time >= 1000 * 3600 * 24) {
-          chartSettings.chartInterval = "30 minute";
-          chartSettings.chartKeyFormat = "MM-DD HH:mm";
-        }
-        if (timestamps.end_time - timestamps.start_time >= 1000 * 86400 * 7) {
-          chartSettings.chartInterval = "1 hour";
-          chartSettings.chartKeyFormat = "MM-DD HH:mm";
-        }
-        if (timestamps.end_time - timestamps.start_time >= 1000 * 86400 * 30) {
-          chartSettings.chartInterval = "1 day";
-          chartSettings.chartKeyFormat = "YYYY-MM-DD";
-        }
-        return chartSettings;
-      } else {
-        return false;
-      }
     };
 
     function buildSearch() {
@@ -642,20 +558,89 @@ export default defineComponent({
 
         req.query.sql = b64EncodeUnicode(req.query.sql);
 
-        updateUrlQueryParams();
+        const queryParams = getUrlQueryParams();
+        console.log(queryParams);
+        router.push({ query: queryParams });
         return req;
       } catch (e) {
-        console.log(e);
         searchObj.loading = false;
         showErrorNotification("Invalid SQL Syntax");
       }
     }
 
-    const getTraceDetails = (trace: string) => {
+    const openTraceDetails = () => {
+      searchObj.loading = true;
+      const queryReq = buildSearch();
+
+      let filter = searchObj.data.editorValue;
+
+      if (filter?.length)
+        filter += ` and trace_id='${router.currentRoute.value.query.trace_id}'`;
+      else filter += `trace_id='${router.currentRoute.value.query.trace_id}'`;
+
+      searchService
+        .get_traces({
+          org_identifier: searchObj.organizationIdetifier,
+          start_time: queryReq.query.start_time,
+          end_time: queryReq.query.end_time,
+          filter: filter || "",
+          size: 1,
+          from: 0,
+        })
+        .then(async (res) => {
+          const trace = getTracesMetaData(res.data.hits)[0];
+          if (!trace) {
+            showTraceDetailsError();
+            return;
+          }
+          searchObj.data.traceDetails.selectedTrace = trace;
+          getTraceDetails();
+        })
+        .catch(() => {
+          showTraceDetailsError();
+        })
+        .finally(() => {
+          searchObj.loading = false;
+        });
+    };
+
+    const showTraceDetailsError = () => {
+      showErrorNotification(
+        `Trace ${router.currentRoute.value.query.trace_id} not found`
+      );
+      const query = cloneDeep(router.currentRoute.value.query);
+      delete query.trace_id;
+      router.push({
+        name: "traces",
+        query: {
+          ...query,
+        },
+      });
+      return;
+    };
+
+    const buildTraceSearchQuery = (trace: string) => {
+      const req = getDefaultRequest();
+      req.query.from = 0;
+      req.query.size = 1000;
+      req.query.start_time = trace.trace_start_time - 30000000;
+      req.query.end_time = trace.trace_end_time + 30000000;
+
+      req.query.sql = b64EncodeUnicode(
+        `SELECT * FROM ${searchObj.data.stream.selectedStream.value} WHERE trace_id = '${trace.trace_id}' ORDER BY start_time`
+      );
+
+      return req;
+    };
+
+    const getTraceDetails = () => {
       searchObj.meta.showTraceDetails = true;
       searchObj.data.traceDetails.loading = true;
       searchObj.data.traceDetails.spanList = [];
-      const req = buildTraceSearchQuery(trace);
+      const req = buildTraceSearchQuery(
+        searchObj.data.traceDetails.selectedTrace
+      );
+
       delete req.aggs;
 
       searchService
@@ -670,20 +655,6 @@ export default defineComponent({
         .finally(() => {
           searchObj.data.traceDetails.loading = false;
         });
-    };
-
-    const buildTraceSearchQuery = (trace: string) => {
-      const req = getDefaultRequest();
-      req.query.from = 0;
-      req.query.size = 1000;
-      req.query.start_time = trace.zo_sql_timestamp - 30000000;
-      req.query.end_time = trace.zo_sql_timestamp + 30000000;
-
-      req.query.sql = b64EncodeUnicode(
-        `SELECT * FROM ${searchObj.data.stream.selectedStream.value} WHERE trace_id = '${trace.trace_id}' ORDER BY start_time`
-      );
-
-      return req;
     };
 
     const updateFieldValues = (data) => {
@@ -706,21 +677,14 @@ export default defineComponent({
       });
     };
 
-    function getQueryData() {
+    async function getQueryData() {
       try {
         if (searchObj.data.stream.selectedStream.value == "") {
           return false;
         }
-
-        searchObj.data.searchAround.indexTimestamp = 0;
-        searchObj.data.searchAround.size = 0;
-        if (searchObj.data.searchAround.histogramHide) {
-          searchObj.data.searchAround.histogramHide = false;
-          searchObj.meta.showHistogram = true;
-        }
-
         searchObj.data.errorMsg = "";
         if (searchObj.data.resultGrid.currentPage == 0) {
+          searchObj.loading = true;
           // searchObj.data.stream.selectedFields = [];
           // searchObj.data.stream.addToFilter = "";
           searchObj.data.queryResults = {};
@@ -734,7 +698,14 @@ export default defineComponent({
           // searchObj.data.editorValue = "";
         }
         // dismiss = Notify();
-        const queryReq = buildSearch();
+        let queryReq;
+
+        if (!searchObj.data.resultGrid.currentPage) {
+          queryReq = buildSearch();
+          searchObj.data.queryPayload = queryReq;
+        } else {
+          queryReq = searchObj.data.queryPayload;
+        }
 
         if (queryReq == null) {
           // dismiss();
@@ -742,33 +713,75 @@ export default defineComponent({
         }
 
         searchObj.data.errorCode = 0;
+        queryReq.query.from =
+          searchObj.data.resultGrid.currentPage *
+          searchObj.meta.resultGrid.rowsPerPage;
+
+        let dismiss = null;
+        if (searchObj.data.resultGrid.currentPage) {
+          dismiss = $q.notify({
+            type: "positive",
+            message: "Fetching more traces...",
+            actions: [
+              {
+                icon: "cancel",
+                color: "white",
+                handler: () => {
+                  /* ... */
+                },
+              },
+            ],
+          });
+        }
+
+        const durationFilter = indexListRef.value.duration.input;
+
+        let filter = searchObj.data.editorValue.trim();
+
+        let duration = "";
+        if (durationFilter.max) {
+          duration += ` duration >= ${
+            durationFilter.min * 1000
+          } AND duration <= ${durationFilter.max * 1000}`;
+
+          filter = filter
+            ? searchObj.data.editorValue + " AND" + duration
+            : duration;
+        }
+
         searchService
-          .search({
+          .get_traces({
             org_identifier: searchObj.organizationIdetifier,
-            query: queryReq,
-            page_type: "traces",
+            start_time: queryReq.query.start_time,
+            end_time: queryReq.query.end_time,
+            filter: filter || "",
+            size: queryReq.query.size,
+            from: queryReq.query.from,
           })
-          .then((res) => {
+          .then(async (res) => {
             searchObj.loading = false;
+            const formattedHits = getTracesMetaData(res.data.hits);
             if (res.data.from > 0) {
               searchObj.data.queryResults.from = res.data.from;
-              searchObj.data.queryResults.scan_size += res.data.scan_size;
-              searchObj.data.queryResults.took += res.data.took;
-              searchObj.data.queryResults.hits.push(...res.data.hits);
-              // searchObj.data.queryResults.aggs.histogram.push(
-              //   ...res.data.aggs.histogram
-              // );
+              searchObj.data.queryResults.hits.push(...formattedHits);
             } else {
-              searchObj.data.queryResults = res.data;
+              searchObj.data.queryResults = {
+                ...res.data,
+                hits: formattedHits,
+              };
             }
 
+            updateDurationFilter();
+
             updateFieldValues(res.data.hits);
-            //extract fields from query response
-            extractFields();
 
             generateHistogramData();
+
             //update grid columns
             updateGridColumns();
+
+            if (router.currentRoute.value.query.trace_id) openTraceDetails();
+
             // dismiss();
           })
           .catch((err) => {
@@ -790,6 +803,9 @@ export default defineComponent({
             //   message: searchObj.data.errorMsg,
             //   color: "negative",
             // });
+          })
+          .finally(() => {
+            if (dismiss) dismiss();
           });
       } catch (e) {
         console.log(e?.message);
@@ -798,35 +814,61 @@ export default defineComponent({
       }
     }
 
+    const getTracesMetaData = (traces) => {
+      if (!traces.length) return [];
+
+      return traces.map((trace) => {
+        const _trace = {
+          trace_id: trace.trace_id,
+          trace_start_time: Math.round(trace.start_time / 1000),
+          trace_end_time: Math.round(trace.end_time / 1000),
+          service_name: trace.first_event.service_name,
+          operation_name: trace.first_event.operation_name,
+          spans: trace.spans[0],
+          errors: trace.spans[1],
+          duration: trace.duration,
+          services: {},
+          zo_sql_timestamp: new Date(trace.start_time / 1000).getTime(),
+        };
+        trace.service_name.forEach((service) => {
+          if (!searchObj.meta.serviceColors[service.service_name]) {
+            if (serviceColorIndex.value >= colors.value.length)
+              generateNewColor();
+
+            searchObj.meta.serviceColors[service.service_name] =
+              colors.value[serviceColorIndex.value];
+
+            serviceColorIndex.value++;
+          }
+          _trace.services[service.service_name] = service.count;
+        });
+        return _trace;
+      });
+    };
+
+    function generateNewColor() {
+      // Generate a color in HSL format
+      const hue = colors.value.length * (360 / 50);
+      const lightness = 50 + (colors.value.length % 2) * 15;
+      colors.value.push(`hsl(${hue}, 100%, ${lightness}%)`);
+      return colors;
+    }
+
     function extractFields() {
       try {
         searchObj.data.stream.selectedStreamFields = [];
         if (searchObj.data.streamResults.list.length > 0) {
-          const queryResult = [];
-          const tempFieldsName = [];
+          const schema = [];
           const ignoreFields = [store.state.zoConfig.timestamp_column];
           let ftsKeys;
 
           searchObj.data.streamResults.list.forEach((stream: any) => {
             if (searchObj.data.stream.selectedStream.value == stream.name) {
-              queryResult.push(...stream.schema);
+              schema.push(...stream.schema);
               ftsKeys = new Set([...stream.settings.full_text_search_keys]);
             }
           });
 
-          queryResult.forEach((field: any) => {
-            tempFieldsName.push(field.name);
-          });
-
-          if (searchObj.data.queryResults.hits.length > 0) {
-            let firstRecord = searchObj.data.queryResults.hits[0];
-
-            Object.keys(firstRecord).forEach((key) => {
-              if (!tempFieldsName.includes(key)) {
-                queryResult.push({ name: key, type: "Utf8" });
-              }
-            });
-          }
           const idFields = {
             trace_id: 1,
             span_id: 1,
@@ -834,13 +876,16 @@ export default defineComponent({
             reference_parent_trace_id: 1,
             start_time: 1,
           };
+
           const importantFields = {
+            duration: 1,
+            service_name: 1,
+            operation_name: 1,
+            span_status: 1,
             trace_id: 1,
             span_id: 1,
             reference_parent_span_id: 1,
             reference_parent_trace_id: 1,
-            service_name: 1,
-            operation_name: 1,
             start_time: 1,
           };
 
@@ -857,7 +902,7 @@ export default defineComponent({
             }
           });
 
-          queryResult.forEach((row: any) => {
+          schema.forEach((row: any) => {
             // let keys = deepKeys(row);
             // for (let i in row) {
             if (
@@ -877,7 +922,7 @@ export default defineComponent({
         }
       } catch (e) {
         searchObj.loading = false;
-        console.log("Error while extracting fields");
+        console.log("Error while extracting fields", e);
       }
     }
 
@@ -893,15 +938,15 @@ export default defineComponent({
           name: "@timestamp",
           field: (row: any) =>
             timestampToTimezoneDate(
-              row["start_time"] / 1000000,
+              row["trace_start_time"],
               store.state.timezone,
-              "MMM dd, yyyy HH:mm:ss.SSS Z"
+              "yyyy-MM-dd HH:mm:ss.SSS"
             ),
           prop: (row: any) =>
             timestampToTimezoneDate(
-              row["start_time"] / 1000000,
+              row["trace_start_time"],
               store.state.timezone,
-              "MMM dd, yyyy HH:mm:ss.SSS Z"
+              "yyyy-MM-dd HH:mm:ss.SSS"
             ),
           label: "Start Time",
           align: "left",
@@ -1036,7 +1081,9 @@ export default defineComponent({
 
     function loadPageData() {
       searchObj.loading = true;
+
       searchObj.data.resultGrid.currentPage = 0;
+
       resetSearchObj();
       searchObj.organizationIdetifier =
         store.state.selectedOrganization.identifier;
@@ -1122,87 +1169,6 @@ export default defineComponent({
       }
     };
 
-    const searchAroundData = (obj: any) => {
-      try {
-        dismiss = Notify();
-        searchObj.data.errorCode = 0;
-        searchService
-          .search_around({
-            org_identifier: searchObj.organizationIdetifier,
-            index: searchObj.data.stream.selectedStream.value,
-            key: obj.key,
-            size: obj.size,
-          })
-          .then((res) => {
-            searchObj.loading = false;
-            if (res.data.from > 0) {
-              searchObj.data.queryResults.from = res.data.from;
-              searchObj.data.queryResults.scan_size += res.data.scan_size;
-              searchObj.data.queryResults.took += res.data.took;
-              searchObj.data.queryResults.hits.push(...res.data.hits);
-            } else {
-              searchObj.data.queryResults = res.data;
-            }
-            //extract fields from query response
-            extractFields();
-            generateHistogramData();
-            //update grid columns
-            updateGridColumns();
-
-            if (searchObj.meta.showHistogram) {
-              searchObj.meta.showHistogram = false;
-              searchObj.data.searchAround.histogramHide = true;
-            }
-            segment.track("Button Click", {
-              button: "Search Around Data",
-              user_org: store.state.selectedOrganization.identifier,
-              user_id: store.state.userInfo.email,
-              stream_name: searchObj.data.stream.selectedStream.value,
-              show_timestamp: obj.key,
-              show_size: obj.size,
-              show_histogram: searchObj.meta.showHistogram,
-              sqlMode: searchObj.meta.sqlMode,
-              showFields: searchObj.meta.showFields,
-              page: "Search Logs - Search around data",
-            });
-
-            const visibleIndex =
-              obj.size > 30 ? obj.size / 2 - 12 : obj.size / 2;
-            setTimeout(() => {
-              searchResultRef.value.searchTableRef.scrollTo(
-                visibleIndex,
-                "start-force"
-              );
-            }, 500);
-
-            dismiss();
-          })
-          .catch((err) => {
-            searchObj.loading = false;
-            dismiss();
-            if (err.response != undefined) {
-              searchObj.data.errorMsg = err.response.data.error;
-            } else {
-              searchObj.data.errorMsg = err.message;
-            }
-
-            const customMessage = logsErrorMessage(err.response.data.code);
-            searchObj.data.errorCode = err.response.data.code;
-            if (customMessage != "") {
-              searchObj.data.errorMsg = t(customMessage);
-            }
-
-            // $q.notify({
-            //   message: searchObj.data.errorMsg,
-            //   color: "negative",
-            // });
-          });
-      } catch (e) {
-        searchObj.loading = false;
-        showErrorNotification("Request failed.");
-      }
-    };
-
     function restoreUrlQueryParams() {
       const queryParams = router.currentRoute.value.query;
 
@@ -1223,13 +1189,55 @@ export default defineComponent({
       if (queryParams.query) {
         searchObj.data.editorValue = b64DecodeUnicode(queryParams.query);
       }
+
+      if (queryParams.filter_type) {
+        searchObj.meta.filterType = queryParams.filter_type;
+      }
     }
 
-    function updateUrlQueryParams() {
+    const copyTracesUrl = (customTimeRange = null) => {
+      const queryParams = getUrlQueryParams(true);
+
+      if (customTimeRange) {
+        queryParams.from = customTimeRange.from;
+        queryParams.to = customTimeRange.to;
+      }
+
+      const queryString = Object.entries(queryParams)
+        .map(
+          ([key, value]) =>
+            `${encodeURIComponent(key)}=${encodeURIComponent(value)}`
+        )
+        .join("&");
+
+      let shareURL = window.location.origin + window.location.pathname;
+
+      if (queryString != "") {
+        shareURL += "?" + queryString;
+      }
+
+      copyToClipboard(shareURL)
+        .then(() => {
+          $q.notify({
+            type: "positive",
+            message: "Link Copied Successfully!",
+            timeout: 5000,
+          });
+        })
+        .catch(() => {
+          $q.notify({
+            type: "negative",
+            message: "Error while copy link.",
+            timeout: 5000,
+          });
+        });
+    };
+
+    function getUrlQueryParams(getShareLink: false) {
       const date = searchObj.data.datetime;
       const query = {};
 
-      if (date.type == "relative") {
+      if (date.type == "relative" && !getShareLink) {
         query["period"] = date.relativeTimePeriod;
       } else {
         query["from"] = date.startTime;
@@ -1238,8 +1246,13 @@ export default defineComponent({
 
       query["query"] = b64EncodeUnicode(searchObj.data.editorValue);
 
+      query["filter_type"] = searchObj.meta.filterType;
+
       query["org_identifier"] = store.state.selectedOrganization.identifier;
-      router.push({ query });
+
+      query["trace_id"] = router.currentRoute.value.query.trace_id;
+
+      return query;
     }
 
     const onSplitterUpdate = () => {
@@ -1250,6 +1263,63 @@ export default defineComponent({
       updateGridColumns();
       generateHistogramData();
       searchResultRef.value.reDrawChart();
+    };
+
+    const restoreFiltersFromQuery = (node: any) => {
+      if (!node) return;
+      if (node.type === "binary_expr") {
+        if (node.left.column) {
+          let values = [];
+          if (node.operator === "IN") {
+            values = node.right.value.map(
+              (_value: { value: string }) => _value.value
+            );
+          }
+          searchObj.data.stream.fieldValues[node.left.column].selectedValues =
+            values;
+        }
+      }
+
+      // Recurse through AND/OR expressions
+      if (
+        node.type === "binary_expr" &&
+        (node.operator === "AND" || node.operator === "OR")
+      ) {
+        restoreFiltersFromQuery(node.left);
+        restoreFiltersFromQuery(node.right);
+      }
+    };
+
+    const restoreFilters = (query: string) => {
+      // const filters = searchObj.data.stream.filters;
+      const parser = new Parser();
+
+      const defaultQuery = "SELECT * FROM 'default' WHERE ";
+
+      const parsedQuery = parser.astify(defaultQuery + query);
+
+      restoreFiltersFromQuery(parsedQuery.where);
+    };
+
+    const updateDurationFilter = () => {
+      let min = 0;
+      let max = 0;
+
+      searchObj.data.queryResults.hits.forEach((result) => {
+        if (result.duration < min) min = result.duration;
+        if (result.duration > max) max = result.duration;
+      });
+
+      // Converting from nano to milli
+      min = Math.floor(min / 1000);
+
+      max = Math.ceil(max / 1000);
+
+      indexListRef.value.duration.slider.min = min;
+      indexListRef.value.duration.slider.max = max;
+
+      indexListRef.value.duration.input.min = min;
+      indexListRef.value.duration.input.max = max;
     };
 
     return {
@@ -1266,12 +1336,13 @@ export default defineComponent({
       getConsumableDateTime,
       runQueryFn,
       setQuery,
-      searchAroundData,
       getTraceDetails,
       verifyOrganizationStatus,
       fieldValues,
       onSplitterUpdate,
       refreshTimezone,
+      indexListRef,
+      copyTracesUrl,
     };
   },
   computed: {
@@ -1373,7 +1444,7 @@ export default defineComponent({
 
 <style lang="scss" scoped>
 .traces-search-result-container {
-  height: calc(100vh - 168px) !important;
+  height: calc(100vh - 140px) !important;
 }
 </style>
 <style lang="scss">

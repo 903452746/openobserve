@@ -1,16 +1,19 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::rc::Rc;
 
 use actix_cors::Cors;
 use actix_web::{
@@ -20,24 +23,42 @@ use actix_web::{
     web, HttpRequest, HttpResponse,
 };
 use actix_web_httpauth::middleware::HttpAuthentication;
+use actix_web_lab::middleware::from_fn;
+use config::CONFIG;
 use futures::FutureExt;
-use std::rc::Rc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use super::auth::{validator, validator_aws, validator_gcp, validator_proxy_url, validator_rum};
-use super::request::{
-    alerts::*, dashboards::folders::*, dashboards::*, enrichment_table, functions, kv, logs,
-    metrics, organization, prom, rum, search, status, stream, syslog, traces, users,
+use super::{
+    auth::validator::{validator_aws, validator_gcp, validator_proxy_url, validator_rum},
+    request::{
+        dashboards::{folders::*, *},
+        enrichment_table, functions, kv, logs, metrics, organization, prom, rum, search, status,
+        stream, syslog, traces, users, *,
+    },
 };
-use crate::common::{
-    infra::config::CONFIG,
-    meta::{middleware_data::RumExtraData, proxy::PathParamProxyURL},
-};
-use actix_web_lab::middleware::from_fn;
+use crate::common::meta::{middleware_data::RumExtraData, proxy::PathParamProxyURL};
+
 pub mod openapi;
 pub mod ui;
 
+#[cfg(feature = "enterprise")]
+fn get_cors() -> Rc<Cors> {
+    let cors = Cors::default()
+        .allowed_methods(vec!["HEAD", "GET", "POST", "PUT", "OPTIONS", "DELETE"])
+        .allowed_headers(vec![
+            header::AUTHORIZATION,
+            header::ACCEPT,
+            header::CONTENT_TYPE,
+        ])
+        .allow_any_origin()
+        .supports_credentials()
+        .max_age(3600);
+    Rc::new(cors)
+}
+
+/// #[cfg(not(feature = "enterprise"))]
+#[cfg(not(feature = "enterprise"))]
 fn get_cors() -> Rc<Cors> {
     let cors = Cors::default()
         .send_wildcard()
@@ -151,67 +172,40 @@ pub fn get_basic_routes(cfg: &mut web::ServiceConfig) {
     }
 }
 
+#[cfg(not(feature = "enterprise"))]
 pub fn get_config_routes(cfg: &mut web::ServiceConfig) {
     let cors = get_cors();
     cfg.service(web::scope("/config").wrap(cors).service(status::zo_config));
 }
 
+#[cfg(feature = "enterprise")]
+pub fn get_config_routes(cfg: &mut web::ServiceConfig) {
+    let cors = get_cors();
+    cfg.service(
+        web::scope("/config")
+            .wrap(cors)
+            .service(status::zo_config)
+            .service(status::callback)
+            .service(status::dex_login)
+            .service(status::refresh_token_with_dex),
+    );
+}
+
 pub fn get_service_routes(cfg: &mut web::ServiceConfig) {
     let cors = get_cors();
-    let auth = HttpAuthentication::basic(validator);
+
     cfg.service(
         web::scope("/api")
-            .wrap(auth)
-            .wrap(cors)
+            .wrap(HttpAuthentication::with_fn(
+                super::auth::validator::oo_validator,
+            ))
+            .wrap(cors.clone())
             .service(status::cache_status)
-            .service(logs::ingest::bulk)
-            .service(logs::ingest::multi)
-            .service(logs::ingest::json)
-            .service(metrics::ingest::json)
-            .service(search::search)
-            .service(search::around)
-            .service(search::values)
-            .service(stream::schema)
-            .service(stream::settings)
-            .service(stream::delete_fields)
-            .service(stream::delete)
-            .service(stream::list)
-            .service(functions::save_function)
-            .service(functions::list_functions)
-            .service(functions::delete_function)
-            .service(functions::update_function)
-            .service(functions::add_function_to_stream)
-            .service(functions::list_stream_functions)
-            .service(functions::delete_stream_function)
             .service(users::list)
             .service(users::save)
             .service(users::delete)
+            .service(users::update)
             .service(users::add_user_to_org)
-            .service(prom::remote_write)
-            .service(prom::query_get)
-            .service(prom::query_post)
-            .service(prom::query_range_get)
-            .service(prom::query_range_post)
-            .service(prom::metadata)
-            .service(prom::series_get)
-            .service(prom::series_post)
-            .service(prom::labels_get)
-            .service(prom::labels_post)
-            .service(prom::label_values)
-            .service(prom::format_query_get)
-            .service(prom::format_query_post)
-            .service(create_dashboard)
-            .service(update_dashboard)
-            .service(list_dashboards)
-            .service(get_dashboard)
-            .service(delete_dashboard)
-            .service(traces::traces_write)
-            .service(save_alert)
-            .service(get_alert)
-            .service(list_alerts)
-            .service(trigger_alert)
-            .service(list_stream_alerts)
-            .service(delete_alert)
             .service(organization::organizations)
             .service(organization::settings::get)
             .service(organization::settings::create)
@@ -228,15 +222,75 @@ pub fn get_service_routes(cfg: &mut web::ServiceConfig) {
             .service(organization::es::org_index_template_create)
             .service(organization::es::org_data_stream)
             .service(organization::es::org_data_stream_create)
-            .service(users::update)
-            .service(templates::save_template)
-            .service(templates::get_template)
-            .service(templates::delete_template)
-            .service(templates::list_templates)
-            .service(destinations::save_destination)
-            .service(destinations::get_destination)
-            .service(destinations::list_destinations)
-            .service(destinations::delete_destination)
+            .service(stream::schema)
+            .service(stream::settings)
+            .service(stream::delete_fields)
+            .service(stream::delete)
+            .service(stream::list)
+            .service(logs::ingest::bulk)
+            .service(logs::ingest::multi)
+            .service(logs::ingest::json)
+            .service(logs::ingest::otlp_logs_write)
+            .service(traces::traces_write)
+            .service(traces::otlp_traces_write)
+            .service(traces::get_latest_traces)
+            .service(metrics::ingest::json)
+            .service(metrics::ingest::otlp_metrics_write)
+            .service(prom::remote_write)
+            .service(prom::query_get)
+            .service(prom::query_post)
+            .service(prom::query_range_get)
+            .service(prom::query_range_post)
+            .service(prom::metadata)
+            .service(prom::series_get)
+            .service(prom::series_post)
+            .service(prom::labels_get)
+            .service(prom::labels_post)
+            .service(prom::label_values)
+            .service(prom::format_query_get)
+            .service(prom::format_query_post)
+            .service(enrichment_table::save_enrichment_table)
+            .service(search::search)
+            .service(search::around)
+            .service(search::values)
+            .service(search::saved_view::create_view)
+            .service(search::saved_view::update_view)
+            .service(search::saved_view::get_view)
+            .service(search::saved_view::get_views)
+            .service(search::saved_view::delete_view)
+            .service(functions::save_function)
+            .service(functions::list_functions)
+            .service(functions::delete_function)
+            .service(functions::update_function)
+            .service(functions::add_function_to_stream)
+            .service(functions::list_stream_functions)
+            .service(functions::delete_stream_function)
+            .service(dashboards::create_dashboard)
+            .service(dashboards::update_dashboard)
+            .service(dashboards::list_dashboards)
+            .service(dashboards::get_dashboard)
+            .service(dashboards::delete_dashboard)
+            .service(dashboards::move_dashboard)
+            .service(dashboards::folders::create_folder)
+            .service(dashboards::folders::list_folders)
+            .service(dashboards::folders::update_folder)
+            .service(dashboards::folders::get_folder)
+            .service(dashboards::folders::delete_folder)
+            .service(alerts::save_alert)
+            .service(alerts::get_alert)
+            .service(alerts::list_alerts)
+            .service(alerts::list_stream_alerts)
+            .service(alerts::delete_alert)
+            .service(alerts::enable_alert)
+            .service(alerts::trigger_alert)
+            .service(alerts::templates::save_template)
+            .service(alerts::templates::get_template)
+            .service(alerts::templates::delete_template)
+            .service(alerts::templates::list_templates)
+            .service(alerts::destinations::save_destination)
+            .service(alerts::destinations::get_destination)
+            .service(alerts::destinations::list_destinations)
+            .service(alerts::destinations::delete_destination)
             .service(kv::get)
             .service(kv::set)
             .service(kv::delete)
@@ -255,7 +309,12 @@ pub fn get_service_routes(cfg: &mut web::ServiceConfig) {
             .service(update_folder)
             .service(get_folder)
             .service(delete_folder)
-            .service(move_dashboard),
+            .service(move_dashboard)
+            .service(traces::get_latest_traces)
+            .service(logs::ingest::multi)
+            .service(logs::ingest::json)
+            .service(logs::ingest::handle_kinesis_request)
+            .service(logs::ingest::handle_gcp_request),
     );
 }
 
@@ -277,9 +336,9 @@ pub fn get_other_service_routes(cfg: &mut web::ServiceConfig) {
             .service(logs::ingest::handle_gcp_request),
     );
 
-    //NOTE: Here the order of middlewares matter. Once we consume the api-token in `rum_auth`,
-    //we drop it in the RumExtraData data.
-    //https://docs.rs/actix-web/latest/actix_web/middleware/index.html#ordering
+    // NOTE: Here the order of middlewares matter. Once we consume the api-token in
+    // `rum_auth`, we drop it in the RumExtraData data.
+    // https://docs.rs/actix-web/latest/actix_web/middleware/index.html#ordering
     let rum_auth = HttpAuthentication::with_fn(validator_rum);
     cfg.service(
         web::scope("/rum")

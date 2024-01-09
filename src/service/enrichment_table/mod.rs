@@ -1,61 +1,63 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{collections::HashMap, io::Error, sync::Arc};
 
 use actix_multipart::Multipart;
 use actix_web::{
     http::{self, StatusCode},
     HttpResponse,
 };
-use ahash::AHashMap;
 use bytes::Bytes;
 use chrono::Utc;
+use config::{meta::stream::StreamType, utils::schema_ext::SchemaExt, CONFIG};
 use datafusion::arrow::datatypes::Schema;
 use futures::{StreamExt, TryStreamExt};
-use std::io::Error;
 
-use crate::common::{
-    infra::{
-        cache::stats,
-        cluster,
-        config::{CONFIG, STREAM_SCHEMAS},
+use crate::{
+    common::{
+        infra::{cache::stats, cluster, config::STREAM_SCHEMAS},
+        meta::{
+            self,
+            http::HttpResponse as MetaHttpResponse,
+            stream::{PartitionTimeLevel, SchemaRecords},
+            usage::UsageType,
+        },
+        utils::json,
     },
-    meta::{
-        self,
-        http::HttpResponse as MetaHttpResponse,
-        stream::{PartitionTimeLevel, StreamParams},
-        usage::UsageType,
-        StreamType,
+    service::{
+        compact::retention,
+        db, format_stream_name,
+        ingestion::write_file,
+        schema::{check_for_schema, stream_schema_exists},
+        usage::report_request_usage_stats,
     },
-    utils::json,
 };
-use crate::service::{
-    compact::retention,
-    db, format_stream_name,
-    ingestion::{chk_schema_by_record, write_file},
-    schema::stream_schema_exists,
-    usage::report_request_usage_stats,
-};
+
+pub mod geoip;
 
 pub async fn save_enrichment_data(
     org_id: &str,
     table_name: &str,
     mut payload: Multipart,
     thread_id: usize,
+    append_data: bool,
 ) -> Result<HttpResponse, Error> {
     let start = std::time::Instant::now();
     let mut hour_key = String::new();
-    let mut buf: AHashMap<String, Vec<String>> = AHashMap::new();
+    let mut buf: HashMap<String, SchemaRecords> = HashMap::new();
     let stream_name = &format_stream_name(table_name);
 
     if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
@@ -82,7 +84,8 @@ pub async fn save_enrichment_data(
         );
     }
 
-    let mut stream_schema_map: AHashMap<String, Schema> = AHashMap::new();
+    let mut schema_evoluted = false;
+    let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let stream_schema = stream_schema_exists(
         org_id,
         stream_name,
@@ -91,12 +94,23 @@ pub async fn save_enrichment_data(
     )
     .await;
 
-    if stream_schema.has_fields {
+    if stream_schema.has_fields && !append_data {
         delete_enrichment_table(org_id, stream_name, StreamType::EnrichmentTables).await;
     }
 
     let mut records = vec![];
-    let timestamp = Utc::now().timestamp_micros();
+    let mut records_size = 0;
+    let timestamp = if !append_data {
+        Utc::now().timestamp_micros()
+    } else {
+        let schema = stream_schema_map.get(stream_name).unwrap();
+        schema
+            .metadata()
+            .get("created_at")
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+    };
     while let Ok(Some(mut field)) = payload.try_next().await {
         let content_disposition = field.content_disposition();
         let filename = content_disposition.get_filename();
@@ -126,26 +140,38 @@ pub async fn save_enrichment_data(
                     json::Value::Number(timestamp.into()),
                 );
                 let value_str = json::to_string(&json_record).unwrap();
-                chk_schema_by_record(
-                    &mut stream_schema_map,
-                    org_id,
-                    StreamType::EnrichmentTables,
-                    stream_name,
-                    timestamp,
-                    &value_str,
-                )
-                .await;
+
+                // check for schema evolution
+                if !schema_evoluted {
+                    let record_val = json::Value::Object(json_record.to_owned());
+                    if check_for_schema(
+                        org_id,
+                        stream_name,
+                        StreamType::EnrichmentTables,
+                        &mut stream_schema_map,
+                        &record_val,
+                        timestamp,
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        schema_evoluted = true;
+                    }
+                }
 
                 if records.is_empty() {
+                    let schema = stream_schema_map.get(stream_name).unwrap();
+                    let schema_key = schema.hash_key();
                     hour_key = super::ingestion::get_wal_time_key(
                         timestamp,
                         &vec![],
                         PartitionTimeLevel::Unset,
                         &json_record,
-                        None,
+                        Some(&schema_key),
                     );
                 }
-                records.push(value_str);
+                records.push(Arc::new(json::Value::Object(json_record)));
+                records_size += value_str.len();
             }
         }
     }
@@ -159,18 +185,32 @@ pub async fn save_enrichment_data(
         );
     }
 
-    buf.insert(hour_key.clone(), records.clone());
-    let mut stream_file_name = "".to_string();
-    let mut req_stats = write_file(
-        &buf,
-        thread_id,
-        &StreamParams::new(org_id, stream_name, StreamType::EnrichmentTables),
-        &mut stream_file_name,
-        None,
-    )
-    .await;
+    let schema = stream_schema_map
+        .get(stream_name)
+        .unwrap()
+        .clone()
+        .with_metadata(HashMap::new());
+    let schema_key = schema.hash_key();
+    buf.insert(
+        hour_key,
+        SchemaRecords {
+            schema_key,
+            schema: Arc::new(schema),
+            records,
+            records_size,
+        },
+    );
+
+    // write data to wal
+    let writer =
+        ingester::get_writer(thread_id, org_id, &StreamType::EnrichmentTables.to_string()).await;
+    let mut req_stats = write_file(&writer, stream_name, buf).await;
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
+    }
+
     req_stats.response_time = start.elapsed().as_secs_f64();
-    //metric + data usage
+    // metric + data usage
     report_request_usage_stats(
         req_stats,
         org_id,

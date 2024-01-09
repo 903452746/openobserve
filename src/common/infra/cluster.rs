@@ -1,106 +1,46 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::{net::IpAddr, sync::Arc};
+
+use config::{
+    cluster::LOCAL_NODE_ID,
+    meta::cluster::{Node, NodeStatus, Role},
+    RwHashMap, CONFIG, INSTANCE_ID,
+};
 use etcd_client::PutOptions;
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use std::{net::IpAddr, str::FromStr, sync::Arc};
 use uuid::Uuid;
 
-use crate::common::{
-    infra::{
-        config::{RwHashMap, CONFIG, INSTANCE_ID},
-        db::{etcd, Event},
-        errors::{Error, Result},
+use crate::{
+    common::{
+        infra::{
+            db::{etcd, Event},
+            errors::{Error, Result},
+        },
+        utils::json,
     },
-    utils::json,
+    service::db,
 };
-use crate::service::db;
 
 static mut LOCAL_NODE_KEY_LEASE_ID: i64 = 0;
 static mut LOCAL_NODE_STATUS: NodeStatus = NodeStatus::Prepare;
 
-pub static mut LOCAL_NODE_ID: i32 = 0;
 pub static LOCAL_NODE_UUID: Lazy<String> = Lazy::new(load_local_node_uuid);
 pub static LOCAL_NODE_ROLE: Lazy<Vec<Role>> = Lazy::new(load_local_node_role);
 static NODES: Lazy<RwHashMap<String, Node>> = Lazy::new(Default::default);
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Node {
-    pub id: i32,
-    pub uuid: String,
-    pub name: String,
-    pub http_addr: String,
-    pub grpc_addr: String,
-    pub role: Vec<Role>,
-    pub cpu_num: u64,
-    pub status: NodeStatus,
-    #[serde(default)]
-    pub scheduled: bool,
-    #[serde(default)]
-    pub broadcasted: bool,
-    #[serde(default)]
-    pub has_sidecar: bool,
-    #[serde(default)]
-    pub is_sidecar: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum NodeStatus {
-    Prepare,
-    Online,
-    Offline,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum Role {
-    All,
-    Ingester,
-    Querier,
-    Compactor,
-    Router,
-    AlertManager,
-}
-
-impl FromStr for Role {
-    type Err = String;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let s = s.to_lowercase();
-        match s.as_str() {
-            "all" => Ok(Role::All),
-            "ingester" => Ok(Role::Ingester),
-            "querier" => Ok(Role::Querier),
-            "compactor" => Ok(Role::Compactor),
-            "router" => Ok(Role::Router),
-            "alertmanager" => Ok(Role::AlertManager),
-            _ => Err(format!("Invalid cluster role: {s}")),
-        }
-    }
-}
-
-impl std::fmt::Display for Role {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Role::All => write!(f, "all"),
-            Role::Ingester => write!(f, "ingester"),
-            Role::Querier => write!(f, "querier"),
-            Role::Compactor => write!(f, "compactor"),
-            Role::Router => write!(f, "router"),
-            Role::AlertManager => write!(f, "alertmanager"),
-        }
-    }
-}
 
 /// Register and keepalive the node to cluster
 pub async fn register_and_keepalive() -> Result<()> {
@@ -144,7 +84,7 @@ pub async fn register_and_keepalive() -> Result<()> {
             }
             log::error!("[CLUSTER] keepalive lease id expired or revoked, set node online again.");
             // get new lease id
-            let mut client = etcd::ETCD_CLIENT.get().await.clone().unwrap();
+            let mut client = etcd::get_etcd_client().await.clone();
             let resp = match client
                 .lease_grant(CONFIG.etcd.node_heartbeat_ttl, None)
                 .await
@@ -221,7 +161,7 @@ pub async fn register() -> Result<()> {
     NODES.insert(LOCAL_NODE_UUID.clone(), val.clone());
     let val = json::to_string(&val).unwrap();
     // register node to cluster
-    let mut client = etcd::ETCD_CLIENT.get().await.clone().unwrap();
+    let mut client = etcd::get_etcd_client().await.clone();
     let resp = client
         .lease_grant(CONFIG.etcd.node_heartbeat_ttl, None)
         .await?;
@@ -282,7 +222,7 @@ pub async fn set_online() -> Result<()> {
     NODES.insert(LOCAL_NODE_UUID.clone(), val.clone());
     let val = json::to_string(&val).unwrap();
 
-    let mut client = etcd::ETCD_CLIENT.get().await.clone().unwrap();
+    let mut client = etcd::get_etcd_client().await.clone();
     let key = format!("{}nodes/{}", &CONFIG.etcd.prefix, *LOCAL_NODE_UUID);
     let opt = PutOptions::new().with_lease(unsafe { LOCAL_NODE_KEY_LEASE_ID });
     let _resp = client.put(key, val, Some(opt)).await?;
@@ -300,7 +240,7 @@ pub async fn leave() -> Result<()> {
         LOCAL_NODE_STATUS = NodeStatus::Offline;
     }
 
-    let mut client = etcd::ETCD_CLIENT.get().await.clone().unwrap();
+    let mut client = etcd::get_etcd_client().await.clone();
     let key = format!("{}nodes/{}", &CONFIG.etcd.prefix, *LOCAL_NODE_UUID);
     let _resp = client.delete(key, None).await?;
 
@@ -364,7 +304,7 @@ pub fn get_internal_grpc_token() -> String {
 /// List nodes from cluster or local cache
 pub async fn list_nodes() -> Result<Vec<Node>> {
     let mut nodes = Vec::new();
-    let mut client = etcd::ETCD_CLIENT.get().await.clone().unwrap();
+    let mut client = etcd::get_etcd_client().await.clone();
     let key = format!("{}nodes/", &CONFIG.etcd.prefix);
     let opt = etcd_client::GetOptions::new().with_prefix();
     let ret = client.get(key.clone(), Some(opt)).await.map_err(|e| {
@@ -381,9 +321,9 @@ pub async fn list_nodes() -> Result<Vec<Node>> {
 }
 
 async fn watch_node_list() -> Result<()> {
-    let db = &super::db::CLUSTER_COORDINATOR;
+    let cluster_coordinator = super::db::get_coordinator().await;
     let key = "/nodes/";
-    let mut events = db.watch(key).await?;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching node_list");
     loop {
@@ -403,7 +343,7 @@ async fn watch_node_list() -> Result<()> {
                     Some(v) => v.broadcasted,
                     None => false,
                 };
-                if !broadcasted {
+                if !CONFIG.common.meta_store_external && !broadcasted {
                     // The ingester need broadcast local file list to the new node
                     if is_ingester(&LOCAL_NODE_ROLE)
                         && (item_value.status.eq(&NodeStatus::Prepare)

@@ -1,22 +1,22 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use chrono::{DateTime, FixedOffset, Utc};
+use config::meta::stream::StreamType;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-use crate::common::meta::StreamType;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +35,7 @@ pub struct Dashboard {
     pub created: DateTime<FixedOffset>,
     #[serde(default)]
     pub panels: Vec<Panel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub variables: Option<Variables>,
 }
 
@@ -103,6 +104,15 @@ pub struct AxisItem {
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation_function: Option<AggregationFunc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<AxisArg>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AxisArg {
+    value: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -137,6 +147,14 @@ pub struct PanelConfig {
     unit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unit_custom: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decimals: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    axis_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    axis_border_show: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legend_width: Option<LegendWidth>,
     base_map: Option<BaseMap>,
     map_view: Option<MapView>,
 }
@@ -148,12 +166,20 @@ pub struct QueryConfig {
     layer_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weight_fixed: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<f64>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Variables {
     pub list: Vec<VariableList>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_dynamic_filters: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -195,4 +221,12 @@ pub struct MapView {
     pub zoom: f64,
     pub lat: f64,
     pub lng: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct LegendWidth {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }

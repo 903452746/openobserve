@@ -1,31 +1,47 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use arrow::ipc::writer::StreamWriter;
+use config::{
+    ider,
+    meta::stream::StreamType,
+    metrics,
+    utils::{
+        parquet::{parse_time_range_from_filename, read_metadata_from_bytes},
+        schema_ext::SchemaExt,
+    },
+    CONFIG,
+};
 use opentelemetry::global;
-use std::time::UNIX_EPOCH;
 use tonic::{Request, Response, Status};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::common::infra::{config::CONFIG, errors, metrics, wal};
-use crate::common::meta;
-use crate::common::utils::file::{get_file_contents, get_file_meta, scan_files};
-use crate::handler::grpc::cluster_rpc::{
-    metrics_server::Metrics, MetricsQueryRequest, MetricsQueryResponse, MetricsWalFile,
-    MetricsWalFileRequest, MetricsWalFileResponse,
+use crate::{
+    common::{
+        infra::{errors, wal},
+        utils::file::{get_file_contents, scan_files},
+    },
+    handler::grpc::{
+        cluster_rpc::{
+            metrics_server::Metrics, MetricsQueryRequest, MetricsQueryResponse, MetricsWalFile,
+            MetricsWalFileRequest, MetricsWalFileResponse,
+        },
+        request::MetadataMap,
+    },
+    service::promql::search as SearchService,
 };
-use crate::handler::grpc::request::MetadataMap;
-use crate::service::promql::search as SearchService;
 
 pub struct Querier;
 
@@ -43,7 +59,7 @@ impl Metrics for Querier {
 
         let req: &MetricsQueryRequest = req.get_ref();
         let org_id = &req.org_id;
-        let stream_type = meta::StreamType::Metrics.to_string();
+        let stream_type = StreamType::Metrics.to_string();
         let result = SearchService::grpc::search(req).await.map_err(|err| {
             let time = start.elapsed().as_secs_f64();
             metrics::GRPC_RESPONSE_TIME
@@ -83,16 +99,71 @@ impl Metrics for Querier {
         let stream_name = &req.get_ref().stream_name;
         let mut resp = MetricsWalFileResponse::default();
 
+        // get memtable records
+        let mut mem_data = ingester::read_from_memtable(
+            org_id,
+            StreamType::Metrics.to_string().as_str(),
+            stream_name,
+            Some((start_time, end_time)),
+        )
+        .await
+        .unwrap_or_default();
+
+        // get immutable records
+        mem_data.extend(
+            ingester::read_from_immutable(
+                org_id,
+                StreamType::Metrics.to_string().as_str(),
+                stream_name,
+                Some((start_time, end_time)),
+            )
+            .await
+            .unwrap_or_default(),
+        );
+
+        // write memory data into arrow files
+        let mut arrow_files = vec![];
+        for (schema, batches) in mem_data {
+            let mut size = 0;
+            let mut body = Vec::new();
+            let mut writer = StreamWriter::try_new(&mut body, &schema).unwrap();
+            for batch in batches {
+                size += batch.data_json_size;
+                writer.write(&batch.data).unwrap();
+            }
+            writer.finish().unwrap();
+            drop(writer);
+
+            let name = format!("{}.arrow", ider::generate());
+            let schema_key = schema.hash_key();
+            arrow_files.push(MetricsWalFile {
+                name,
+                schema_key,
+                body,
+                size: size as i64,
+            });
+        }
+
+        // get parquet files
         let wal_dir = match std::path::Path::new(&CONFIG.common.data_wal_dir).canonicalize() {
-            Ok(path) => path.to_str().unwrap().to_string(),
+            Ok(path) => {
+                let mut path = path.to_str().unwrap().to_string();
+                // Hack for windows
+                if path.starts_with("\\\\?\\") {
+                    path = path[4..].to_string();
+                    path = path.replace('\\', "/");
+                }
+                path
+            }
             Err(_) => {
                 return Ok(Response::new(resp));
             }
         };
 
-        let pattern = format!("{wal_dir}/files/{org_id}/metrics/{stream_name}/",);
-        let files = scan_files(&pattern);
-        if files.is_empty() {
+        let pattern = format!("{wal_dir}/files/{org_id}/metrics/{stream_name}/");
+        let files = scan_files(&pattern, "parquet");
+
+        if arrow_files.is_empty() && files.is_empty() {
             return Ok(Response::new(resp));
         }
 
@@ -111,67 +182,57 @@ impl Metrics for Querier {
         wal::lock_files(&files).await;
 
         for file in files.iter() {
+            // check time range by filename
+            let (file_min_ts, file_max_ts) = parse_time_range_from_filename(file);
+            if (file_min_ts > 0 && file_max_ts > 0)
+                && ((end_time > 0 && file_min_ts > end_time)
+                    || (start_time > 0 && file_max_ts < start_time))
+            {
+                log::debug!(
+                    "skip wal parquet file: {} time_range: [{},{}]",
+                    &file,
+                    file_min_ts,
+                    file_max_ts
+                );
+                wal::release_files(&[file.clone()]).await;
+                continue;
+            }
+            // check time range by parquet metadata
             let source_file = wal_dir.to_string() + "/" + file;
-            if start_time > 0 || end_time > 0 {
-                // check wal file created time, we can skip files which created time > end_time
-                let file_meta = match get_file_meta(&source_file) {
-                    Ok(meta) => meta,
-                    Err(err) => {
-                        log::error!("failed to get file meta: {}, {}", file, err);
-                        continue;
-                    }
-                };
-                let file_modified = file_meta
-                    .modified()
-                    .unwrap_or(UNIX_EPOCH)
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros();
-                let file_created = file_meta
-                    .created()
-                    .unwrap_or(UNIX_EPOCH)
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros();
-                let file_created = (file_created as i64)
-                    - chrono::Duration::hours(CONFIG.limit.ingest_allowed_upto)
-                        .num_microseconds()
-                        .unwrap_or_default();
+            let Ok(body) = get_file_contents(&source_file) else {
+                continue;
+            };
+            let body = bytes::Bytes::from(body);
+            let parquet_meta = read_metadata_from_bytes(&body).await.unwrap_or_default();
+            if (start_time > 0 && parquet_meta.max_ts < start_time)
+                || (end_time > 0 && parquet_meta.min_ts > end_time)
+            {
+                log::debug!(
+                    "skip wal parquet file: {} time_range: [{},{}]",
+                    file,
+                    parquet_meta.min_ts,
+                    parquet_meta.max_ts
+                );
+                continue;
+            }
 
-                if (start_time > 0 && (file_modified as i64) < start_time)
-                    || (end_time > 0 && file_created > end_time)
-                {
-                    log::info!(
-                        "skip wal file: {} time_range: [{},{}]",
-                        file,
-                        file_created,
-                        file_modified
-                    );
-                    continue;
-                }
-            }
-            if let Ok(body) = get_file_contents(&source_file) {
-                let name = file.split('/').last().unwrap_or_default();
-                resp.files.push(MetricsWalFile {
-                    name: name.to_string(),
-                    body,
-                });
-            }
-        }
-
-        // check wal memory mode
-        if CONFIG.common.wal_memory_mode_enabled {
-            let mem_files =
-                wal::get_search_in_memory_files(org_id, stream_name, meta::StreamType::Metrics)
-                    .await
-                    .unwrap_or_default();
-            for (name, body) in mem_files {
-                resp.files.push(MetricsWalFile { name, body });
-            }
+            let columns = file.split('/').collect::<Vec<&str>>();
+            let len = columns.len();
+            let name = columns[len - 1].to_string();
+            let schema_key = columns[len - 2].to_string();
+            resp.files.push(MetricsWalFile {
+                name,
+                schema_key,
+                body: body.to_vec(),
+                size: parquet_meta.original_size,
+            });
         }
 
         // release all files
         wal::release_files(&files).await;
+
+        // append arrow files
+        resp.files.extend(arrow_files);
 
         let time = start.elapsed().as_secs_f64();
         metrics::GRPC_RESPONSE_TIME

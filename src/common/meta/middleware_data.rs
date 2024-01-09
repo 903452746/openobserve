@@ -1,35 +1,49 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::common::infra::config::MAXMIND_DB_CLIENT;
+use std::{collections::HashMap, net::IpAddr, sync::Arc};
+
 use actix_web::{
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
-    web, Error as ActixErr, FromRequest, HttpMessage,
+    web, Error as ActixErr, HttpMessage,
 };
 use actix_web_lab::middleware::Next;
-use ahash::AHashMap;
 use maxminddb::geoip2::city::Location;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use uaparser::{Parser, UserAgentParser};
+
+use crate::{common::infra::config::MAXMIND_DB_CLIENT, USER_AGENT_REGEX_FILE};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct GeoInfoData<'a> {
     pub city: Option<&'a str>,
     pub country: Option<&'a str>,
+    pub country_iso_code: Option<&'a str>,
     pub location: Option<Location<'a>>,
+}
+
+/// This is a global cache for user agent parser. This is lazily initialized only when
+/// the first request comes in.
+static UA_PARSER: Lazy<Arc<UserAgentParser>> = Lazy::new(|| Arc::new(initialize_ua_parser()));
+
+pub fn initialize_ua_parser() -> UserAgentParser {
+    UserAgentParser::builder()
+        .build_from_bytes(USER_AGENT_REGEX_FILE)
+        .expect("User Agent Parser creation failed")
 }
 
 /// This is the custom data which is provided by `browser-sdk`
@@ -37,23 +51,19 @@ pub struct GeoInfoData<'a> {
 /// NOTE: the only condition is that the prefix of such params is `oo`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RumExtraData {
-    pub data: AHashMap<String, serde_json::Value>,
+    pub data: HashMap<String, serde_json::Value>,
 }
 
 impl RumExtraData {
-    pub async fn extractor(
-        req: ServiceRequest,
-        next: Next<impl MessageBody>,
-    ) -> Result<ServiceResponse<impl MessageBody>, ActixErr> {
-        let maxminddb_client = MAXMIND_DB_CLIENT.read().await;
-        let mut data =
-            web::Query::<AHashMap<String, String>>::from_query(req.query_string()).unwrap();
+    fn filter_api_keys(data: &mut HashMap<String, String>) {
         data.retain(|k, _| {
-            (k.starts_with("oo") || k.starts_with("batch_time")) && !k.eq("oo-api-key")
-        });
+            (k.starts_with("oo") || k.starts_with("o2") || k.starts_with("batch_time"))
+                && !(k.eq("oo-api-key") || k.eq("o2-api-key"))
+        })
+    }
 
-        // These are the tags which come in `ootags`
-        let tags: AHashMap<String, serde_json::Value> = match data.get("ootags") {
+    fn filter_tags(data: &HashMap<String, String>) -> HashMap<String, serde_json::Value> {
+        match data.get("ootags").or_else(|| data.get("o2tags")) {
             Some(tags) => tags
                 .split(',')
                 .map(|tag| {
@@ -62,10 +72,23 @@ impl RumExtraData {
                 })
                 .collect(),
 
-            None => AHashMap::default(),
-        };
+            None => HashMap::default(),
+        }
+    }
 
-        let mut user_agent_hashmap: AHashMap<String, serde_json::Value> = data
+    pub async fn extractor(
+        req: ServiceRequest,
+        next: Next<impl MessageBody>,
+    ) -> Result<ServiceResponse<impl MessageBody>, ActixErr> {
+        let maxminddb_client = MAXMIND_DB_CLIENT.read().await;
+        let mut data =
+            web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
+        Self::filter_api_keys(&mut data);
+
+        // These are the tags which come in `ootags` or `o2tags`
+        let tags: HashMap<String, serde_json::Value> = Self::filter_tags(&data);
+
+        let mut user_agent_hashmap: HashMap<String, serde_json::Value> = data
             .into_inner()
             .into_iter()
             .map(|(key, val)| (key, val.into()))
@@ -92,14 +115,17 @@ impl RumExtraData {
                 if let Ok(city_info) = client.city_reader.lookup::<maxminddb::geoip2::City>(ip) {
                     let country = city_info
                         .country
-                        .and_then(|c| c.names.and_then(|map| map.get("en").copied()));
+                        .as_ref()
+                        .and_then(|c| c.names.as_ref().and_then(|map| map.get("en").copied()));
                     let city = city_info
                         .city
                         .and_then(|c| c.names.and_then(|map| map.get("en").copied()));
+                    let country_iso_code = city_info.country.and_then(|c| c.iso_code);
 
                     GeoInfoData {
                         city,
                         country,
+                        country_iso_code,
                         location: city_info.location,
                     }
                 } else {
@@ -123,9 +149,7 @@ impl RumExtraData {
                 .map(|v| v.to_str().unwrap_or(""))
                 .unwrap_or_default();
 
-            let ua_parser = web::Data::<UserAgentParser>::extract(req.request())
-                .await
-                .unwrap();
+            let ua_parser = UA_PARSER.clone();
             let parsed_user_agent = ua_parser.parse(user_agent);
 
             user_agent_hashmap.insert(
@@ -139,5 +163,60 @@ impl RumExtraData {
         };
         req.extensions_mut().insert(rum_extracted_data);
         next.call(req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use actix_web::test;
+
+    use super::*;
+
+    #[test]
+    async fn test_data_filtering() {
+        // Create a mock query string
+        let query_string =
+            "oo-api-key=123&o2-api-key=456&oo-param1=value1&o2-param2=value2&batch_time=123456";
+
+        // Create a mock ServiceRequest with the query string
+        let req = test::TestRequest::with_uri(&format!("/path?{}", query_string)).to_srv_request();
+
+        // Call the from_query function
+        let mut data =
+            web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
+        RumExtraData::filter_api_keys(&mut data);
+
+        // Assert that the data is filtered correctly
+        assert_eq!(data.len(), 3);
+        assert!(data.contains_key("oo-param1"));
+        assert!(data.contains_key("o2-param2"));
+        assert!(data.contains_key("batch_time"));
+        assert!(!data.contains_key("oo-api-key"));
+        assert!(!data.contains_key("o2-api-key"));
+    }
+
+    #[test]
+    async fn test_filter_tags() {
+        // Create a mock query string
+        let query_string_oo_tags = "ootags=sdk_version:0.2.9,api:fetch,env:production,service:web-application,version:1.0.1";
+        let query_string_o2_tags = "o2tags=sdk_version:0.2.9,api:fetch,env:production,service:web-application,version:1.0.1";
+
+        for query in &[query_string_oo_tags, query_string_o2_tags] {
+            // Create a mock ServiceRequest with the query string
+            let req = test::TestRequest::with_uri(&format!("/path?{}", query)).to_srv_request();
+
+            // Call the from_query function
+            let query_data =
+                web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
+            let data = RumExtraData::filter_tags(&query_data);
+
+            // Assert that the tags are filtered correctly
+            assert!(data.len() > 0);
+            assert!(data.get("sdk_version").unwrap() == "0.2.9");
+            assert!(data.get("api").unwrap() == "fetch");
+            assert!(data.get("env").unwrap() == "production");
+            assert!(data.get("service").unwrap() == "web-application");
+            assert!(data.get("version").unwrap() == "1.0.1");
+        }
     }
 }

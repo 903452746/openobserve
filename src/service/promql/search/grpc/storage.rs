@@ -1,45 +1,49 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::sync::Arc;
+
+use config::{
+    is_local_disk_storage,
+    meta::stream::{FileKey, StreamType},
+    CONFIG,
+};
 use datafusion::{
     arrow::datatypes::Schema,
     common::FileType,
     error::{DataFusionError, Result},
     prelude::SessionContext,
 };
-use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use crate::common::{
-    infra::{
-        cache::file_data,
-        config::{is_local_disk_storage, CONFIG},
+use crate::{
+    common::{
+        infra::cache::file_data,
+        meta::{
+            search::{SearchType, Session as SearchSession},
+            stream::{PartitionTimeLevel, ScanStats, StreamParams},
+        },
     },
-    meta::{
-        common::FileKey,
-        search::{SearchType, Session as SearchSession},
-        stream::{PartitionTimeLevel, ScanStats, StreamParams},
-        StreamType,
+    service::{
+        db, file_list,
+        search::{
+            datafusion::{exec::register_table, storage::StorageType},
+            match_source,
+        },
+        stream,
     },
-};
-use crate::service::{
-    db, file_list,
-    search::{
-        datafusion::{exec::register_table, storage::StorageType},
-        match_source,
-    },
-    stream,
 };
 
 #[tracing::instrument(name = "promql:search:grpc:storage:create_context", skip_all, fields(org_id = org_id, stream_name = stream_name))]
@@ -77,6 +81,7 @@ pub(crate) async fn create_context(
 
     // get file list
     let mut files = get_file_list(
+        session_id,
         org_id,
         stream_name,
         partition_time_level,
@@ -144,8 +149,13 @@ pub(crate) async fn create_context(
     Ok((ctx, schema, scan_stats))
 }
 
-#[tracing::instrument(name = "promql:search:grpc:storage:get_file_list", skip_all, fields(org_id = org_id, stream_name = stream_name))]
+#[tracing::instrument(
+    name = "promql:search:grpc:storage:get_file_list",
+    skip_all,
+    fields(session_id, org_id, stream_name)
+)]
 async fn get_file_list(
+    session_id: &str,
     org_id: &str,
     stream_name: &str,
     time_level: PartitionTimeLevel,
@@ -166,7 +176,7 @@ async fn get_file_list(
     {
         Ok(results) => results,
         Err(err) => {
-            log::error!("get file list error: {}", err);
+            log::error!("[session_id {session_id}] get file list error: {}", err);
             return Err(DataFusionError::Execution(
                 "get file list error".to_string(),
             ));
@@ -215,20 +225,25 @@ async fn cache_parquet_files(
     let mut tasks = Vec::new();
     let semaphore = std::sync::Arc::new(Semaphore::new(CONFIG.limit.query_thread_num));
     for file in files.iter() {
+        let session_id = "";
         let file_name = file.key.clone();
         let permit = semaphore.clone().acquire_owned().await.unwrap();
         let task: tokio::task::JoinHandle<Option<String>> = tokio::task::spawn(async move {
             let ret = match cache_type {
                 file_data::CacheType::Memory => {
                     if !file_data::memory::exist(&file_name).await {
-                        file_data::memory::download(&file_name).await.err()
+                        file_data::memory::download(session_id, &file_name)
+                            .await
+                            .err()
                     } else {
                         None
                     }
                 }
                 file_data::CacheType::Disk => {
                     if !file_data::disk::exist(&file_name).await {
-                        file_data::disk::download(&file_name).await.err()
+                        file_data::disk::download(session_id, &file_name)
+                            .await
+                            .err()
                     } else {
                         None
                     }

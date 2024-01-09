@@ -1,46 +1,50 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader},
+};
 
 use actix_web::web;
-use ahash::AHashMap;
 use chrono::{Duration, Utc};
+use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
 use datafusion::arrow::datatypes::Schema;
-use std::io::{BufRead, BufReader};
 
 use super::StreamMeta;
-use crate::common::{
-    infra::{
-        cluster,
-        config::{CONFIG, DISTINCT_FIELDS},
-        metrics,
-    },
-    meta::{
-        alert::{Alert, Trigger},
-        functions::{StreamTransform, VRLResultResolver},
-        ingestion::{
-            BulkResponse, BulkResponseError, BulkResponseItem, BulkStreamData, RecordStatus,
-            StreamSchemaChk,
+use crate::{
+    common::{
+        infra::cluster,
+        meta::{
+            alerts::Alert,
+            functions::{StreamTransform, VRLResultResolver},
+            ingestion::{
+                BulkResponse, BulkResponseError, BulkResponseItem, BulkStreamData, RecordStatus,
+                StreamSchemaChk,
+            },
+            stream::PartitioningDetails,
+            usage::UsageType,
         },
-        stream::{PartitioningDetails, StreamParams},
-        usage::UsageType,
-        StreamType,
+        utils::{flatten, json, time::parse_timestamp_micro_from_value},
     },
-    utils::{flatten, json, time::parse_timestamp_micro_from_value},
-};
-use crate::service::{
-    db, distinct_values, ingestion::write_file, schema::stream_schema_exists,
-    usage::report_request_usage_stats,
+    service::{
+        db, distinct_values,
+        ingestion::{evaluate_trigger, write_file, TriggerAlertData},
+        schema::{get_upto_discard_error, stream_schema_exists},
+        usage::report_request_usage_stats,
+    },
 };
 
 pub const TRANSFORM_FAILED: &str = "document_failed_transform";
@@ -61,32 +65,37 @@ pub async fn ingest(
         return Err(anyhow::anyhow!("Quota exceeded for this organization"));
     }
 
-    //let mut errors = false;
+    // check memtable
+    if let Err(e) = ingester::check_memtable_size() {
+        return Err(anyhow::Error::msg(e.to_string()));
+    }
+
+    // let mut errors = false;
     let mut bulk_res = BulkResponse {
         took: 0,
         errors: false,
         items: vec![],
     };
 
-    let mut min_ts =
-        (Utc::now() + Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
+    let min_ts =
+        (Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
 
     let mut runtime = crate::service::ingestion::init_functions_runtime();
 
-    let mut stream_vrl_map: AHashMap<String, VRLResultResolver> = AHashMap::new();
-    let mut stream_schema_map: AHashMap<String, Schema> = AHashMap::new();
-    let mut stream_data_map = AHashMap::new();
+    let mut stream_vrl_map: HashMap<String, VRLResultResolver> = HashMap::new();
+    let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
+    let mut stream_data_map = HashMap::new();
 
-    let mut stream_transform_map: AHashMap<String, Vec<StreamTransform>> = AHashMap::new();
-    let mut stream_partition_keys_map: AHashMap<String, (StreamSchemaChk, PartitioningDetails)> =
-        AHashMap::new();
-    let mut stream_alerts_map: AHashMap<String, Vec<Alert>> = AHashMap::new();
+    let mut stream_transform_map: HashMap<String, Vec<StreamTransform>> = HashMap::new();
+    let mut stream_partition_keys_map: HashMap<String, (StreamSchemaChk, PartitioningDetails)> =
+        HashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut distinct_values = Vec::with_capacity(16);
 
     let mut action = String::from("");
     let mut stream_name = String::from("");
     let mut doc_id = String::from("");
-    let mut stream_trigger_map: AHashMap<String, Trigger> = AHashMap::new();
+    let mut stream_trigger_map: HashMap<String, TriggerAlertData> = HashMap::new();
 
     let mut next_line_is_data = false;
     let reader = BufReader::new(body.as_ref());
@@ -120,11 +129,16 @@ pub async fn ingest(
             // End Register Transfoms for index
 
             // Start get stream alerts
-            let key = format!("{}/{}/{}", &org_id, StreamType::Logs, &stream_name);
-            crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+            crate::service::ingestion::get_stream_alerts(
+                org_id,
+                StreamType::Logs,
+                &stream_name,
+                &mut stream_alerts_map,
+            )
+            .await;
             // End get stream alert
 
-            if !stream_partition_keys_map.contains_key(&stream_name.clone()) {
+            if !stream_partition_keys_map.contains_key(&stream_name) {
                 let stream_schema = stream_schema_exists(
                     org_id,
                     &stream_name,
@@ -143,8 +157,8 @@ pub async fn ingest(
 
             stream_data_map
                 .entry(stream_name.clone())
-                .or_insert(BulkStreamData {
-                    data: AHashMap::new(),
+                .or_insert_with(|| BulkStreamData {
+                    data: HashMap::new(),
                 });
         } else {
             next_line_is_data = false;
@@ -152,18 +166,18 @@ pub async fn ingest(
             let stream_data = stream_data_map.get_mut(&stream_name).unwrap();
             let buf = &mut stream_data.data;
 
-            //Start row based transform
+            // Start row based transform
 
             let key = format!("{org_id}/{}/{stream_name}", StreamType::Logs);
 
-            //JSON Flattening
-            let mut value = flatten::flatten(&value)?;
+            // JSON Flattening
+            let mut value = flatten::flatten(value)?;
 
             if let Some(transforms) = stream_transform_map.get(&key) {
                 let mut ret_value = value.clone();
                 ret_value = crate::service::ingestion::apply_stream_transform(
                     transforms,
-                    &ret_value,
+                    ret_value,
                     &stream_vrl_map,
                     &stream_name,
                     &mut runtime,
@@ -185,7 +199,7 @@ pub async fn ingest(
                     value = ret_value;
                 }
             }
-            //End row based transform
+            // End row based transform
 
             // get json object
             let local_val = value.as_object_mut().unwrap();
@@ -215,10 +229,9 @@ pub async fn ingest(
                 None => Utc::now().timestamp_micros(),
             };
             // check ingestion time
-            let earliest_time = Utc::now() + Duration::hours(0 - CONFIG.limit.ingest_allowed_upto);
-            if timestamp < earliest_time.timestamp_micros() {
+            if timestamp < min_ts {
                 bulk_res.errors = true;
-                let failure_reason = Some(super::get_upto_discard_error());
+                let failure_reason = Some(get_upto_discard_error().to_string());
                 add_record_status(
                     stream_name.clone(),
                     doc_id.clone(),
@@ -229,9 +242,6 @@ pub async fn ingest(
                     failure_reason,
                 );
                 continue;
-            }
-            if timestamp < min_ts {
-                min_ts = timestamp;
             }
             local_val.insert(
                 CONFIG.common.column_timestamp.clone(),
@@ -248,7 +258,9 @@ pub async fn ingest(
 
             // only for bulk insert
             let mut status = RecordStatus::default();
-            let local_trigger = super::add_valid_record(
+            let need_trigger = !stream_trigger_map.contains_key(&stream_name);
+
+            let local_trigger = match super::add_valid_record(
                 &StreamMeta {
                     org_id: org_id.to_string(),
                     stream_name: stream_name.clone(),
@@ -260,10 +272,27 @@ pub async fn ingest(
                 &mut status,
                 buf,
                 local_val,
+                need_trigger,
             )
-            .await;
-            if let Some(trigger) = local_trigger {
-                stream_trigger_map.insert(stream_name.clone(), trigger);
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    bulk_res.errors = true;
+                    add_record_status(
+                        stream_name.clone(),
+                        doc_id.clone(),
+                        action.clone(),
+                        value,
+                        &mut bulk_res,
+                        Some(TS_PARSE_FAILED.to_string()),
+                        Some(e.to_string()),
+                    );
+                    continue;
+                }
+            };
+            if local_trigger.is_some() {
+                stream_trigger_map.insert(stream_name.clone(), local_trigger);
             }
 
             // get distinct_value item
@@ -307,7 +336,9 @@ pub async fn ingest(
         }
     }
 
+    // write data to wal
     let time = start.elapsed().as_secs_f64();
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
     for (stream_name, stream_data) in stream_data_map {
         // check if we are allowed to ingest
         if db::compact::retention::is_deleting_stream(org_id, &stream_name, StreamType::Logs, None)
@@ -316,18 +347,9 @@ pub async fn ingest(
             continue;
         }
         // write to file
-        let mut stream_file_name = "".to_string();
-
-        let mut req_stats = write_file(
-            &stream_data.data,
-            thread_id,
-            &StreamParams::new(org_id, &stream_name, StreamType::Logs),
-            &mut stream_file_name,
-            None,
-        )
-        .await;
+        let mut req_stats = write_file(&writer, &stream_name, stream_data.data).await;
         req_stats.response_time += time;
-        //metric + data usage
+        // metric + data usage
         let fns_length: usize = stream_transform_map.values().map(|v| v.len()).sum();
         report_request_usage_stats(
             req_stats,
@@ -339,10 +361,13 @@ pub async fn ingest(
         )
         .await;
     }
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
+    }
 
     // only one trigger per request, as it updates etcd
-    for (_, entry) in &stream_trigger_map {
-        super::evaluate_trigger(Some(entry.clone()), &stream_alerts_map).await;
+    for (_, entry) in stream_trigger_map {
+        evaluate_trigger(entry).await;
     }
 
     // send distinct_values
@@ -384,7 +409,7 @@ fn add_record_status(
     failure_type: Option<String>,
     failure_reason: Option<String>,
 ) {
-    let mut item = AHashMap::new();
+    let mut item = HashMap::new();
 
     match failure_type {
         Some(failure_type) => {
@@ -392,7 +417,7 @@ fn add_record_status(
                 failure_type,
                 stream_name.clone(),
                 failure_reason.unwrap(),
-                "0".to_owned(), //TODO check
+                "0".to_owned(), // TODO check
             );
 
             item.insert(

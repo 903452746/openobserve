@@ -1,26 +1,32 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use actix_web::{http, post, web, HttpRequest, HttpResponse};
 use std::io::Error;
 
-use crate::common::meta::http::HttpResponse as MetaHttpResponse;
-use crate::handler::http::request::{CONTENT_TYPE_JSON, CONTENT_TYPE_PROTO};
-use crate::service::metrics::otlp_http::{metrics_json_handler, metrics_proto_handler};
-use crate::service::metrics::{self};
+use actix_web::{http, post, web, HttpRequest, HttpResponse};
 
-/** _json ingestion API */
+use crate::{
+    common::meta::http::HttpResponse as MetaHttpResponse,
+    handler::http::request::{CONTENT_TYPE_JSON, CONTENT_TYPE_PROTO},
+    service::metrics::{
+        otlp_http::{metrics_json_handler, metrics_proto_handler},
+        {self},
+    },
+};
+
+/// _json ingestion API
 #[utoipa::path(
     context_path = "/api",
     tag = "Metrics",
@@ -33,8 +39,8 @@ use crate::service::metrics::{self};
     ),
     request_body(content = String, description = "Ingest data (json array)", content_type = "application/json", example = json!([{"__name__":"metrics stream name","__type__":"counter / gauge / histogram / summary","label_name1":"label_value1","label_name2":"label_value2", "_timestamp":1687175143,"value":1.2}])),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "up","successful": 3,"failed": 0}]})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "up","successful": 3,"failed": 0}]})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/ingest/metrics/_json")]
@@ -58,15 +64,15 @@ pub async fn json(
     )
 }
 
-/** MetricsIngest */
+/// MetricsIngest
 #[utoipa::path(
     context_path = "/api",
     tag = "Metrics",
     operation_id = "PostMetrics",
     request_body(content = String, description = "ExportMetricsServiceRequest", content_type = "application/x-protobuf"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/v1/metrics")]
@@ -79,10 +85,10 @@ pub async fn otlp_metrics_write(
     let org_id = org_id.into_inner();
     let content_type = req.headers().get("Content-Type").unwrap().to_str().unwrap();
     if content_type.eq(CONTENT_TYPE_PROTO) {
-        log::info!("otlp::metrics_proto_handler");
+        // log::info!("otlp::metrics_proto_handler");
         metrics_proto_handler(&org_id, **thread_id, body).await
     } else if content_type.starts_with(CONTENT_TYPE_JSON) {
-        log::info!("otlp::metrics_json_handler");
+        // log::info!("otlp::metrics_json_handler");
         metrics_json_handler(&org_id, **thread_id, body).await
     } else {
         Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(

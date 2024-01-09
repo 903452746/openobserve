@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -67,7 +68,7 @@
         :isPaidPlan="planType"
         :freeLoading="freeLoading"
         :proLoading="proLoading"
-        @update:freeSubscription="confirm_downgrade_subscription = true"
+        @update:freeSubscription="subscribeFreePlan"
         @update:proSubscription="onLoadSubscription('pro')"
         @update:businessSubscription="onLoadSubscription('business')"
       ></plan-card>
@@ -81,8 +82,9 @@
             {{ t("billing.manageCards") }}
           </div>
           <q-space />
-          <q-btn icon="close" flat round dense
-v-close-popup="true" />
+          <q-btn icon="close"
+flat round
+dense v-close-popup="true" />
         </q-card-section>
         <q-card-section>
           <iframe
@@ -107,8 +109,9 @@ v-close-popup="true" />
             {{ t("billing.subscriptionCheckout") }}
           </div>
           <q-space />
-          <q-btn icon="close" flat round dense
-v-close-popup="true" />
+          <q-btn icon="close"
+flat round
+dense v-close-popup="true" />
         </q-card-section>
 
         <q-card-section>
@@ -168,6 +171,7 @@ import BillingService from "@/services/billings";
 import { useStore } from "vuex";
 import { useQuasar, date } from "quasar";
 import { useLocalOrganization, convertToTitleCase } from "@/utils/zincutils";
+import config from "@/aws-exports";
 
 export default defineComponent({
   name: "plans",
@@ -180,6 +184,16 @@ export default defineComponent({
     this.loadSubscription();
   },
   methods: {
+    subscribeFreePlan() {
+      if (
+        this.currentPlanDetail.CustomerBillingObj.subscription_type ==
+        config.freePlan
+      ) {
+        this.onLoadSubscription("Developer");
+      } else {
+        this.confirm_downgrade_subscription = true;
+      }
+    },
     onLoadSubscription(planType: string) {
       this.proLoading = true;
       if (this.listSubscriptionResponse.card != undefined) {
@@ -228,6 +242,7 @@ export default defineComponent({
       )
         .then((res) => {
           this.loadSubscription();
+          this.$router.go(0);
         })
         .catch((e) => {
           this.freeLoading = false;
@@ -261,35 +276,48 @@ export default defineComponent({
         this.store.state.selectedOrganization.identifier
       )
         .then((res) => {
+          this.currentPlanDetail = res.data.data;
+
           if (
-            res.data.data.CustomerBillingObj.subscription_type ==
-            "professional-USD-Monthly"
+            res.data.data.CustomerBillingObj.customer_id !== "" &&
+            res.data.data.CustomerBillingObj.customer_id !== null
           ) {
-            this.planType = "pro";
-            const localOrg: any = useLocalOrganization();
-            localOrg.value.subscription_type = "professional-USD-Monthly";
-            useLocalOrganization(localOrg.value);
-            this.store.dispatch("setSelectedOrganization", localOrg.value);
-            this.store.dispatch("setQuotaThresholdMsg", "");
-          } else if (
-            res.data.data.CustomerBillingObj.subscription_type ==
-            "Free-Plan-USD-Monthly"
-          ) {
-            this.planType = "basic";
-            const localOrg: any = useLocalOrganization();
-            localOrg.value.subscription_type = "Free-Plan-USD-Monthly";
-            useLocalOrganization(localOrg.value);
-            this.store.dispatch("setSelectedOrganization", localOrg.value);
-          } else if (
-            res.data.data.CustomerBillingObj.subscription_type ==
-            "business-USD-Monthly"
-          ) {
-            this.planType = "business";
-            const localOrg: any = useLocalOrganization();
-            localOrg.value.subscription_type = "professional-USD-Monthly";
-            useLocalOrganization(localOrg.value);
-            this.store.dispatch("setSelectedOrganization", localOrg.value);
-            this.store.dispatch("setQuotaThresholdMsg", "");
+            if (
+              res.data.data.CustomerBillingObj.subscription_type ==
+              "professional-USD-Monthly"
+            ) {
+              this.planType = "pro";
+              const localOrg: any = useLocalOrganization();
+              localOrg.value.subscription_type = "professional-USD-Monthly";
+              useLocalOrganization(localOrg.value);
+              this.store.dispatch("setSelectedOrganization", localOrg.value);
+              this.store.dispatch("setQuotaThresholdMsg", "");
+            } else if (
+              res.data.data.CustomerBillingObj.subscription_type ==
+              config.freePlan
+            ) {
+              this.planType = "basic";
+              const localOrg: any = useLocalOrganization();
+              localOrg.value.subscription_type = config.freePlan;
+              useLocalOrganization(localOrg.value);
+              this.store.dispatch("setSelectedOrganization", localOrg.value);
+            } else if (
+              res.data.data.CustomerBillingObj.subscription_type ==
+              "business-USD-Monthly"
+            ) {
+              this.planType = "business";
+              const localOrg: any = useLocalOrganization();
+              localOrg.value.subscription_type = "professional-USD-Monthly";
+              useLocalOrganization(localOrg.value);
+              this.store.dispatch("setSelectedOrganization", localOrg.value);
+              this.store.dispatch("setQuotaThresholdMsg", "");
+            }
+          } else {
+            this.$q.notify({
+              type: "warning",
+              message: "Please subscribe to one of the plan.",
+              timeout: 5000,
+            });
           }
           // this.listSubscriptionResponse = res.data.data;
           // this.listSubscriptionResponse.subscription.current_term_end =
@@ -421,7 +449,7 @@ export default defineComponent({
     const expiry_month = ref("12");
     const expiry_year = ref("2025");
     const frmPayment = ref();
-    const planType = ref("basic");
+    const planType = ref("");
     const isActiveSubscription = ref(false);
     const loading = ref(false);
     const hostedResponse: any = ref();
@@ -434,6 +462,7 @@ export default defineComponent({
     const freeLoading: any = ref(false);
     const proLoading: any = ref(false);
     const confirm_downgrade_subscription: any = ref(false);
+    const currentPlanDetail = ref();
 
     const retriveHostedPage = () => {
       BillingService.retrive_hosted_page(
@@ -469,6 +498,7 @@ export default defineComponent({
       freeLoading,
       proLoading,
       confirm_downgrade_subscription,
+      currentPlanDetail,
     };
   },
 });

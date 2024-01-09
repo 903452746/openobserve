@@ -1,32 +1,37 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::sync::Arc;
 
 use ahash::AHashSet;
 use chrono::Utc;
+use config::{is_local_disk_storage, meta::stream::StreamType, CONFIG};
 use datafusion::arrow::datatypes::Schema;
-use std::sync::Arc;
 
-use crate::common::{
-    infra::{
-        cache,
-        config::{is_local_disk_storage, CONFIG, ENRICHMENT_TABLES, STREAM_SCHEMAS},
-        db as infra_db,
+use crate::{
+    common::{
+        infra::{
+            cache,
+            config::{ENRICHMENT_TABLES, STREAM_SCHEMAS},
+            db as infra_db,
+        },
+        meta::stream::StreamSchema,
+        utils::json,
     },
-    meta::{stream::StreamSchema, StreamType},
-    utils::json,
+    service::enrichment::StreamTable,
 };
-use crate::service::enrichment::StreamTable;
 
 fn mk_key(org_id: &str, stream_type: StreamType, stream_name: &str) -> String {
     format!("/schema/{org_id}/{stream_type}/{stream_name}")
@@ -41,10 +46,10 @@ pub async fn get(
     let map_key = key.strip_prefix("/schema/").unwrap();
 
     if let Some(schema) = STREAM_SCHEMAS.get(map_key) {
-        return Ok(schema.value().clone().last().unwrap().clone());
+        return Ok(schema.value().last().unwrap().clone());
     }
 
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     Ok(match db.get(&key).await {
         Err(_) => {
             // REVIEW: shouldn't we report the error?
@@ -52,7 +57,8 @@ pub async fn get(
         }
         Ok(v) => {
             let local_val: json::Value = json::from_slice(&v).unwrap();
-            // for backward compatibility check if value in etcd is vec or schema based on it return value
+            // for backward compatibility check if value in etcd is vec or schema based on
+            // it return value
             if local_val.is_array() {
                 let local_vec: Vec<Schema> = json::from_slice(&v).unwrap();
                 local_vec.last().unwrap().clone()
@@ -69,7 +75,7 @@ pub async fn get_from_db(
     stream_type: StreamType,
 ) -> Result<Schema, anyhow::Error> {
     let key = mk_key(org_id, stream_type, stream_name);
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     Ok(match db.get(&key).await {
         Err(_) => {
             // REVIEW: shouldn't we report the error?
@@ -77,7 +83,8 @@ pub async fn get_from_db(
         }
         Ok(v) => {
             let local_val: json::Value = json::from_slice(&v).unwrap();
-            // for backward compatibility check if value in etcd is vec or schema based on it return value
+            // for backward compatibility check if value in etcd is vec or schema based on
+            // it return value
             if local_val.is_array() {
                 let local_vec: Vec<Schema> = json::from_slice(&v).unwrap();
                 local_vec.last().unwrap().clone()
@@ -100,14 +107,15 @@ pub async fn get_versions(
         return Ok(STREAM_SCHEMAS.get(map_key).unwrap().value().clone());
     }
 
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     Ok(match db.get(&key).await {
         Err(_) => {
             // REVIEW: shouldn't we report the error?
             vec![]
         }
         Ok(v) => {
-            // for backward compatibility check if value in etcd is vec or schema based on it return value
+            // for backward compatibility check if value in etcd is vec or schema based on
+            // it return value
             let local_val: json::Value = json::from_slice(&v).unwrap();
             if local_val.is_array() {
                 json::from_slice(&v).unwrap()
@@ -126,14 +134,14 @@ pub async fn set(
     min_ts: Option<i64>,
     new_version: bool,
 ) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let mut versions: Vec<Schema>;
     let key = format!("/schema/{org_id}/{stream_type}/{stream_name}");
     let map_key = key.strip_prefix("/schema/").unwrap();
     if STREAM_SCHEMAS.contains_key(map_key) {
         versions = STREAM_SCHEMAS.get(map_key).unwrap().value().clone();
         if min_ts.is_some() && new_version {
-            //update last schema to add end date
+            // update last schema to add end date
             let last_schema = versions.pop().unwrap();
             if !last_schema.fields.eq(&schema.fields) {
                 let mut last_meta = last_schema.metadata().clone();
@@ -141,7 +149,7 @@ pub async fn set(
                 last_meta.insert("end_dt".to_string(), min_ts.unwrap().to_string());
                 versions.push(last_schema.with_metadata(last_meta));
 
-                //update current schema to add start date
+                // update current schema to add start date
                 let mut metadata = schema.metadata().clone();
                 metadata.insert("start_dt".to_string(), min_ts.unwrap().to_string());
                 metadata.insert("created_at".to_string(), created_at);
@@ -205,7 +213,7 @@ pub async fn delete(
 ) -> Result<(), anyhow::Error> {
     let stream_type = stream_type.unwrap_or(StreamType::Logs);
     let key = format!("/schema/{org_id}/{stream_type}/{stream_name}");
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     match db.delete(&key, false, infra_db::NEED_WATCH).await {
         Ok(_) => {}
         Err(e) => {
@@ -263,7 +271,7 @@ pub async fn list(
         return Ok(list_stream_schemas(org_id, stream_type, fetch_schema));
     }
 
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let db_key = match stream_type {
         None => format!("/schema/{org_id}/"),
         Some(stream_type) => format!("/schema/{org_id}/{stream_type}/"),
@@ -297,8 +305,8 @@ pub async fn list(
 
 pub async fn watch() -> Result<(), anyhow::Error> {
     let key = "/schema/";
-    let db = &infra_db::CLUSTER_COORDINATOR;
-    let mut events = db.watch(key).await?;
+    let cluster_coordinator = infra_db::get_coordinator().await;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching stream schema");
     loop {
@@ -366,7 +374,7 @@ pub async fn watch() -> Result<(), anyhow::Error> {
 }
 
 pub async fn cache() -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/schema/";
     let ret = db.list(key).await?;
     for (item_key, item_value) in ret {

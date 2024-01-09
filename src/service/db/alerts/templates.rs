@@ -1,26 +1,29 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
 
+use itertools::Itertools;
+
 use crate::common::{
     infra::{config::ALERTS_TEMPLATES, db as infra_db},
-    meta::{alert::DestinationTemplate, organization::DEFAULT_ORG},
+    meta::{alerts::templates::Template, organization::DEFAULT_ORG},
     utils::json,
 };
 
-pub async fn get(org_id: &str, name: &str) -> Result<DestinationTemplate, anyhow::Error> {
+pub async fn get(org_id: &str, name: &str) -> Result<Template, anyhow::Error> {
     let map_key = format!("{org_id}/{name}");
     if let Some(v) = ALERTS_TEMPLATES.get(&map_key) {
         return Ok(v.value().clone());
@@ -30,7 +33,7 @@ pub async fn get(org_id: &str, name: &str) -> Result<DestinationTemplate, anyhow
         return Ok(v.value().clone());
     }
 
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/templates/{org_id}/{name}");
     if let Ok(val) = db.get(&key).await {
         return Ok(json::from_slice(&val).unwrap());
@@ -39,12 +42,9 @@ pub async fn get(org_id: &str, name: &str) -> Result<DestinationTemplate, anyhow
     Ok(json::from_slice(&db.get(&key).await?).unwrap())
 }
 
-pub async fn set(
-    org_id: &str,
-    name: &str,
-    mut template: DestinationTemplate,
-) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+pub async fn set(org_id: &str, name: &str, template: Template) -> Result<(), anyhow::Error> {
+    let db = infra_db::get_db().await;
+    let mut template = template;
     template.is_default = Some(org_id == DEFAULT_ORG);
     let key = format!("/templates/{org_id}/{name}");
     Ok(db
@@ -57,39 +57,41 @@ pub async fn set(
 }
 
 pub async fn delete(org_id: &str, name: &str) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/templates/{org_id}/{name}");
     Ok(db.delete(&key, false, infra_db::NEED_WATCH).await?)
 }
 
-pub async fn list(org_id: &str) -> Result<Vec<DestinationTemplate>, anyhow::Error> {
+pub async fn list(org_id: &str) -> Result<Vec<Template>, anyhow::Error> {
     let cache = ALERTS_TEMPLATES.clone();
     if !cache.is_empty() {
-        Ok(cache
+        return Ok(cache
             .iter()
             .filter_map(|template| {
                 let k = template.key();
                 (k.starts_with(&format!("{org_id}/")) || k.starts_with(&format!("{DEFAULT_ORG}/")))
                     .then(|| template.value().clone())
             })
-            .collect())
-    } else {
-        let db = &infra_db::DEFAULT;
-        let key = format!("/templates/{org_id}/", org_id = org_id);
-        let ret = db.list(key.as_str()).await?;
-        let mut templates = Vec::new();
-        for (_, item_value) in ret {
-            let json_val: DestinationTemplate = json::from_slice(&item_value).unwrap();
-            templates.push(json_val);
-        }
-        Ok(templates)
+            .sorted_by(|a, b| a.name.cmp(&b.name))
+            .collect());
     }
+
+    let db = infra_db::get_db().await;
+    let key = format!("/templates/{org_id}/");
+    let ret = db.list_values(key.as_str()).await?;
+    let mut items = Vec::new();
+    for item_value in ret {
+        let json_val: Template = json::from_slice(&item_value).unwrap();
+        items.push(json_val);
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(items)
 }
 
 pub async fn watch() -> Result<(), anyhow::Error> {
     let key = "/templates/";
-    let db = &infra_db::CLUSTER_COORDINATOR;
-    let mut events = db.watch(key).await?;
+    let cluster_coordinator = infra_db::get_coordinator().await;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching alert templates");
     loop {
@@ -103,7 +105,7 @@ pub async fn watch() -> Result<(), anyhow::Error> {
         match ev {
             infra_db::Event::Put(ev) => {
                 let item_key = ev.key.strip_prefix(key).unwrap();
-                let item_value: DestinationTemplate = json::from_slice(&ev.value.unwrap()).unwrap();
+                let item_value: Template = json::from_slice(&ev.value.unwrap()).unwrap();
                 ALERTS_TEMPLATES.insert(item_key.to_owned(), item_value);
             }
             infra_db::Event::Delete(ev) => {
@@ -117,12 +119,12 @@ pub async fn watch() -> Result<(), anyhow::Error> {
 }
 
 pub async fn cache() -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/templates/";
     let ret = db.list(key).await?;
     for (item_key, item_value) in ret {
         let item_key = item_key.strip_prefix(key).unwrap();
-        let json_val: DestinationTemplate = json::from_slice(&item_value).unwrap();
+        let json_val: Template = json::from_slice(&item_value).unwrap();
         ALERTS_TEMPLATES.insert(item_key.to_owned(), json_val);
     }
     log::info!("Alert templates Cached");

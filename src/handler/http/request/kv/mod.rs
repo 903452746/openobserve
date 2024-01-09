@@ -1,25 +1,26 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::io::Error;
 
 use actix_web::{delete, get, http::header::ContentType, post, web, HttpRequest, HttpResponse};
 use ahash::HashMap;
-use std::io::Error;
 
-use crate::common::meta::http::HttpResponse as MetaHttpResponse;
-use crate::service::kv;
+use crate::{common::meta::http::HttpResponse as MetaHttpResponse, service::kv};
 
-/** GetValue */
+/// GetValue
 #[utoipa::path(
     context_path = "/api",
     tag = "KV",
@@ -32,8 +33,8 @@ use crate::service::kv;
         ("key" = String, Path, description = "Key name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "text/plain", body = String),
-        (status = 404, description="NotFound", content_type = "text/plain", body = String),
+        (status = 200, description = "Success",  content_type = "text/plain", body = String),
+        (status = 404, description = "NotFound", content_type = "text/plain", body = String),
     )
 )]
 #[get("/{org_id}/kv/{key}")]
@@ -49,7 +50,7 @@ pub async fn get(path: web::Path<(String, String)>) -> Result<HttpResponse, Erro
     }
 }
 
-/** SetValue */
+/// SetValue
 #[utoipa::path(
     context_path = "/api",
     tag = "KV",
@@ -63,8 +64,8 @@ pub async fn get(path: web::Path<(String, String)>) -> Result<HttpResponse, Erro
       ),
     request_body(content = String, description = "Value of the key", content_type = "text/plain"),
     responses(
-        (status = 200, description="Success", content_type = "text/plain", body = String),
-        (status = 500, description="Error", content_type = "text/plain", body = String),
+        (status = 200, description = "Success", content_type = "text/plain", body = String),
+        (status = 500, description = "Failure", content_type = "text/plain", body = String),
     )
 )]
 #[post("/{org_id}/kv/{key}")]
@@ -73,7 +74,8 @@ pub async fn set(
     body: web::Bytes,
 ) -> Result<HttpResponse, Error> {
     let (org_id, key) = path.into_inner();
-    match kv::set(&org_id, &key, body).await {
+    let key = key.trim();
+    match kv::set(&org_id, key, body).await {
         Ok(_) => Ok(HttpResponse::Ok()
             .content_type(ContentType::plaintext())
             .body("OK")),
@@ -86,7 +88,7 @@ pub async fn set(
     }
 }
 
-/** RemoveValue */
+/// RemoveValue
 #[utoipa::path(
     context_path = "/api",
     tag = "KV",
@@ -99,8 +101,8 @@ pub async fn set(
         ("key" = String, Path, description = "Key name"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "text/plain", body = String),
-        (status = 404, description="NotFound", content_type = "text/plain", body = String),
+        (status = 200, description = "Success",  content_type = "text/plain", body = String),
+        (status = 404, description = "NotFound", content_type = "text/plain", body = String),
     )
 )]
 #[delete("/{org_id}/kv/{key}")]
@@ -116,7 +118,7 @@ pub async fn delete(path: web::Path<(String, String)>) -> Result<HttpResponse, E
     }
 }
 
-/** ListKeys */
+/// ListKeys
 #[utoipa::path(
     context_path = "/api",
     tag = "KV",
@@ -129,7 +131,7 @@ pub async fn delete(path: web::Path<(String, String)>) -> Result<HttpResponse, E
         ("prefix" = Option<String>, Query, description = "Key prefix"),
       ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = Vec<String>),
+        (status = 200, description = "Success", content_type = "application/json", body = Vec<String>),
     )
 )]
 #[get("/{org_id}/kv")]

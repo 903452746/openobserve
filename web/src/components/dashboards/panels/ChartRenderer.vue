@@ -1,181 +1,390 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div ref="chartRef" id="chart1" style="height: 100%; width: 100%;"></div>
+  <div
+    data-test="chart-renderer"
+    ref="chartRef"
+    id="chart1"
+    @mouseover="
+      () => {
+        // if hoveredSeriesState is not null then set panelId
+        if (hoveredSeriesState)
+          hoveredSeriesState.panelId = data?.extras?.panelId;
+      }
+    "
+    @mouseleave="
+      () => {
+        // if hoveredSeriesState is not null then set -1
+        if (hoveredSeriesState) hoveredSeriesState.setIndex(-1, -1, -1, null);
+      }
+    "
+    style="height: 100%; width: 100%"
+  ></div>
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, onMounted, watch, onUnmounted, nextTick, onActivated } from "vue";
+// Find the index of the nearest value in a sorted array
+// used in timeseries hovering across all charts to find nearest dataindex
+function findNearestIndex(sortedArray: any, target: any) {
+  let left = 0;
+  let right = sortedArray.length - 1;
+  let nearestIndex = -1;
+
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+
+    if (sortedArray[mid][0] === target) {
+      return mid; // Found the target at index mid
+    }
+
+    if (
+      nearestIndex === -1 ||
+      Math.abs(sortedArray[mid][0] - target) <
+        Math.abs(sortedArray[nearestIndex][0] - target)
+    ) {
+      nearestIndex = mid; // Update nearestIndex if current element is closer to the target
+    }
+
+    if (sortedArray[mid][0] < target) {
+      left = mid + 1; // Target is in the right half
+    } else {
+      right = mid - 1; // Target is in the left half
+    }
+  }
+
+  return nearestIndex; // Return the index of the nearest value
+}
+
+import {
+  defineComponent,
+  ref,
+  onMounted,
+  watch,
+  onUnmounted,
+  nextTick,
+  onActivated,
+  inject,
+} from "vue";
 import * as echarts from "echarts";
 import { useStore } from "vuex";
 
 export default defineComponent({
-    name: "ChartRenderer",
-    emits: ["updated:chart","click","updated:dataZoom"],
-    props: {
-        data: {
-            required: true,
-            type: Object,
-            default: () => ({ options: {} })
-        },
+  name: "ChartRenderer",
+  emits: ["updated:chart", "click", "updated:dataZoom"],
+  props: {
+    data: {
+      required: true,
+      type: Object,
+      default: () => ({ options: {} }),
     },
-    setup(props: any,{ emit }) {
-        const chartRef: any = ref(null);
-        let chart: any;
-        const store = useStore();
-        const windowResizeEventCallback = async () => {
-            await nextTick();
-            await nextTick();
-            chart?.resize();
-        }
+  },
+  setup(props: any, { emit }) {
+    const chartRef: any = ref(null);
+    let chart: any;
+    const store = useStore();
+    const windowResizeEventCallback = async () => {
+      await nextTick();
+      await nextTick();
+      chart?.resize();
+    };
 
-        const mouseHoverEffectFn = (params: any) => {
+    // currently hovered series state
+    const hoveredSeriesState: any = inject("hoveredSeriesState", null);
 
-          // if chart type is pie then set seriesName and seriesIndex from data and dataIndex
-          // seriesName and seriesIndex will used in the same function
-          if(params?.componentSubType === "pie"){
-            params.seriesName = params?.data?.name;
-            params.seriesIndex = params?.dataIndex;
+    const mouseHoverEffectFn = (params: any) => {
+      // if chart type is pie then set seriesName and seriesIndex from data and dataIndex
+      // seriesName and seriesIndex will used in the same function
+      if (params?.componentSubType === "pie") {
+        params.seriesName = params?.data?.name;
+        params.seriesIndex = params?.dataIndex;
+      }
+
+      // set current hovered series name in state
+      hoveredSeriesState?.value?.setHoveredSeriesName(params?.seriesName);
+
+      // scroll legend upto current series index
+      const legendOption = chart?.getOption()?.legend[0];
+
+      if (legendOption) {
+        legendOption.scrollDataIndex = params?.seriesIndex || 0;
+        chart?.setOption({ legend: [legendOption] });
+      }
+    };
+
+    const mouseOutEffectFn = () => {
+      // reset current hovered series name in state
+      hoveredSeriesState?.value?.setHoveredSeriesName("");
+    };
+
+    const legendSelectChangedFn = (params: any) => {
+      // check if all series are selected (all will be false)
+      if (
+        Object.values(params.selected).every((value: any) => value === false)
+      ) {
+        // set all series to true
+        Object.keys(params.selected).forEach((name: any) => {
+          params.selected[name] = true;
+        });
+
+        // select only selected series
+      } else {
+        // set all false except selected series
+        Object.keys(params.selected).forEach((name: any) => {
+          params.selected[name] = params.name === name ? true : false;
+        });
+      }
+
+      // get legend
+      const legendOption = chart?.getOption()?.legend[0];
+
+      // set options with selected object
+      if (legendOption) {
+        legendOption.selected = params?.selected || 0;
+        chart?.setOption({ legend: [legendOption] });
+      }
+    };
+
+    // restore chart and select datazoom button
+    const restoreChart = () => {
+      chart?.dispatchAction({
+        type: "restore",
+      });
+      // we need that toolbox datazoom button initally selected
+      chart?.dispatchAction({
+        type: "takeGlobalCursor",
+        key: "dataZoomSelect",
+        dataZoomSelectActive: true,
+      });
+    };
+
+    const chartInitialSetUp = () => {
+      chart?.on("mouseover", mouseHoverEffectFn);
+      chart?.on("mouseout", mouseOutEffectFn);
+      chart?.on("globalout", () => {
+        mouseHoverEffectFn({});
+        hoveredSeriesState?.value?.setIndex(-1, -1, -1, null);
+        hoveredSeriesState?.value?.setHoveredSeriesName("");
+      });
+
+      chart?.on("legendselectchanged", legendSelectChangedFn);
+      chart?.on("downplay", (params: any) => {
+        // reset hovered series name on downplay
+        hoveredSeriesState?.value?.setHoveredSeriesName("");
+
+        // downplay event will only called by currently hovered panel else it will go into infinite loop
+        // and chart must be timeseries chart
+        if (
+          props.data.extras?.panelId == hoveredSeriesState?.value?.panelId &&
+          props?.data?.extras?.isTimeSeries === true
+        ) {
+          const seriesIndex = params?.batch?.[0]?.seriesIndex;
+          const dataIndex = Math.max(params?.batch?.[0]?.dataIndex, 0);
+
+          // set current hovered series name in state
+          if (chart?.getOption()?.series[seriesIndex]?.data[dataIndex]) {
+            hoveredSeriesState?.value?.setIndex(
+              dataIndex,
+              seriesIndex,
+              props?.data?.extras?.panelId || -1,
+              chart?.getOption()?.series[seriesIndex]?.data[dataIndex][0]
+            );
           }
-          
-          props?.data?.extras?.setCurrentSeriesValue(params?.seriesName);
-
-          // scroll legend upto current series index
-          const legendOption = chart?.getOption()?.legend[0];
-
-          if (legendOption) {
-                legendOption.scrollDataIndex = params?.seriesIndex || 0;
-            chart?.setOption({ legend: [legendOption] });
-          } 
         }
+      });
+      emit("updated:chart", {
+        start: chart?.getOption()?.dataZoom[0]?.startValue || 0,
+        end: chart?.getOption()?.dataZoom[0]?.endValue || 0,
+      });
 
-        const legendSelectChangedFn =  (params: any) => {
-          // check if all series are selected (all will be false)
-          if(Object.values(params.selected).every((value: any) => value === false)){
+      //on dataZoom emit an event of start x and end x
+      chart?.on("dataZoom", function (params: any) {
+        //if batch then emit dataZoom event
+        if (params?.batch) {
+          emit("updated:dataZoom", {
+            start: params?.batch[0]?.startValue || 0,
+            end: params?.batch[0]?.endValue || 0,
+          });
+          restoreChart();
+        }
+        //else if daatazoom then emit dataZoom event
+        else if (chart?.getOption()?.dataZoom) {
+          emit("updated:chart", {
+            start: chart?.getOption()?.dataZoom[0]?.startValue || 0,
+            end: chart?.getOption()?.dataZoom[0]?.endValue || 0,
+          });
+        }
+      });
+      chart?.on("click", function (params: any) {
+        emit("click", params);
+      });
+      window.addEventListener("resize", windowResizeEventCallback);
 
-            // set all series to true
-            Object.keys(params.selected).forEach((name: any) => {
-              params.selected[ name ] = true;
-            });
+      // we need that toolbox datazoom button initally selected
+      chart?.dispatchAction({
+        type: "takeGlobalCursor",
+        key: "dataZoomSelect",
+        dataZoomSelectActive: true,
+      });
+    };
 
-          // select only selected series
-          }else {
+    // dispatch tooltip action for all charts
+    watch(
+      () => [
+        hoveredSeriesState?.value?.seriesIndex,
+        hoveredSeriesState?.value?.dataIndex,
+        hoveredSeriesState?.value?.panelId,
+      ],
+      () => {
+        // if hovered series is not same as currently hovered series
+        // and hovered series is not -1
+        // and chart is time series
+        if (
+          props?.data?.extras?.panelId &&
+          props?.data?.extras?.panelId != hoveredSeriesState?.value?.panelId &&
+          hoveredSeriesState?.value?.panelId != -1 &&
+          props?.data?.extras?.isTimeSeries === true
+        ) {
+          // need to check index should not be greater than series length
+          const hoveredSeriesIndex =
+            chart?.getOption()?.series.length >
+            hoveredSeriesState?.value?.seriesIndex
+              ? hoveredSeriesState?.value?.seriesIndex
+              : 0;
+          let hoveredSeriesDataIndex = hoveredSeriesState?.value?.dataIndex;
 
-            // set all false except selected series
-            Object.keys(params.selected).forEach((name: any) => {
-              params.selected[ name ] = params.name === name ? true : false;
-            });
-
-          }              
-
-          // get legend
-          const legendOption = chart?.getOption()?.legend[0];
-
-          // set options with selected object
-          if (legendOption) {
-            legendOption.selected = params?.selected || 0;
-            chart?.setOption({ legend: [legendOption] });
+          // if hovered series dataindex is not there
+          // or check hovered time is not at the same index in the current chart (ie if at same index then not need to find nearest index)
+          if (
+            !chart?.getOption()?.series[hoveredSeriesIndex]?.data[
+              hoveredSeriesDataIndex
+            ] ||
+            chart?.getOption()?.series[hoveredSeriesIndex]?.data[
+              hoveredSeriesDataIndex
+            ][0] != hoveredSeriesState.value?.hoveredTime
+          ) {
+            hoveredSeriesDataIndex = findNearestIndex(
+              chart?.getOption()?.series[hoveredSeriesIndex]?.data ?? [],
+              hoveredSeriesState?.value?.hoveredTime
+            );
           }
+
+          chart?.dispatchAction({
+            type: "showTip",
+            seriesIndex: hoveredSeriesIndex,
+            dataIndex: hoveredSeriesDataIndex,
+          });
         }
 
-        watch(() => store.state.theme, (newTheme) => {
-          const theme = newTheme === 'dark' ? 'dark' : 'light';
-          chart?.dispose();  
-          chart = echarts.init(chartRef.value, theme);
-          const options = props.data.options || {}
+        // if state is -1 then restore chart
+        if (
+          hoveredSeriesState.value?.dataIndex == -1 &&
+          hoveredSeriesState.value?.seriesIndex == -1 &&
+          hoveredSeriesState.value?.panelId == -1 &&
+          hoveredSeriesState.value?.hoveredTime == null
+        ) {
+          restoreChart();
+        }
+      }
+    );
 
-          // change color and background color of tooltip
-          options.tooltip && options.tooltip.textStyle && (options.tooltip.textStyle.color = theme === 'dark' ? '#fff' : '#000');
-          options.tooltip && (options.tooltip.backgroundColor = theme === 'dark' ? "rgba(0,0,0,1)" : "rgba(255,255,255,1)");
-          options.animation = false
-          chart?.setOption(options, true);
-          chart?.setOption({animation: true});
-          chart?.on("mouseover", mouseHoverEffectFn);
-          chart?.on("globalout", () => {mouseHoverEffectFn({})});
-          chart?.on("legendselectchanged",legendSelectChangedFn);
-
-          // we need that toolbox datazoom button initally selected
-          chart?.dispatchAction({ type: 'takeGlobalCursor', key: 'dataZoomSelect', dataZoomSelectActive:true });
+    watch(
+      () => hoveredSeriesState?.value?.hoveredSeriesName,
+      () => {
+        chart?.dispatchAction({
+          type: "highlight",
+          seriesName: hoveredSeriesState?.value?.hoveredSeriesName,
         });
+      }
+    );
 
-        onMounted(async () => {
-            await nextTick();
-            await nextTick();
-            await nextTick();
-            await nextTick();
-            await nextTick();
-            await nextTick();
-            await nextTick();
-            const theme = store.state.theme === 'dark' ? 'dark' : 'light';
-            if(chartRef.value) {
-              chart = echarts.init(chartRef.value, theme);
-            }
-            chart?.setOption(props?.data?.options || {}, true);
-            chart?.on("mouseover", mouseHoverEffectFn);
-            chart?.on("globalout", () => {mouseHoverEffectFn({})});
-            chart?.on("legendselectchanged",legendSelectChangedFn);
+    watch(
+      () => store.state.theme,
+      (newTheme) => {
+        const theme = newTheme === "dark" ? "dark" : "light";
+        chart?.dispose();
+        chart = echarts.init(chartRef.value, theme);
+        const options = props.data.options || {};
 
-            //on dataZoom emit an event of start x and end x
-            chart?.on('dataZoom', function (params:any) {
-                //if batch then emit dataZoom event
-                if(params?.batch){
-                    emit("updated:dataZoom", {
-                        start: params?.batch[0]?.startValue||0,
-                        end: params?.batch[0]?.endValue||0,
-                    });
-                }
-                //else if daatazoom then emit dataZoom event
-                else if(chart?.getOption()?.dataZoom){
-                    emit("updated:chart", {
-                        start: chart?.getOption()?.dataZoom[0]?.startValue||0,
-                        end: chart?.getOption()?.dataZoom[0]?.endValue||0,
-                    });
-                }
-            });
-            chart?.on('click', function (params:any) {                                
-                emit("click", params);
-            });
-            window.addEventListener("resize", windowResizeEventCallback);
+        // change color and background color of tooltip
+        options.tooltip &&
+          options.tooltip.textStyle &&
+          (options.tooltip.textStyle.color =
+            theme === "dark" ? "#fff" : "#000");
+        options.tooltip &&
+          (options.tooltip.backgroundColor =
+            theme === "dark" ? "rgba(0,0,0,1)" : "rgba(255,255,255,1)");
+        options.animation = false;
+        chart?.setOption(options, true);
+        chart?.setOption({ animation: true });
+        chartInitialSetUp();
+      }
+    );
 
-            // we need that toolbox datazoom button initally selected
-            chart?.dispatchAction({ type: 'takeGlobalCursor', key: 'dataZoomSelect', dataZoomSelectActive:true });
+    onMounted(async () => {
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      const theme = store.state.theme === "dark" ? "dark" : "light";
+      if (chartRef.value) {
+        chart = echarts.init(chartRef.value, theme);
+      }
+      chart?.setOption(props?.data?.options || {}, true);
+      chartInitialSetUp();
+    });
+    onUnmounted(() => {
+      window.removeEventListener("resize", windowResizeEventCallback);
+    });
+
+    //need to resize chart on activated
+    onActivated(() => {
+      windowResizeEventCallback();
+
+      // we need that toolbox datazoom button initally selected
+      chart?.dispatchAction({
+        type: "takeGlobalCursor",
+        key: "dataZoomSelect",
+        dataZoomSelectActive: true,
+      });
+    });
+
+    watch(
+      () => props.data.options,
+      async () => {
+        await nextTick();
+        chart?.resize();
+        chart?.setOption(props?.data?.options || {}, true);
+        // we need that toolbox datazoom button initally selected
+        // for that we required to dispatch an event
+        // while dispatching an event we need to pass a datazoomselectactive as true
+        // this action is available in the echarts docs in list of brush actions
+        chart?.dispatchAction({
+          type: "takeGlobalCursor",
+          key: "dataZoomSelect",
+          dataZoomSelectActive: true,
         });
-        onUnmounted(() => {
-            window.removeEventListener("resize", windowResizeEventCallback);
-        });
-
-        //need to resize chart on activated
-        onActivated(()=>{
-            windowResizeEventCallback();
-
-            // we need that toolbox datazoom button initally selected
-            chart?.dispatchAction({ type: 'takeGlobalCursor', key: 'dataZoomSelect', dataZoomSelectActive:true });
-        })
-        
-        watch(() => props.data.options, async () => {
-            await nextTick();
-            chart?.resize();
-            chart?.setOption(props?.data?.options || {}, true);
-            // we need that toolbox datazoom button initally selected
-            // for that we required to dispatch an event
-            // while dispatching an event we need to pass a datazoomselectactive as true
-            // this action is available in the echarts docs in list of brush actions
-            chart?.dispatchAction({ type: 'takeGlobalCursor', key: 'dataZoomSelect', dataZoomSelectActive:true });
-        }, { deep: true });
-        return { chartRef };
-    },
-})
+        windowResizeEventCallback();
+      },
+      { deep: true }
+    );
+    return { chartRef, hoveredSeriesState };
+  },
+});
 </script>

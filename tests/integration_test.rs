@@ -1,31 +1,35 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #[cfg(test)]
 mod tests {
+    use core::time;
+    use std::{env, fs, str, sync::Once, thread};
+
     use actix_web::{http::header::ContentType, test, web, App};
     use bytes::{Bytes, BytesMut};
     use chrono::Utc;
-    use core::time;
+    use config::CONFIG;
     use openobserve::{
-        common::infra::{config::CONFIG, db::default},
-        common::meta::dashboards::{Dashboard, Dashboards},
-        common::{meta::dashboards::v1, utils::json},
+        common::{
+            meta::dashboards::{v1, Dashboard, Dashboards},
+            utils::json,
+        },
         handler::http::router::*,
     };
     use prost::Message;
-    use std::{env, fs, str, sync::Once, thread};
 
     static START: Once = Once::new();
 
@@ -43,7 +47,6 @@ mod tests {
             env::set_var("ZO_PAYLOAD_LIMIT", "209715200");
             env::set_var("ZO_JSON_LIMIT", "209715200");
             env::set_var("ZO_TIME_STAMP_COL", "_timestamp");
-            let _db = default();
 
             env_logger::init_from_env(env_logger::Env::new().default_filter_or(&CONFIG.log.level));
 
@@ -62,7 +65,7 @@ mod tests {
 
     #[test]
     async fn e2e_test() {
-        //make sure data dir is deleted before we run integ tests
+        // make sure data dir is deleted before we run integ tests
         fs::remove_dir_all("./data")
             .unwrap_or_else(|e| log::info!("Error deleting local dir: {}", e));
 
@@ -79,7 +82,7 @@ mod tests {
         e2e_post_multi().await;
         e2e_post_trace().await;
         e2e_post_metrics().await;
-        //e2e_post_kinesis_data().await;
+        // e2e_post_kinesis_data().await;
 
         // streams
         e2e_get_stream().await;
@@ -97,13 +100,12 @@ mod tests {
         e2e_remove_stream_function().await;
         e2e_delete_function().await;
 
-        /* FIXME: Revise and restore the e2e tests for search API calls.
-         * They have been broken by https://github.com/openobserve/openobserve/pull/570
-         *
-         * // search
-         * e2e_search().await;
-         * e2e_search_around().await;
-         */
+        // FIXME: Revise and restore the e2e tests for search API calls.
+        // They have been broken by https://github.com/openobserve/openobserve/pull/570
+        //
+        // // search
+        // e2e_search().await;
+        // e2e_search_around().await;
 
         // users
         e2e_post_user().await;

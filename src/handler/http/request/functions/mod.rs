@@ -1,27 +1,29 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use actix_web::{delete, get, post, put, web, HttpResponse};
-use actix_web::{http, HttpRequest};
-use ahash::AHashMap as HashMap;
-use std::io::Error;
+use std::{collections::HashMap, io::Error};
 
-use crate::common::meta;
-use crate::common::meta::functions::{StreamOrder, Transform};
-use crate::common::utils::http::get_stream_type_from_request;
+use actix_web::{delete, get, http, post, put, web, HttpRequest, HttpResponse};
 
-/** CreateFunction*/
+use crate::common::{
+    meta,
+    meta::functions::{StreamOrder, Transform},
+    utils::http::get_stream_type_from_request,
+};
+
+/// CreateFunction
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
@@ -34,8 +36,8 @@ use crate::common::utils::http::get_stream_type_from_request;
     ),
     request_body(content = Transform, description = "Function data", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse),
-        (status = 400, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
+        (status = 400, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/functions")]
@@ -44,11 +46,13 @@ pub async fn save_function(
     func: web::Json<Transform>,
 ) -> Result<HttpResponse, Error> {
     let org_id = path.into_inner();
-    let transform = func.into_inner();
+    let mut transform = func.into_inner();
+    transform.name = transform.name.trim().to_string();
+    transform.function = transform.function.trim().to_string();
     crate::service::functions::save_function(org_id, transform).await
 }
 
-/** ListFunctions */
+/// ListFunctions
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
@@ -60,7 +64,7 @@ pub async fn save_function(
         ("org_id" = String, Path, description = "Organization name"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = FunctionList),
+        (status = 200, description = "Success", content_type = "application/json", body = FunctionList),
     )
 )]
 #[get("/{org_id}/functions")]
@@ -68,7 +72,7 @@ async fn list_functions(org_id: web::Path<String>) -> Result<HttpResponse, Error
     crate::service::functions::list_functions(org_id.into_inner()).await
 }
 
-/** DeleteFunction*/
+/// DeleteFunction
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
@@ -81,8 +85,8 @@ async fn list_functions(org_id: web::Path<String>) -> Result<HttpResponse, Error
         ("name" = String, Path, description = "Function name"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse),
-        (status = 404, description="NotFound", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
+        (status = 404, description = "NotFound", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[delete("/{org_id}/functions/{name}")]
@@ -91,7 +95,7 @@ async fn delete_function(path: web::Path<(String, String)>) -> Result<HttpRespon
     crate::service::functions::delete_function(org_id, name).await
 }
 
-/** UpdateFunction */
+/// UpdateFunction
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
@@ -105,8 +109,8 @@ async fn delete_function(path: web::Path<(String, String)>) -> Result<HttpRespon
     ),
     request_body(content = Transform, description = "Function data", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse),
-        (status = 400, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
+        (status = 400, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[put("/{org_id}/functions/{name}")]
@@ -115,11 +119,14 @@ pub async fn update_function(
     func: web::Json<Transform>,
 ) -> Result<HttpResponse, Error> {
     let (org_id, name) = path.into_inner();
-    let transform = func.into_inner();
-    crate::service::functions::update_function(org_id, name, transform).await
+    let name = name.trim();
+    let mut transform = func.into_inner();
+    transform.name = transform.name.trim().to_string();
+    transform.function = transform.function.trim().to_string();
+    crate::service::functions::update_function(&org_id, name, transform).await
 }
 
-/** ListStreamFunctions */
+/// ListStreamFunctions
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
@@ -132,7 +139,7 @@ pub async fn update_function(
         ("stream_name" = String, Path, description = "Stream name"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = StreamFunctionsList),
+        (status = 200, description = "Success", content_type = "application/json", body = StreamFunctionsList),
     )
 )]
 #[get("/{org_id}/{stream_name}/functions")]
@@ -150,13 +157,13 @@ async fn list_stream_functions(
                     http::StatusCode::BAD_REQUEST.into(),
                     e.to_string(),
                 )),
-            )
+            );
         }
     };
     crate::service::functions::list_stream_functions(&org_id, stream_type, &stream_name).await
 }
 
-/** RemoveStreamFunction*/
+/// RemoveStreamFunction
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
@@ -170,8 +177,8 @@ async fn list_stream_functions(
         ("name" = String, Path, description = "Function name"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse),
-        (status = 404, description="NotFound", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success",  content_type = "application/json", body = HttpResponse),
+        (status = 404, description = "NotFound", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[delete("/{org_id}/{stream_name}/functions/{name}")]
@@ -189,14 +196,14 @@ async fn delete_stream_function(
                     http::StatusCode::BAD_REQUEST.into(),
                     e.to_string(),
                 )),
-            )
+            );
         }
     };
     crate::service::functions::delete_stream_function(&org_id, stream_type, &stream_name, &name)
         .await
 }
 
-/** ApplyFunctionToStream */
+/// ApplyFunctionToStream
 #[utoipa::path(
     context_path = "/api",
     tag = "Functions",
@@ -211,8 +218,8 @@ async fn delete_stream_function(
     ),
     request_body(content = StreamOrder, description = "Function data", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse),
-        (status = 400, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
+        (status = 400, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/{stream_name}/functions/{name}")]
@@ -231,7 +238,7 @@ pub async fn add_function_to_stream(
                     http::StatusCode::BAD_REQUEST.into(),
                     e.to_string(),
                 )),
-            )
+            );
         }
     };
     crate::service::functions::add_function_to_stream(

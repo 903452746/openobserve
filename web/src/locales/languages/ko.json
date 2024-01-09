@@ -31,6 +31,7 @@
     "copyToClipboard": "클립보드로 복사",
     "includeSearchTerm": "검색어 포함",
     "addFieldToTable": "테이블에 필드 추가",
+    "removeFieldFromTable": "테이블에서 필드 제거",
     "excludeSearchTerm": "검색어 제외",
     "noOfRecords": "레코드 수:",
     "attributes": "특성",
@@ -69,7 +70,12 @@
     "runQuery": "쿼리 실행",
     "syntaxGuideLabel": "구문 가이드",
     "logs": "로그",
-    "enrichmentTables": "인리치먼트 테이블"
+    "enrichmentTables": "인리치먼트 테이블",
+    "savedViewsLabel": "저장된 뷰",
+    "savedViewsNotFound": "저장된 뷰를 찾을 수 없습니다!",
+    "savedViewAction": "저장된 뷰 생성/업데이트",
+    "savedViewDropdownLabel": "저장된 뷰",
+    "savedViewName": "이름 보기"
   },
   "menu": {
     "home": "홈",
@@ -332,11 +338,13 @@
     "updateEnrichmentTable": "인리치먼트 테이블 업데이트",
     "searchEnrichmentTable": "검색 강화 테이블",
     "uploadCSVFile": "CSV 파일 업로드",
-    "selectFunction": "기능 선택"
+    "selectFunction": "기능 선택",
+    "appendData": "기존 보강 테이블에 데이터 추가"
   },
   "confirmDialog": {
     "cancel": "취소",
-    "ok": "확인"
+    "ok": "확인",
+    "loading": "로딩 중..."
   },
   "ingestion": {
     "header": "섭취",
@@ -528,32 +536,6 @@
     "longitude": "경도",
     "weight": "무게"
   },
-  "alerts": {
-    "header": "알림",
-    "add": "알림 추가",
-    "edit": "편집",
-    "search": "검색 알림",
-    "name": "이름",
-    "function": "알림 세부 정보",
-    "save": "저장",
-    "sql": "쿼리",
-    "realTime": "리얼 타임",
-    "scheduled": "예약됨",
-    "duration": "알림 평가 기간",
-    "condition": "조건",
-    "interval": "알림이 평가되는 빈도",
-    "delayNotificationUntil": "알림 1회 이후까지 알림 지연",
-    "destination": "여행지",
-    "stream_name": "스트림 이름",
-    "actions": "액션",
-    "cancel": "취소",
-    "slack": "슬랙",
-    "prom_am": "알림 관리자",
-    "addTitle": "알림 추가",
-    "updateTitle": "업데이트 알림",
-    "delete": "삭제",
-    "stream_type": "스트림 유형"
-  },
   "home": {
     "streams": "스트림",
     "totalDataIngested": "수집된 총 데이터",
@@ -613,6 +595,32 @@
     "SearchParquetFileNotFound": "오류: 검색 마루 파일을 찾을 수 없습니다.",
     "SearchFieldHasNoCompatibleDataType": "오류: 검색 파일에 호환되는 데이터 형식이 없습니다.",
     "SearchSQLExecuteError": "오류: 검색 SQL 실행 오류입니다."
+  },
+  "alerts": {
+    "header": "알림",
+    "add": "알림 추가",
+    "edit": "편집",
+    "search": "검색 알림",
+    "name": "이름",
+    "function": "알림 세부 정보",
+    "save": "저장",
+    "sql": "쿼리",
+    "realTime": "리얼 타임",
+    "scheduled": "예약됨",
+    "duration": "알림 평가 기간",
+    "condition": "조건",
+    "interval": "알림이 평가되는 빈도",
+    "delayNotificationUntil": "알림 1회 이후까지 알림 지연",
+    "destination": "여행지",
+    "stream_name": "스트림 이름",
+    "actions": "액션",
+    "cancel": "취소",
+    "slack": "슬랙",
+    "prom_am": "알림 관리자",
+    "addTitle": "알림 추가",
+    "updateTitle": "업데이트 알림",
+    "delete": "삭제",
+    "stream_type": "스트림 유형"
   },
   "alert_templates": {
     "header": "템플릿",

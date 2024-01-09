@@ -1,20 +1,27 @@
 // Copyright 2023 Zinc Labs Inc.
-
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-
-//      http:www.apache.org/licenses/LICENSE-2.0
-
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import config from "../aws-exports";
 import { ref } from "vue";
 import { DateTime } from "luxon";
+import moment from "moment-timezone";
+import { v4 as uuidv4 } from "uuid";
+import streamService from "@/services/stream";
+import { useQuasar } from "quasar";
+import { useStore } from "vuex";
+import billings from "@/services/billings";
 
 const useLocalStorage = (
   key: string,
@@ -90,9 +97,12 @@ export const getUserInfo = (loginString: string) => {
         const encodedSessionData = b64EncodeUnicode(JSON.stringify(decToken));
 
         useLocalUserInfo(encodedSessionData);
-      }
-      if (propArr[0] == "id_token") {
         useLocalToken(propArr[1]);
+      }
+      else if (propArr[0] == "access_token") {
+        useLocalStorage("access_token", propArr[1], false, false);
+      } if (propArr[0] == "refresh_token") {
+        useLocalStorage("refresh_token", propArr[1], false, false);
       }
     }
 
@@ -101,6 +111,13 @@ export const getUserInfo = (loginString: string) => {
     console.log(`Error in getUserInfo util with loginString: ${loginString}`);
   }
 };
+
+export const invlidateLoginData = () => {
+  useLocalStorage("refresh_token", "", true, false);
+  useLocalStorage("access_token", "", true, false);
+  useLocalStorage("token", "", true, false);
+}
+
 
 export const getLoginURL = () => {
   return `https://${config.oauth.domain}/oauth/v2/authorize?client_id=${config.aws_user_pools_web_client_id}&response_type=${config.oauth.responseType}&redirect_uri=${config.oauth.redirectSignIn}&scope=${config.oauth.scope}`;
@@ -275,20 +292,61 @@ export const getPath = () => {
     window.location.origin == "http://localhost:8081"
       ? "/"
       : pos > -1
-      ? window.location.pathname.slice(0, pos + 5)
-      : "";
+        ? window.location.pathname.slice(0, pos + 5)
+        : "";
   const cloudPath = import.meta.env.BASE_URL;
   return config.isCloud == "true" ? cloudPath : path;
 };
 
-export const routeGuardPendingSubscriptions = (
-  to: any,
-  from: any,
-  next: any
-) => {
-  next();
-  // const local_organization = ref();
-  // local_organization.value = useLocalOrganization();
+export const routeGuard = async (to: any, from: any, next: any) => {
+  const store = useStore();
+  const q = useQuasar();
+  if (
+    config.isCloud &&
+    store.state.selectedOrganization.subscription_type == config.freePlan
+  ) {
+    await billings
+      .list_subscription(store.state.selectedOrganization.identifier)
+      .then((res: any) => {
+        if (res.data.data.length == 0) {
+          next({ path: "/billings/plans" });
+        }
+
+        if (
+          res.data.data.CustomerBillingObj.customer_id == null ||
+          res.data.data.CustomerBillingObj.customer_id == ""
+        ) {
+          next({ path: "/billings/plans" });
+        }
+      });
+  }
+
+  if (
+    to.path.indexOf("/ingestion") == -1 &&
+    store.state.zoConfig.hasOwnProperty("restricted_routes_on_empty_data") &&
+    store.state.zoConfig.restricted_routes_on_empty_data == true
+  ) {
+    const local_organization: any = useLocalOrganization();
+
+    await streamService
+      .nameList(local_organization?.value?.identifier, "", false)
+      .then((response) => {
+        if (response.data.list.length == 0) {
+          q.notify({
+            type: "warning",
+            message:
+              "You haven't initiated the data ingestion process yet. To explore other pages, please start the data ingestion.",
+            timeout: 5000,
+          });
+          next({ path: "/ingestion" });
+        } else {
+          next();
+        }
+      });
+  } else {
+    next();
+  }
+
   // if (local_organization.value.value == null || config.isCloud == "false") {
   //   next();
   // }
@@ -433,7 +491,7 @@ export function formatDuration(ms: number) {
 export const timestampToTimezoneDate = (
   unixMilliTimestamp: number,
   timezone: string = "UTC",
-  format: string = "MMM dd, yyyy HH:mm:ss.SSS Z"
+  format: string = "yyyy-MM-dd HH:mm:ss.SSS"
 ) => {
   return DateTime.fromMillis(Math.floor(unixMilliTimestamp))
     .setZone(timezone)
@@ -470,4 +528,81 @@ export const convertToUtcTimestamp = (
   const utcTimestamp = Math.round(dt.toUTC().toMillis());
 
   return utcTimestamp * 1000;
+};
+
+export const localTimeSelectedTimezoneUTCTime = (
+  time: any,
+  timezone: string
+) => {
+  // Creating a Date object using the timestamp
+  const date = new Date(time);
+
+  // Extracting date and time components
+  const year = date.getFullYear();
+  const month = date.getMonth(); // Months are zero-indexed
+  const day = date.getDate();
+  const hour = date.getHours();
+  const minute = date.getMinutes();
+  const second = date.getSeconds();
+
+  // Create a moment object using the provided date, time, and timezone
+  const convertedDate = moment.tz(
+    { year, month, day, hour, minute, second },
+    timezone
+  );
+
+  console.log(convertedDate.unix() * 1000000);
+
+  // Convert the moment object to a Unix timestamp (in seconds)
+  const unixTimestamp = convertedDate.unix() * 1000000;
+
+  return unixTimestamp;
+};
+
+const isObject = (obj: any) => obj !== null && typeof obj === "object";
+
+const isValidKey = (key: string) => {
+  // Add any additional checks to ensure key validity
+  return key !== "__proto__" && key !== "constructor" && key !== "prototype";
+};
+
+export const mergeDeep = (target: any, source: any) => {
+  if (isObject(target) && isObject(source)) {
+    for (const key in source) {
+      if (
+        isValidKey(key) &&
+        Object.prototype.hasOwnProperty.call(source, key)
+      ) {
+        if (isObject(source[key])) {
+          if (!target[key]) target[key] = {};
+          mergeDeep(target[key], source[key]);
+        } else {
+          target[key] = source[key];
+        }
+      }
+    }
+  }
+  return target;
+};
+
+export function getUUID() {
+  return uuidv4();
+}
+
+export const maskText = (text: string) => {
+  return text;
+
+  // Disabled masking as it was not great usefull
+  const visibleChars = 4; // Number of characters to keep visible at the beginning and end
+  const maskedChars = text.length - visibleChars * 2;
+
+  if (maskedChars > 0) {
+    const maskedText =
+      text.substring(0, visibleChars) +
+      "*".repeat(maskedChars) +
+      text.slice(-visibleChars);
+    return maskedText;
+  } else {
+    return "*".repeat(text.length); // If the text is too short, mask all characters
+  }
 };

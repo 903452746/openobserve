@@ -1,25 +1,39 @@
+// Copyright 2023 Zinc Labs Inc.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 use chrono::Utc;
+use config::CONFIG;
 
 use crate::common::{
-    infra::{
-        config::CONFIG,
-        db::{self, Db},
-    },
-    meta::alert::Trigger,
-    utils::{file::get_file_meta, json},
+    infra::db::{self, Db},
+    utils::file::get_file_meta,
 };
 
-const ITEM_PREFIXES: [&str; 11] = [
+const ITEM_PREFIXES: [&str; 13] = [
     "/user",
     "/schema",
     "/syslog",
     "/function",
-    "/dashboard",
+    "/dashboard",    // dashboard
+    "/folders",      // dashboard
     "/templates",    // alert
     "/destinations", // alert
     "/alerts",       // alert
     "/trigger",      // alert
     "/compact",
+    "/organization",
     "/kv",
 ];
 
@@ -37,7 +51,7 @@ pub async fn load_meta_from_sled() -> Result<(), anyhow::Error> {
         return Ok(());
     }
     let (src, dest) = if CONFIG.common.local_mode {
-        (Box::<db::sled::SledDb>::default(), db::default())
+        (Box::<db::sled::SledDb>::default(), db::get_db().await)
     } else {
         panic!("enable local mode to migrate from sled");
     };
@@ -51,14 +65,14 @@ pub async fn load_meta_from_sled() -> Result<(), anyhow::Error> {
         );
 
         for (key, value) in res.iter() {
-            let final_key;
-            let key = if key.starts_with("/trigger") {
-                let local_val: Trigger = json::from_slice(value).unwrap();
-                final_key = format!("/trigger/{}/{}", local_val.org, local_val.alert_name);
-                &final_key
-            } else {
-                key
-            };
+            // let final_key;
+            // let key = if key.starts_with("/trigger") {
+            //     let local_val: Trigger = json::from_slice(value).unwrap();
+            //     final_key = format!("/trigger/{}/{}", local_val.org,
+            // local_val.alert_name);     &final_key
+            // } else {
+            //     key
+            // };
             match dest.put(key, value.clone(), false).await {
                 Ok(_) => {}
                 Err(e) => {
@@ -82,7 +96,7 @@ pub async fn load_meta_from_sled() -> Result<(), anyhow::Error> {
 pub async fn load_meta_from_etcd() -> Result<(), anyhow::Error> {
     println!("load meta from etcd");
     let (src, dest) = if !CONFIG.common.local_mode {
-        (Box::<db::etcd::Etcd>::default(), db::default())
+        (Box::<db::etcd::Etcd>::default(), db::get_db().await)
     } else {
         panic!("disable local mode to migrate from etcd");
     };
@@ -97,14 +111,14 @@ pub async fn load_meta_from_etcd() -> Result<(), anyhow::Error> {
         );
         let mut count = 0;
         for (key, value) in res.iter() {
-            let final_key;
-            let key = if key.starts_with("/trigger") {
-                let local_val: Trigger = json::from_slice(value).unwrap();
-                final_key = format!("/trigger/{}/{}", local_val.org, local_val.alert_name);
-                &final_key
-            } else {
-                key
-            };
+            // let final_key;
+            // let key = if key.starts_with("/trigger") {
+            //     let local_val: Trigger = json::from_slice(value).unwrap();
+            //     final_key = format!("/trigger/{}/{}", local_val.org,
+            // local_val.alert_name);     &final_key
+            // } else {
+            //     key
+            // };
             match dest.put(key, value.clone(), false).await {
                 Ok(_) => {
                     count += 1;

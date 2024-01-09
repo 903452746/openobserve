@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -26,12 +27,12 @@
             padding="0.6rem"
             icon="content_copy"
             color="grey"
-            @click="copyToClipboardFn(content)"
+            @click="copyToClipboardFn()"
           />
         </div>
       </div>
     </div>
-    <pre data-test="rum-content-text">{{ displayContent || content }}</pre>
+    <pre data-test="rum-content-text">{{ computedContent }}</pre>
   </div>
 </template>
 
@@ -39,7 +40,9 @@
 // @ts-nocheck
 import { defineComponent, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { useStore } from "vuex";
 import { useQuasar, copyToClipboard } from "quasar";
+import { maskText, b64EncodeUnicode } from "../utils/zincutils";
 
 export default defineComponent({
   name: "CopyContent",
@@ -54,10 +57,34 @@ export default defineComponent({
     },
   },
   setup(props, { emit }) {
+    const store = useStore();
     const { t } = useI18n();
     const q = useQuasar();
+    const email = ref(store.state.userInfo.email);
+    const passcode = ref(store.state.organizationData.organizationPasscode);
+    const basicPasscode = ref();
 
-    const copyToClipboardFn = (content: any) => {
+    const replaceValues = (data: string, isMask: boolean = false) => {
+      email.value = store.state.userInfo.email;
+      passcode.value = store.state.organizationData.organizationPasscode;
+      basicPasscode.value = b64EncodeUnicode(
+        `${store.state.userInfo.email}:${store.state.organizationData.organizationPasscode}`
+      );
+      if (isMask) {
+        return data
+          .replaceAll("[EMAIL]", maskText(email.value))
+          .replaceAll("[PASSCODE]", maskText(passcode.value))
+          .replaceAll("[BASIC_PASSCODE]", maskText(basicPasscode.value));
+      } else {
+        return data
+          .replaceAll("[EMAIL]", email.value)
+          .replaceAll("[PASSCODE]", passcode.value)
+          .replaceAll("[BASIC_PASSCODE]", basicPasscode.value);
+      }
+    };
+
+    const copyToClipboardFn = () => {
+      const content = replaceValues(props.content, false);
       copyToClipboard(content)
         .then(() => {
           q.notify({
@@ -75,10 +102,33 @@ export default defineComponent({
         });
     };
 
+    const displayData = ref(props.displayContent || props.content);
+    const computedContent = ref();
+    computedContent.value = replaceValues(displayData.value, true);
+
+    const refreshData = () => {
+      computedContent.value = replaceValues(displayData.value, true);
+    };
+
     return {
       t,
+      store,
       copyToClipboardFn,
+      displayData,
+      replaceValues,
+      computedContent,
+      refreshData,
     };
+  },
+  computed: {
+    computedData() {
+      return this.store.state.organizationData.organizationPasscode;
+    },
+  },
+  watch: {
+    computedData() {
+      this.refreshData();
+    },
   },
 });
 </script>

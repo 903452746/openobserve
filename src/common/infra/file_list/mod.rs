@@ -1,36 +1,38 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::AttributeValue;
+use config::{
+    meta::stream::{FileKey, FileMeta, StreamType},
+    CONFIG,
+};
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
 
 use crate::common::{
-    infra::{
-        config::CONFIG,
-        errors::{Error, Result},
-    },
+    infra::errors::Result,
     meta::{
-        common::{FileKey, FileMeta},
         meta_store::MetaStore,
         stream::{PartitionTimeLevel, StreamStats},
-        StreamType,
     },
 };
 
 pub mod dynamo;
+pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
@@ -42,6 +44,7 @@ pub fn connect() -> Box<dyn FileList> {
         MetaStore::Sqlite => Box::<sqlite::SqliteFileList>::default(),
         MetaStore::Etcd => Box::<sqlite::SqliteFileList>::default(),
         MetaStore::DynamoDB => Box::<dynamo::DynamoFileList>::default(),
+        MetaStore::MySQL => Box::<mysql::MysqlFileList>::default(),
         MetaStore::PostgreSQL => Box::<postgres::PostgresFileList>::default(),
     }
 }
@@ -74,7 +77,13 @@ pub trait FileList: Sync + Send + 'static {
         time_level: PartitionTimeLevel,
         time_range: (i64, i64),
     ) -> Result<Vec<(String, FileMeta)>>;
-    async fn query_deleted(&self, org_id: &str, time_max: i64) -> Result<Vec<String>>;
+    async fn query_deleted(&self, org_id: &str, time_max: i64, limit: i64) -> Result<Vec<String>>;
+    async fn get_min_ts(
+        &self,
+        org_id: &str,
+        stream_type: StreamType,
+        stream_name: &str,
+    ) -> Result<i64>;
     async fn get_max_pk_value(&self) -> Result<i64>;
     async fn stats(
         &self,
@@ -90,7 +99,7 @@ pub trait FileList: Sync + Send + 'static {
         stream_name: Option<&str>,
     ) -> Result<Vec<(String, StreamStats)>>;
     async fn set_stream_stats(&self, org_id: &str, streams: &[(String, StreamStats)])
-        -> Result<()>;
+    -> Result<()>;
     async fn reset_stream_stats(&self) -> Result<()>;
     async fn reset_stream_stats_min_ts(
         &self,
@@ -178,8 +187,13 @@ pub async fn query(
 }
 
 #[inline]
-pub async fn query_deleted(org_id: &str, time_max: i64) -> Result<Vec<String>> {
-    CLIENT.query_deleted(org_id, time_max).await
+pub async fn query_deleted(org_id: &str, time_max: i64, limit: i64) -> Result<Vec<String>> {
+    CLIENT.query_deleted(org_id, time_max, limit).await
+}
+
+#[inline]
+pub async fn get_min_ts(org_id: &str, stream_type: StreamType, stream_name: &str) -> Result<i64> {
+    CLIENT.get_min_ts(org_id, stream_type, stream_name).await
 }
 
 #[inline]
@@ -240,26 +254,6 @@ pub async fn is_empty() -> bool {
 #[inline]
 pub async fn clear() -> Result<()> {
     CLIENT.clear().await
-}
-
-/// parse file key to get stream_key, date_key, file_name
-pub fn parse_file_key_columns(key: &str) -> Result<(String, String, String)> {
-    // eg: files/default/logs/olympics/2022/10/03/10/6982652937134804993_1.parquet
-    let columns = key.splitn(9, '/').collect::<Vec<&str>>();
-    if columns.len() < 9 {
-        return Err(Error::Message(format!(
-            "[file_list] Invalid file path: {}",
-            key
-        )));
-    }
-    // let _ = columns[0].to_string(); // files/
-    let stream_key = format!("{}/{}/{}", columns[1], columns[2], columns[3]);
-    let date_key = format!(
-        "{}/{}/{}/{}",
-        columns[4], columns[5], columns[6], columns[7]
-    );
-    let file_name = columns[8].to_string();
-    Ok((stream_key, date_key, file_name))
 }
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]

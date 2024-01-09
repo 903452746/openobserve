@@ -1,23 +1,42 @@
 <!-- Copyright 2023 Zinc Labs Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-     http:www.apache.org/licenses/LICENSE-2.0
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 <template>
   <q-page class="q-pa-none" style="min-height: inherit">
-    <div class="col-12 items-center no-wrap q-pt-md">
-      <div class="col" data-test="add-template-title">
-        <div v-if="isUpdatingTemplate" class="text-h6">
-          {{ t("alert_templates.updateTitle") }}
+    <div class="row items-center no-wrap q-mx-md q-my-sm">
+      <div class="flex items-center">
+        <div
+          class="flex justify-center items-center q-mr-md cursor-pointer"
+          style="
+            border: 1.5px solid;
+            border-radius: 50%;
+            width: 22px;
+            height: 22px;
+          "
+          title="Go Back"
+          @click="router.back()"
+        >
+          <q-icon name="arrow_back_ios_new" size="14px" />
         </div>
-        <div v-else class="text-h6">
-          {{ t("alert_templates.addTitle") }}
+        <div class="col" data-test="add-template-title">
+          <div v-if="isUpdatingTemplate" class="text-h6">
+            {{ t("alert_templates.updateTitle") }}
+          </div>
+          <div v-else class="text-h6">
+            {{ t("alert_templates.addTitle") }}
+          </div>
         </div>
       </div>
     </div>
@@ -35,7 +54,7 @@
             <q-input
               data-test="add-template-name-input"
               v-model="formData.name"
-              :label="t('alerts.name')"
+              :label="t('alerts.name') + ' *'"
               color="input-border"
               bg-color="input-bg"
               class="showLabelOnTop"
@@ -45,7 +64,7 @@
               dense
               v-bind:readonly="isUpdatingTemplate"
               v-bind:disable="isUpdatingTemplate"
-              :rules="[(val: any) => !!val || 'Field is required!']"
+              :rules="[(val: any) => !!val.trim() || 'Field is required!']"
               tabindex="0"
             />
           </div>
@@ -54,7 +73,7 @@
               class="q-pb-sm text-bold"
               data-test="add-template-body-input-title"
             >
-              {{ t("alert_templates.body") }}
+              {{ t("alert_templates.body") + " *" }}
             </div>
             <div
               data-test="add-template-body-input"
@@ -98,11 +117,13 @@
           </div>
           <q-separator style="width: 100%" />
           <div class="q-py-md q-px-xs">
-            <div>stream_name</div>
-            <div>org_name</div>
-            <div>alert_name</div>
-            <div>alert_type</div>
-            <div>timestamp</div>
+            <div>org_name, stream_type, stream_name</div>
+            <div>alert_name, alert_type</div>
+            <div>alert_period, alert_operator, alert_threshold</div>
+            <div>alert_count, alert_agg_value</div>
+            <div>alert_start_time, alert_end_time</div>
+            <div><b>row</b> as a line template variable</div>
+            <div><b>All of the stream fields are variables.</b></div>
           </div>
           <div class="q-pb-md q-px-xs">
             <div class="text-bold text-body-1 q-pb-sm">
@@ -139,12 +160,10 @@
 import {
   ref,
   onMounted,
-  computed,
   defineProps,
   onBeforeMount,
   onActivated,
   defineEmits,
-  nextTick,
 } from "vue";
 import type { Ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -156,6 +175,7 @@ import templateService from "@/services/alert_templates";
 import { useStore } from "vuex";
 import { copyToClipboard, useQuasar } from "quasar";
 import type { TemplateData, Template } from "@/ts/interfaces/index";
+import { useRouter } from "vue-router";
 const props = defineProps<{ template: TemplateData | null }>();
 const emit = defineEmits(["get:templates", "cancel:hideform"]);
 const { t } = useI18n();
@@ -240,10 +260,8 @@ onMounted(async () => {
     suggestOnTriggerCharacters: false,
   });
   editorobj.onKeyUp((e: any) => {
-    if (editorobj.getValue() != "") {
-      editorData.value = editorobj.getValue();
-      formData.value.body = editorobj.getValue();
-    }
+    editorData.value = editorobj.getValue();
+    formData.value.body = editorobj.getValue();
   });
   editorobj.setValue(formData.value.body);
 });
@@ -269,7 +287,11 @@ const isTemplateBodyValid = () => {
   }
 };
 
-const isTemplateFilled = () => formData.value.name && formData.value.body;
+const router = useRouter();
+
+const isTemplateFilled = () =>
+  formData.value.name.trim().trim().length &&
+  formData.value.body.trim().trim().length;
 
 const saveTemplate = () => {
   if (!isTemplateFilled()) {
@@ -295,7 +317,7 @@ const saveTemplate = () => {
       org_identifier: store.state.selectedOrganization.identifier,
       template_name: formData.value.name,
       data: {
-        name: formData.value.name,
+        name: formData.value.name.trim(),
         body: formData.value.body,
       },
     })

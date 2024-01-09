@@ -1,23 +1,22 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use config::{meta::stream::StreamType, RwHashMap};
 use once_cell::sync::Lazy;
 
-use crate::common::{
-    infra::{config::RwHashMap, db as infra_db},
-    meta::StreamType,
-};
+use crate::common::infra::db as infra_db;
 
 static CACHES: Lazy<RwHashMap<String, i64>> = Lazy::new(Default::default);
 
@@ -31,7 +30,7 @@ pub async fn get_offset(org_id: &str, stream_name: &str, stream_type: StreamType
         return (*offset, "".to_string());
     }
 
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let value = match db.get(&key).await {
         Ok(ret) => String::from_utf8_lossy(&ret).to_string(),
         Err(_) => String::from("0"),
@@ -66,7 +65,7 @@ pub async fn del_offset(
 ) -> Result<(), anyhow::Error> {
     let key = mk_key(org_id, stream_type, stream_name);
     CACHES.remove(&key);
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     db.delete_if_exists(&key, false, infra_db::NO_NEED_WATCH)
         .await
         .map_err(Into::into)
@@ -74,7 +73,7 @@ pub async fn del_offset(
 
 pub async fn list_offset() -> Result<Vec<(String, i64)>, anyhow::Error> {
     let mut items = Vec::new();
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/compact/files/";
     let ret = db.list(key).await?;
     for (item_key, item_value) in ret {
@@ -92,7 +91,7 @@ pub async fn list_offset() -> Result<Vec<(String, i64)>, anyhow::Error> {
 }
 
 pub async fn sync_cache_to_db() -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     for item in CACHES.clone().iter() {
         let key = item.key().to_string();
         let offset = item.value();

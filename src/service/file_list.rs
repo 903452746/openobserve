@@ -1,37 +1,45 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use futures::future::try_join_all;
 use std::io::Write;
+
+use config::{
+    ider,
+    meta::{
+        cluster::Node,
+        stream::{FileKey, FileMeta, StreamType},
+    },
+    CONFIG,
+};
+use futures::future::try_join_all;
 use tonic::{codec::CompressionEncoding, metadata::MetadataValue, transport::Channel, Request};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::common::{
-    infra::{
-        cluster,
-        errors::{Error, ErrorCodes},
-        {config::CONFIG, file_list, ider, storage},
+use crate::{
+    common::{
+        infra::{
+            cluster,
+            errors::{Error, ErrorCodes},
+            file_list, storage,
+        },
+        meta::stream::{PartitionTimeLevel, ScanStats},
+        utils::{file::get_file_meta as util_get_file_meta, json},
     },
-    meta::{
-        common::{FileKey, FileMeta},
-        stream::{PartitionTimeLevel, ScanStats},
-        StreamType,
-    },
-    utils::{file::get_file_meta as util_get_file_meta, json},
+    handler::grpc::cluster_rpc,
+    service::{db, search::MetadataMap},
 };
-use crate::handler::grpc::cluster_rpc;
-use crate::service::{db, search::MetadataMap};
 
 pub async fn query(
     org_id: &str,
@@ -129,7 +137,7 @@ pub async fn query(
         tasks.push(task);
     }
     let mut max_id: i64 = 0;
-    let mut max_id_node: Option<cluster::Node> = None;
+    let mut max_id_node: Option<Node> = None;
     let task_results = try_join_all(tasks).await?;
     for task in task_results {
         let res = task?;
@@ -222,7 +230,7 @@ pub async fn query(
                 let err = ErrorCodes::from_json(err.message())?;
                 return Err(anyhow::anyhow!(Error::ErrorCode(err).to_string()));
             }
-            return Err(anyhow::anyhow!("search node error".to_string(),));
+            return Err(anyhow::anyhow!("search node error".to_string()));
         }
     };
     let files = response.items.iter().map(FileKey::from).collect::<Vec<_>>();
@@ -353,7 +361,7 @@ async fn delete_parquet_file_s3(key: &str, file_list_only: bool) -> Result<(), a
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[actix_web::test]

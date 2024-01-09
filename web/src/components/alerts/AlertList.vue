@@ -1,28 +1,32 @@
 <!-- Copyright 2023 Zinc Labs Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-     http:www.apache.org/licenses/LICENSE-2.0
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <!-- eslint-disable vue/v-on-event-hyphenation -->
 <!-- eslint-disable vue/attribute-hyphenation -->
 <template>
-  <q-page
+  <div
     data-test="alert-list-page"
-    class="q-pa-none"
-    style="min-height: inherit"
+    class="q-pa-none flex"
+    style="height: calc(100vh - 57px)"
   >
-    <div v-if="!showAddAlertDialog">
+    <div v-if="!showAddAlertDialog" class="full-width">
       <q-table
         data-test="alert-list-table"
         ref="qTable"
-        :rows="alerts"
+        :rows="alertsRows"
         :columns="columns"
         row-key="id"
         :pagination="pagination"
@@ -31,10 +35,79 @@
         style="width: 100%"
       >
         <template #no-data>
-          <NoData />
+          <div
+            v-if="!templates.length || !destinations.length"
+            class="full-width flex column justify-center items-center text-center"
+          >
+            <div style="width: 600px" class="q-mt-xl">
+              <template v-if="!templates.length">
+                <div class="text-subtitle1">
+                  It looks like you haven't created any Templates yet. To create
+                  an Alert, you'll need to have at least one Destination and one
+                  Template in place
+                </div>
+                <q-btn
+                  class="q-mt-md"
+                  label="Create Template"
+                  size="md"
+                  color="primary"
+                  no-caps
+                  style="border-radius: 4px"
+                  @click="routeTo('alertTemplates')"
+                />
+              </template>
+              <template v-if="!destinations.length">
+                <div class="text-subtitle1">
+                  It looks like you haven't created any Destinations yet. To
+                  create an Alert, you'll need to have at least one Destination
+                  and one Template in place
+                </div>
+                <q-btn
+                  class="q-mt-md"
+                  label="Create Destination"
+                  size="md"
+                  color="primary"
+                  no-caps
+                  style="border-radius: 4px"
+                  @click="routeTo('alertDestinations')"
+                />
+              </template>
+            </div>
+          </div>
+          <template v-else>
+            <NoData />
+          </template>
         </template>
         <template v-slot:body-cell-actions="props">
           <q-td :props="props">
+            <div
+              v-if="alertStateLoadingMap[props.row.name]"
+              style="display: inline-block; width: 33.14px; height: auto"
+              class="flex justify-center items-center q-ml-xs"
+              :title="`Turning ${props.row.enabled ? 'Off' : 'On'}`"
+            >
+              <q-circular-progress
+                indeterminate
+                rounded
+                size="16px"
+                :value="1"
+                color="secondary"
+              />
+            </div>
+            <q-btn
+              v-else
+              :data-test="`alert-list-${props.row.name}-udpate-alert`"
+              :icon="props.row.enabled ? outlinedPause : outlinedPlayArrow"
+              class="q-ml-xs material-symbols-outlined"
+              padding="sm"
+              unelevated
+              size="sm"
+              :color="props.row.enabled ? 'negative' : 'positive'"
+              round
+              flat
+              :title="props.row.enabled ? t('alerts.pause') : t('alerts.start')"
+              @click="toggleAlertState(props.row)"
+            />
             <q-btn
               :data-test="`alert-list-${props.row.name}-udpate-alert`"
               icon="edit"
@@ -92,6 +165,8 @@
             padding="sm lg"
             color="secondary"
             no-caps
+            :disable="!destinations.length"
+            :title="!destinations.length ? t('alerts.noDestinations') : ''"
             :label="t(`alerts.add`)"
             @click="showAddUpdateFn({})"
           />
@@ -117,7 +192,7 @@
         </template>
       </q-table>
     </div>
-    <div v-else>
+    <template v-else>
       <AddAlert
         v-model="formData"
         :isUpdated="isUpdated"
@@ -125,7 +200,7 @@
         @update:list="refreshList"
         @cancel:hideform="hideForm"
       />
-    </div>
+    </template>
     <ConfirmDialog
       title="Delete Alert"
       message="Are you sure you want to delete alert?"
@@ -133,11 +208,11 @@
       @update:cancel="confirmDelete = false"
       v-model="confirmDelete"
     />
-  </q-page>
+  </div>
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, onBeforeMount, onActivated } from "vue";
+import { defineComponent, ref, onBeforeMount, onActivated, watch } from "vue";
 import type { Ref } from "vue";
 import { useStore } from "vuex";
 import { useRouter } from "vue-router";
@@ -146,15 +221,20 @@ import { useI18n } from "vue-i18n";
 import QTablePagination from "@/components/shared/grid/Pagination.vue";
 import alertsService from "@/services/alerts";
 import destinationService from "@/services/alert_destination";
+import templateService from "@/services/alert_templates";
 import AddAlert from "@/components/alerts/AddAlert.vue";
 import NoData from "@/components/shared/grid/NoData.vue";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import segment from "@/services/segment_analytics";
 import config from "@/aws-exports";
 import { getImageURL, verifyOrganizationStatus } from "@/utils/zincutils";
-import type { AlertData } from "@/ts/interfaces/index";
-import { outlinedDelete } from "@quasar/extras/material-icons-outlined";
-import { cloneDeep } from "lodash-es";
+import type { Alert, AlertListItem } from "@/ts/interfaces/index";
+import {
+  outlinedDelete,
+  outlinedPause,
+  outlinedPlayArrow,
+} from "@quasar/extras/material-icons-outlined";
+// import alertList from "./alerts";
 
 export default defineComponent({
   name: "AlertList",
@@ -169,13 +249,24 @@ export default defineComponent({
     const { t } = useI18n();
     const $q = useQuasar();
     const router = useRouter();
-    const alerts: Ref<AlertData[]> = ref([]);
-    const formData: Ref<AlertData | {}> = ref({});
+    const alerts: Ref<Alert[]> = ref([]);
+    const alertsRows: Ref<AlertListItem[]> = ref([]);
+    const formData: Ref<Alert | {}> = ref({});
     const showAddAlertDialog: any = ref(false);
     const qTable: Ref<InstanceType<typeof QTable> | null> = ref(null);
     const selectedDelete: any = ref(null);
     const isUpdated: any = ref(false);
     const confirmDelete = ref<boolean>(false);
+    const splitterModel = ref(220);
+    const alertStateLoadingMap: Ref<{ [key: string]: boolean }> = ref({});
+    const folders = ref([
+      {
+        name: "folder1",
+      },
+      {
+        name: "folder2",
+      },
+    ]);
     const columns: any = ref<QTableProps["columns"]>([
       {
         name: "#",
@@ -191,9 +282,16 @@ export default defineComponent({
         sortable: true,
       },
       {
+        name: "alert_type",
+        field: "alert_type",
+        label: t("alerts.alertType"),
+        align: "left",
+        sortable: true,
+      },
+      {
         name: "stream_type",
         field: "stream_type",
-        label: t("alerts.stream_type"),
+        label: t("alerts.streamType"),
         align: "left",
         sortable: true,
       },
@@ -205,27 +303,18 @@ export default defineComponent({
         sortable: true,
       },
       {
-        name: "sql",
-        field: "sql",
-        label: t("alerts.sql"),
-        align: "left",
-        sortable: true,
-        style: "width: 30vw;word-break: break-all;",
-      },
-      {
-        name: "sql",
-        field: "condition_str",
+        name: "conditions",
+        field: "conditions",
         label: t("alerts.condition"),
         align: "left",
-        sortable: true,
-        style: "width: 10vw;word-break: break-all;",
+        sortable: false,
       },
       {
-        name: "destination",
-        field: "destination",
-        label: t("alerts.destination"),
-        align: "left",
-        sortable: true,
+        name: "description",
+        field: "description",
+        label: t("alerts.description"),
+        align: "center",
+        sortable: false,
       },
       {
         name: "actions",
@@ -236,7 +325,8 @@ export default defineComponent({
       },
     ]);
     const activeTab: any = ref("alerts");
-    const destinations = ref([]);
+    const destinations = ref([0]);
+    const templates = ref([0]);
     const getAlerts = () => {
       const dismiss = $q.notify({
         spinner: true,
@@ -245,7 +335,7 @@ export default defineComponent({
       alertsService
         .list(
           1,
-          100000,
+          1000,
           "name",
           false,
           "",
@@ -254,39 +344,34 @@ export default defineComponent({
         .then((res) => {
           var counter = 1;
           resultTotal.value = res.data.list.length;
-          alerts.value = res.data.list.map((data: any) => {
-            if (data.is_real_time) {
-              data.query.sql = "--";
+          alerts.value = res.data.list;
+          alertsRows.value = alerts.value.map((data: any) => {
+            let conditions = "--";
+            if (data.query_condition.conditions?.length) {
+              conditions = data.query_condition.conditions
+                .map((condition: any) => {
+                  return `${condition.column} ${condition.operator} ${condition.value}`;
+                })
+                .join(" AND ");
+            } else if (data.query_condition.sql) {
+              conditions = data.query_condition.sql;
+            }
+            if (conditions.length > 50) {
+              conditions = conditions.substring(0, 32) + "...";
             }
             return {
               "#": counter <= 9 ? `0${counter++}` : counter++,
               name: data.name,
-              sql: data.query.sql,
-              stream_name: data.stream ? data.stream : "--",
+              alert_type: data.is_real_time ? "Real Time" : "Scheduled",
+              stream_name: data.stream_name ? data.stream_name : "--",
               stream_type: data.stream_type,
-              condition_str:
-                data.condition.column +
-                " " +
-                data.condition.operator +
-                " " +
-                data.condition.value,
-              actions: "",
-              duration: {
-                value: data.duration,
-                unit: "Minutes",
-              },
-              frequency: {
-                value: data.frequency,
-                unit: "Minutes",
-              },
-              time_between_alerts: {
-                value: data.time_between_alerts,
-                unit: "Minutes",
-              },
-              destination: data.destination,
-              condition: data.condition,
-              isScheduled: (!data.is_real_time).toString(),
+              enabled: data.enabled,
+              conditions: conditions,
+              description: data.description,
             };
+          });
+          alertsRows.value.forEach((alert: AlertListItem) => {
+            alertStateLoadingMap.value[alert.name] = false;
           });
           if (router.currentRoute.value.query.action == "add") {
             showAddUpdateFn({ row: undefined });
@@ -299,7 +384,8 @@ export default defineComponent({
           }
           dismiss();
         })
-        .catch(() => {
+        .catch((e) => {
+          console.error(e);
           dismiss();
           $q.notify({
             type: "negative",
@@ -314,8 +400,17 @@ export default defineComponent({
     if (!alerts.value.length) {
       getAlerts();
     }
-    onBeforeMount(() => getDestinations());
+    onBeforeMount(async () => {
+      await getTemplates();
+      getDestinations();
+    });
     onActivated(() => getDestinations());
+    watch(
+      () => router.currentRoute.value.query.action,
+      (action) => {
+        if (!action) showAddAlertDialog.value = false;
+      }
+    );
     const getDestinations = () => {
       destinationService
         .list({
@@ -328,7 +423,24 @@ export default defineComponent({
           $q.notify({
             type: "negative",
             message: "Error while fetching destinations.",
-            timeout: 2000,
+            timeout: 3000,
+          })
+        );
+    };
+
+    const getTemplates = () => {
+      templateService
+        .list({
+          org_identifier: store.state.selectedOrganization.identifier,
+        })
+        .then((res) => {
+          templates.value = res.data;
+        })
+        .catch(() =>
+          $q.notify({
+            type: "negative",
+            message: "Error while fetching templates.",
+            timeout: 3000,
           })
         );
     };
@@ -358,7 +470,9 @@ export default defineComponent({
       showAddAlertDialog.value = true;
     };
     const showAddUpdateFn = (props: any) => {
-      formData.value = cloneDeep(props.row);
+      formData.value = alerts.value.find(
+        (alert: any) => alert.name === props.row?.name
+      ) as Alert;
       let action;
       if (!props.row) {
         isUpdated.value = false;
@@ -450,6 +564,40 @@ export default defineComponent({
       selectedDelete.value = props.row;
       confirmDelete.value = true;
     };
+
+    const toggleAlertState = (row: any) => {
+      alertStateLoadingMap.value[row.name] = true;
+      const alert: Alert = alerts.value.find(
+        (alert) => alert.name === row.name
+      ) as Alert;
+      alertsService
+        .toggleState(
+          store.state.selectedOrganization.identifier,
+          alert.stream_name,
+          alert.name,
+          !alert?.enabled
+        )
+        .then(() => {
+          alert.enabled = !alert.enabled;
+          alertsRows.value.forEach((alert) => {
+            alert.name === row.name ? (alert.enabled = !alert.enabled) : null;
+          });
+        })
+        .finally(() => {
+          alertStateLoadingMap.value[row.name] = false;
+        });
+    };
+
+    const routeTo = (name: string) => {
+      router.push({
+        name: name,
+        query: {
+          action: "add",
+          org_identifier: store.state.selectedOrganization.identifier,
+        },
+      });
+    };
+
     return {
       t,
       qTable,
@@ -492,6 +640,15 @@ export default defineComponent({
       activeTab,
       destinations,
       verifyOrganizationStatus,
+      folders,
+      splitterModel,
+      outlinedPause,
+      outlinedPlayArrow,
+      alertsRows,
+      toggleAlertState,
+      alertStateLoadingMap,
+      templates,
+      routeTo,
     };
   },
 });

@@ -1,52 +1,54 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::collections::HashMap;
 
 use actix_web::{http, web, HttpResponse};
-use ahash::AHashMap;
 use arrow_schema::Schema;
 use bytes::BytesMut;
 use chrono::{Duration, Utc};
+use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
+use opentelemetry::trace::{SpanId, TraceId};
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
 use prost::Message;
 
-use crate::common::{
-    infra::{
-        cluster,
-        config::{CONFIG, DISTINCT_FIELDS},
-        metrics,
-    },
-    meta::{
-        alert::{Alert, Trigger},
-        http::HttpResponse as MetaHttpResponse,
-        ingestion::StreamStatus,
-        stream::StreamParams,
-        usage::UsageType,
-        StreamType,
-    },
-    utils::{flatten, json},
-};
-use crate::handler::http::request::CONTENT_TYPE_JSON;
-use crate::service::{
-    db, distinct_values, get_formatted_stream_name,
-    ingestion::{grpc::get_val_for_attr, write_file},
-    schema::stream_schema_exists,
-    usage::report_request_usage_stats,
-};
-
 use super::StreamMeta;
+use crate::{
+    common::{
+        infra::cluster,
+        meta::{
+            alerts::Alert,
+            http::HttpResponse as MetaHttpResponse,
+            ingestion::StreamStatus,
+            stream::{SchemaRecords, StreamParams},
+            usage::UsageType,
+        },
+        utils::{flatten, json},
+    },
+    handler::http::request::CONTENT_TYPE_JSON,
+    service::{
+        db, distinct_values, get_formatted_stream_name,
+        ingestion::{
+            evaluate_trigger, get_int_value, get_val_for_attr, write_file, TriggerAlertData,
+        },
+        schema::{get_upto_discard_error, stream_schema_exists},
+        usage::report_request_usage_stats,
+    },
+};
 
 const SERVICE_NAME: &str = "service.name";
 const SERVICE: &str = "service";
@@ -74,7 +76,8 @@ pub async fn logs_proto_handler(
     }
 }
 
-//example at: https://opentelemetry.io/docs/specs/otel/protocol/file-exporter/#examples
+// example at: https://opentelemetry.io/docs/specs/otel/protocol/file-exporter/#examples
+// otel collector handling json request for logs https://github.com/open-telemetry/opentelemetry-collector/blob/main/pdata/plog/json.go
 pub async fn logs_json_handler(
     org_id: &str,
     thread_id: usize,
@@ -97,8 +100,18 @@ pub async fn logs_json_handler(
         )));
     }
 
+    // check memtable
+    if let Err(e) = ingester::check_memtable_size() {
+        return Ok(
+            HttpResponse::ServiceUnavailable().json(MetaHttpResponse::error(
+                http::StatusCode::SERVICE_UNAVAILABLE.into(),
+                e.to_string(),
+            )),
+        );
+    }
+
     let start = std::time::Instant::now();
-    let mut stream_schema_map: AHashMap<String, Schema> = AHashMap::new();
+    let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let stream_name = match in_stream_name {
         Some(name) => {
             get_formatted_stream_name(
@@ -118,13 +131,13 @@ pub async fn logs_json_handler(
     let stream_name = &stream_name;
     let mut runtime = crate::service::ingestion::init_functions_runtime();
 
-    let mut stream_alerts_map: AHashMap<String, Vec<Alert>> = AHashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut distinct_values = Vec::with_capacity(16);
     let mut stream_status = StreamStatus::new(stream_name);
-    let mut trigger: Option<Trigger> = None;
+    let mut trigger: TriggerAlertData = None;
 
-    let mut min_ts =
-        (Utc::now() + Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
+    let min_ts =
+        (Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
 
     let partition_det =
         crate::service::ingestion::get_stream_partition_keys(stream_name, &stream_schema_map).await;
@@ -132,8 +145,13 @@ pub async fn logs_json_handler(
     let partition_time_level = partition_det.partition_time_level;
 
     // Start get stream alerts
-    let key = format!("{}/{}/{}", &org_id, StreamType::Logs, &stream_name);
-    crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+    crate::service::ingestion::get_stream_alerts(
+        org_id,
+        StreamType::Logs,
+        stream_name,
+        &mut stream_alerts_map,
+    )
+    .await;
     // End get stream alert
 
     // Start Register Transforms for stream
@@ -144,7 +162,7 @@ pub async fn logs_json_handler(
     );
     // End Register Transforms for stream
 
-    let mut buf: AHashMap<String, Vec<String>> = AHashMap::new();
+    let mut buf: HashMap<String, SchemaRecords> = HashMap::new();
 
     let body: json::Value = match json::from_slice(body.as_ref()) {
         Ok(v) => v,
@@ -152,7 +170,7 @@ pub async fn logs_json_handler(
             return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
                 http::StatusCode::BAD_REQUEST.into(),
                 format!("Invalid json: {}", e),
-            )))
+            )));
         }
     };
 
@@ -166,12 +184,23 @@ pub async fn logs_json_handler(
                 )))
             }
         },
-        None => {
-            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
-                http::StatusCode::BAD_REQUEST.into(),
-                "Invalid json: the structure must be {{\"resourceLogs\":[]}}".to_string(),
-            )))
-        }
+        None => match body.get("resource_logs") {
+            Some(v) => match v.as_array() {
+                Some(v) => v,
+                None => {
+                    return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                        http::StatusCode::BAD_REQUEST.into(),
+                        "Invalid json: the structure must be {{\"resource_logs\":[]}}".to_string(),
+                    )))
+                }
+            },
+            None => {
+                return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                    http::StatusCode::BAD_REQUEST.into(),
+                    "Invalid json: the structure must be {{\"resourceLogs\":[]}} or {{\"resource_logs\":[]}}".to_string(),
+                )))
+            }
+        },
     };
 
     for res_log in logs.iter() {
@@ -201,7 +230,7 @@ pub async fn logs_json_handler(
                                 SERVICE,
                                 local_attr.get("key").unwrap().as_str().unwrap()
                             ),
-                            get_val_for_attr(local_attr.get("value").unwrap().clone()),
+                            get_val_for_attr(local_attr.get("value").unwrap()),
                         );
                     }
                 }
@@ -211,123 +240,149 @@ pub async fn logs_json_handler(
         let inst_resources = if let Some(v) = scope_resources {
             v.as_array().unwrap()
         } else {
-            res_log
-                .get("instrumentationLibrarySpans")
-                .unwrap()
-                .as_array()
-                .unwrap()
+            res_log.get("scope_logs").unwrap().as_array().unwrap()
         };
         for inst_log in inst_resources {
-            if inst_log.get("logRecords").is_some() {
-                let log_records = inst_log.get("logRecords").unwrap().as_array().unwrap();
-                for log in log_records {
-                    let start_time: i64 = match log.get("timeUnixNano").unwrap() {
-                        json::Value::Number(v) => v.as_u64().unwrap() as i64,
-                        json::Value::String(v) => v.parse::<i64>().unwrap(),
-                        _ => 0,
-                    };
+            let log_records = if inst_log.get("logRecords").is_some() {
+                inst_log.get("logRecords").unwrap().as_array().unwrap()
+            } else {
+                inst_log.get("log_records").unwrap().as_array().unwrap()
+            };
 
-                    let timestamp = if start_time > 0 {
-                        start_time / 1000
-                    } else {
-                        Utc::now().timestamp_micros()
-                    };
+            for log in log_records {
+                let start_time: i64 = if log.get("timeUnixNano").is_some() {
+                    get_int_value(log.get("timeUnixNano").unwrap())
+                } else {
+                    get_int_value(log.get("time_unix_nano").unwrap())
+                };
 
-                    let mut value: json::Value = json::to_value(log).unwrap();
+                let timestamp = if start_time > 0 {
+                    start_time / 1000
+                } else {
+                    Utc::now().timestamp_micros()
+                };
 
-                    //JSON Flattening
-                    value = flatten::flatten(&value).unwrap();
+                let mut value: json::Value = json::to_value(log).unwrap();
 
-                    // get json object
-                    let mut local_val = value.as_object_mut().unwrap();
+                // get json object
+                let mut local_val = value.as_object_mut().unwrap();
 
-                    if log.get("attributes").is_some() {
-                        let attributes = log.get("attributes").unwrap().as_array().unwrap();
-                        for res_attr in attributes {
-                            let local_attr = res_attr.as_object().unwrap();
-
-                            local_val.insert(
-                                local_attr.get("key").unwrap().as_str().unwrap().to_owned(),
-                                get_val_for_attr(local_attr.get("value").unwrap().clone()),
-                            );
-                        }
+                if log.get("attributes").is_some() {
+                    let attributes = log.get("attributes").unwrap().as_array().unwrap();
+                    for res_attr in attributes {
+                        let local_attr = res_attr.as_object().unwrap();
+                        let mut key = local_attr.get("key").unwrap().as_str().unwrap().to_string();
+                        flatten::format_key(&mut key);
+                        local_val.insert(key, get_val_for_attr(local_attr.get("value").unwrap()));
                     }
-                    //remove attributes after adding
-                    local_val.remove("attributes");
+                }
+                // remove attributes after adding
+                local_val.remove("attributes");
 
-                    //remove body before adding
-                    local_val.remove("body_stringvalue");
+                // remove body before adding
+                local_val.remove("body_stringvalue");
 
-                    if log.get("body").is_some() {
-                        let body = log.get("body").unwrap().get("stringValue").unwrap();
-                        local_val.insert("body".to_owned(), body.clone());
-                    }
+                // process trace id
+                let trace_id = if log.get("trace_id").is_some() {
+                    local_val.remove("trace_id");
+                    log.get("trace_id").unwrap()
+                } else {
+                    local_val.remove("traceIds");
+                    log.get("traceId").unwrap()
+                };
+                let trace_id_str = trace_id.as_str().unwrap();
+                let trace_id_bytes = hex::decode(trace_id_str).unwrap().try_into().unwrap();
+                let trace_id = TraceId::from_bytes(trace_id_bytes).to_string();
+                local_val.insert("trace_id".to_owned(), trace_id.into());
 
-                    // check ingestion time
-                    let earliest_time =
-                        Utc::now() + Duration::hours(0 - CONFIG.limit.ingest_allowed_upto);
-                    if timestamp < earliest_time.timestamp_micros() {
-                        stream_status.status.failed += 1; // to old data, just discard
-                        stream_status.status.error = super::get_upto_discard_error();
+                // process span id
+
+                let span_id = if log.get("span_id").is_some() {
+                    log.get("span_id").unwrap()
+                } else {
+                    log.get("spanId").unwrap()
+                };
+                let span_id_str = span_id.as_str().unwrap();
+                let span_id_bytes = hex::decode(span_id_str).unwrap().try_into().unwrap();
+                let span_id = SpanId::from_bytes(span_id_bytes).to_string();
+                local_val.insert("span_id".to_owned(), span_id.into());
+
+                if log.get("body").is_some() {
+                    let body = log.get("body").unwrap().get("stringValue").unwrap();
+                    local_val.insert("body".to_owned(), body.clone());
+                }
+
+                // check ingestion time
+                if timestamp < min_ts {
+                    stream_status.status.failed += 1; // to old data, just discard
+                    stream_status.status.error = get_upto_discard_error().to_string();
+                    continue;
+                }
+
+                local_val.insert(
+                    CONFIG.common.column_timestamp.clone(),
+                    json::Value::Number(timestamp.into()),
+                );
+
+                local_val.append(&mut service_att_map.clone());
+
+                value = json::to_value(local_val)?;
+
+                // JSON Flattening
+                value = flatten::flatten(value).unwrap();
+
+                if !local_trans.is_empty() {
+                    value = crate::service::ingestion::apply_stream_transform(
+                        &local_trans,
+                        value,
+                        &stream_vrl_map,
+                        stream_name,
+                        &mut runtime,
+                    )
+                    .unwrap();
+                }
+
+                local_val = value.as_object_mut().unwrap();
+
+                let local_trigger = match super::add_valid_record(
+                    &StreamMeta {
+                        org_id: org_id.to_string(),
+                        stream_name: stream_name.to_string(),
+                        partition_keys: &partition_keys,
+                        partition_time_level: &partition_time_level,
+                        stream_alerts_map: &stream_alerts_map,
+                    },
+                    &mut stream_schema_map,
+                    &mut stream_status.status,
+                    &mut buf,
+                    local_val,
+                    trigger.is_none(),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        stream_status.status.failed += 1;
+                        stream_status.status.error = e.to_string();
                         continue;
                     }
-                    if timestamp < min_ts {
-                        min_ts = timestamp;
-                    }
+                };
+                if local_trigger.is_some() {
+                    trigger = local_trigger;
+                }
 
-                    local_val.insert(
-                        CONFIG.common.column_timestamp.clone(),
-                        json::Value::Number(timestamp.into()),
-                    );
-
-                    local_val.append(&mut service_att_map.clone());
-
-                    value = json::to_value(local_val).unwrap();
-                    if !local_trans.is_empty() {
-                        value = crate::service::ingestion::apply_stream_transform(
-                            &local_trans,
-                            &value,
-                            &stream_vrl_map,
-                            stream_name,
-                            &mut runtime,
-                        )
-                        .unwrap_or(value);
-                    }
-
-                    local_val = value.as_object_mut().unwrap();
-
-                    let local_trigger = super::add_valid_record(
-                        &StreamMeta {
-                            org_id: org_id.to_string(),
-                            stream_name: stream_name.to_string(),
-                            partition_keys: &partition_keys,
-                            partition_time_level: &partition_time_level,
-                            stream_alerts_map: &stream_alerts_map,
-                        },
-                        &mut stream_schema_map,
-                        &mut stream_status.status,
-                        &mut buf,
-                        local_val,
-                    )
-                    .await;
-
-                    if local_trigger.is_some() {
-                        trigger = Some(local_trigger.unwrap());
-                    }
-
-                    // get distinct_value item
-                    for field in DISTINCT_FIELDS.iter() {
-                        if let Some(val) = local_val.get(field) {
-                            if !val.is_null() {
-                                distinct_values.push(distinct_values::DvItem {
-                                    stream_type: StreamType::Logs,
-                                    stream_name: stream_name.to_string(),
-                                    field_name: field.to_string(),
-                                    field_value: val.as_str().unwrap().to_string(),
-                                    filter_name: "".to_string(),
-                                    filter_value: "".to_string(),
-                                });
-                            }
+                // get distinct_value item
+                for field in DISTINCT_FIELDS.iter() {
+                    if let Some(val) = local_val.get(field) {
+                        if !val.is_null() {
+                            distinct_values.push(distinct_values::DvItem {
+                                stream_type: StreamType::Logs,
+                                stream_name: stream_name.to_string(),
+                                field_name: field.to_string(),
+                                field_value: val.as_str().unwrap().to_string(),
+                                filter_name: "".to_string(),
+                                filter_value: "".to_string(),
+                            });
                         }
                     }
                 }
@@ -335,19 +390,15 @@ pub async fn logs_json_handler(
         }
     }
 
-    // write to file
-    let mut stream_file_name = "".to_string();
-    let mut req_stats = write_file(
-        &buf,
-        thread_id,
-        &StreamParams::new(org_id, stream_name, StreamType::Logs),
-        &mut stream_file_name,
-        None,
-    )
-    .await;
+    // write data to wal
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
+    let mut req_stats = write_file(&writer, stream_name, buf).await;
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
+    }
 
     // only one trigger per request, as it updates etcd
-    super::evaluate_trigger(trigger, &stream_alerts_map).await;
+    evaluate_trigger(trigger).await;
 
     // send distinct_values
     if !distinct_values.is_empty() {
@@ -377,7 +428,7 @@ pub async fn logs_json_handler(
         .inc();
 
     req_stats.response_time = start.elapsed().as_secs_f64();
-    //metric + data usage
+    // metric + data usage
     report_request_usage_stats(
         req_stats,
         org_id,

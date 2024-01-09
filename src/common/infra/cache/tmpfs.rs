@@ -1,27 +1,30 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::collections::HashMap;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use uuid::Uuid;
 
-use crate::common::infra::config::RwHashMap;
 use crate::common::infra::errors::*;
 
-static FILES: Lazy<RwHashMap<String, File>> = Lazy::new(Default::default);
-static DATA: Lazy<RwHashMap<String, Bytes>> = Lazy::new(Default::default);
+static FILES: Lazy<RwLock<HashMap<String, File>>> = Lazy::new(Default::default);
+static DATA: Lazy<RwLock<HashMap<String, Bytes>>> = Lazy::new(Default::default);
 
 const STRING_SIZE: usize = std::mem::size_of::<String>();
 const BYTES_SIZE: usize = std::mem::size_of::<bytes::Bytes>();
@@ -49,6 +52,10 @@ impl Directory {
         let key = format!("/{}/{}", self.location, path);
         set(&key, data)
     }
+    pub fn get(&self, path: &str) -> Result<Bytes> {
+        let key = format!("/{}/{}", self.location, path);
+        get(&key)
+    }
 }
 
 impl Default for Directory {
@@ -65,29 +72,44 @@ impl Drop for Directory {
     }
 }
 
-pub fn list(path: &str) -> Result<Vec<File>> {
+pub fn list(path: &str, extension: &str) -> Result<Vec<File>> {
     let path = format_key(path);
-    Ok(FILES
-        .iter()
-        .filter_map(|x| {
-            if x.key().starts_with(&path) {
-                Some(x.value().clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<File>>())
+
+    match extension {
+        ".json" | ".arrow" => Ok(FILES
+            .read()
+            .iter()
+            .filter_map(|x| {
+                if x.0.starts_with(&path) && x.0.ends_with(extension) {
+                    Some(x.1.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<File>>()),
+        _ => Ok(FILES
+            .read()
+            .iter()
+            .filter_map(|x| {
+                if x.0.starts_with(&path) {
+                    Some(x.1.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<File>>()),
+    }
 }
 
 pub fn empty(path: &str) -> bool {
     let path = format_key(path);
-    FILES.iter().all(|x| x.key().starts_with(&path))
+    FILES.read().iter().all(|x| x.0.starts_with(&path))
 }
 
 pub fn get(path: &str) -> Result<Bytes> {
     let path = format_key(path);
-    match DATA.get(&path) {
-        Some(data) => Ok(data.to_owned()),
+    match DATA.read().get(&path) {
+        Some(data) => Ok(data.clone()),
         None => Err(Error::from(DbError::KeyNotExists(path.to_string()))),
     }
 }
@@ -95,8 +117,8 @@ pub fn get(path: &str) -> Result<Bytes> {
 pub fn set(path: &str, data: Bytes) -> Result<()> {
     let path = format_key(path);
     let size = data.len();
-    DATA.insert(path.clone(), data);
-    FILES.insert(
+    DATA.write().insert(path.clone(), data);
+    FILES.write().insert(
         path.clone(),
         File {
             location: path,
@@ -110,27 +132,27 @@ pub fn set(path: &str, data: Bytes) -> Result<()> {
 pub fn delete(path: &str, prefix: bool) -> Result<()> {
     let path = format_key(path);
     if !prefix {
-        FILES.remove(&path);
-        DATA.remove(&path);
+        FILES.write().remove(&path);
+        DATA.write().remove(&path);
     } else {
-        let files = list(&path)?;
+        let files = list(&path, "all")?;
         for f in files {
-            FILES.remove(&f.location);
-            DATA.remove(&f.location);
+            FILES.write().remove(&f.location);
+            DATA.write().remove(&f.location);
         }
     }
-    FILES.shrink_to_fit();
-    DATA.shrink_to_fit();
+    FILES.write().shrink_to_fit();
+    DATA.write().shrink_to_fit();
     Ok(())
 }
 
 pub fn stats() -> Result<usize> {
     let mut size = 0;
-    FILES.iter().for_each(|x| {
-        size += x.key().len() + x.value().location.len() + STRING_SIZE + FILE_SIZE;
+    FILES.read().iter().for_each(|x| {
+        size += x.0.len() + x.1.location.len() + STRING_SIZE + FILE_SIZE;
     });
-    DATA.iter().for_each(|x| {
-        size += x.key().len() + x.value().len() + STRING_SIZE + BYTES_SIZE;
+    DATA.read().iter().for_each(|x| {
+        size += x.0.len() + x.1.len() + STRING_SIZE + BYTES_SIZE;
     });
     Ok(size)
 }
@@ -168,7 +190,7 @@ mod tests {
         let data = Bytes::from("hello world");
         set("/hello3", data.clone()).unwrap();
         assert_eq!(get("/hello3").unwrap(), data);
-        let files = list("/hello3").unwrap();
+        let files = list("/hello3", "all").unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].location, "/hello3");
     }
@@ -198,8 +220,8 @@ mod tests {
     fn test_empty() {
         let data = Bytes::from("hello world");
         set("/hello6/a", data.clone()).unwrap();
-        assert!(!list("/hello6").unwrap().is_empty());
+        assert!(!list("/hello6", "all").unwrap().is_empty());
         delete("/hello6/a", true).unwrap();
-        assert!(list("/hello6").unwrap().is_empty());
+        assert!(list("/hello6", "all").unwrap().is_empty());
     }
 }

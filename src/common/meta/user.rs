@@ -1,19 +1,21 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use utoipa::ToSchema;
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -26,6 +28,9 @@ pub struct UserRequest {
     pub password: String,
     #[serde(skip_serializing)]
     pub role: UserRole,
+    /// Is the user created via ldap flow.
+    #[serde(default)]
+    pub is_external: bool,
 }
 
 impl UserRequest {
@@ -36,6 +41,7 @@ impl UserRequest {
         org: String,
         token: String,
         rum_token: String,
+        is_external: bool,
     ) -> DBUser {
         DBUser {
             email: self.email.clone(),
@@ -49,6 +55,7 @@ impl UserRequest {
                 rum_token: Some(rum_token),
                 role: self.role.clone(),
             }],
+            is_external,
         }
     }
 }
@@ -64,6 +71,8 @@ pub struct DBUser {
     #[serde(default)]
     pub salt: String,
     pub organizations: Vec<UserOrg>,
+    #[serde(default)]
+    pub is_external: bool,
 }
 
 impl DBUser {
@@ -89,6 +98,7 @@ impl DBUser {
             token: org.token.clone(),
             rum_token: org.rum_token.clone(),
             salt: local.salt,
+            is_external: self.is_external,
         })
     }
 
@@ -108,6 +118,7 @@ impl DBUser {
                     token: org.token,
                     rum_token: org.rum_token,
                     salt: self.salt.clone(),
+                    is_external: self.is_external,
                 })
             }
             ret_val
@@ -130,6 +141,8 @@ pub struct User {
     pub rum_token: Option<String>,
     pub role: UserRole,
     pub org: String,
+    /// Is the user authenticated and created via LDAP
+    pub is_external: bool,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize, ToSchema)]
@@ -156,6 +169,8 @@ pub struct UserOrgRole {
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, Eq, PartialEq, Default)]
 pub struct UpdateUser {
+    #[serde(default)]
+    pub change_password: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,6 +214,8 @@ pub struct UserResponse {
     #[serde(default)]
     pub last_name: String,
     pub role: UserRole,
+    #[serde(default)]
+    pub is_external: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -216,4 +233,16 @@ pub struct SignInUser {
 pub struct SignInResponse {
     pub status: bool,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct TokenValidationResponse {
+    pub is_valid: bool,
+    pub user_email: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct RoleOrg {
+    pub role: UserRole,
+    pub org: String,
 }

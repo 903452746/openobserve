@@ -1,62 +1,107 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
   <div
-    class="flex justify-between items-center cursor-pointer span-block relative-position"
+    class="flex wrap justify-start items-center"
+    :class="[
+      defocusSpan ? 'defocus' : '',
+      store.state.theme === 'dark' ? 'bg-dark' : 'bg-white',
+    ]"
     :style="{
-      width: '100%',
-      height: spanDimensions.height + 'px',
+      zIndex: 2,
+      borderBottom:
+        (isSpanSelected && `2px solid ${span.style.color}`) || 'none',
     }"
-    :class="!isSpanSelected ? 'defocus' : ''"
-    ref="spanBlock"
-    @click="selectSpan"
   >
     <div
+      class="flex justify-between items-end cursor-pointer span-block relative-position"
+      :class="[store.state.theme === 'dark' ? 'bg-dark' : 'bg-white']"
       :style="{
+        height: spanDimensions.height + 'px',
         width: '100%',
-        overflow: 'hidden',
+        paddingBottom: '6px',
       }"
-      class="cursor-pointer flex items-center no-wrap position-relative"
-      :class="!isSpanSelected ? 'defocus' : ''"
+      ref="spanBlock"
       @click="selectSpan"
     >
       <div
         :style="{
-          width: getWidth + '%',
-          height: spanDimensions.barHeight + 'px',
-          borderRadius: '2px',
-          left: getLeftPosition + '%',
-          position: 'relative',
-          backgroundColor: span.style?.color || '#58508d',
-          zIndex: 1,
+          width: '100%',
+          overflow: 'hidden',
         }"
-      />
-      <div
-        :style="{
-          position: 'absolute',
-          ...getDurationStyle,
-          transition: 'all 0.5s ease',
-          zIndex: 1,
-        }"
-        class="text-caption"
+        class="cursor-pointer flex items-center no-wrap position-relative"
+        :class="defocusSpan ? 'defocus' : ''"
+        @click="selectSpan"
       >
-        {{ formatTimeWithSuffix(span.durationUs) }}
+        <div
+          :style="{
+            height: spanDimensions.barHeight + 'px',
+            width: getWidth + '%',
+            left: getLeftPosition + '%',
+            position: 'relative',
+          }"
+          class="flex justify-start items-center no-wrap"
+          ref="spanMarkerRef"
+        >
+          <q-icon
+            dense
+            round
+            flat
+            name="expand_more"
+            class="collapse-btn"
+            :style="{
+              rotate: isSpanSelected ? '0deg' : '270deg',
+            }"
+            @click.prevent.stop="toggleSpanDetails()"
+          />
+
+          <div
+            :style="{
+              width: 'calc(100% - 21px)',
+              height: '100%',
+              borderRadius: '2px',
+              backgroundColor: span.style?.color || '#58508d',
+            }"
+          />
+        </div>
+        <div
+          :style="{
+            position: 'absolute',
+            ...getDurationStyle,
+            transition: 'all 0.5s ease',
+            zIndex: 1,
+          }"
+          class="text-caption"
+        >
+          {{ formatTimeWithSuffix(span.durationUs) }}
+        </div>
+        <q-resize-observer debounce="300" @resize="onResize" />
       </div>
-      <q-resize-observer debounce="300" @resize="onResize" />
     </div>
+    <template v-if="isSpanSelected">
+      <span-details
+        :style="{
+          borderTop: `2px solid ${span.style.color}`,
+        }"
+        :span="span"
+        :spanData="spanData"
+        :baseTracePosition="baseTracePosition"
+      ></span-details>
+    </template>
   </div>
 </template>
 
@@ -64,6 +109,8 @@
 import { defineComponent, computed, ref } from "vue";
 import useTraces from "@/composables/useTraces";
 import { getImageURL, formatTimeWithSuffix } from "@/utils/zincutils";
+import SpanDetails from "./SpanDetails.vue";
+import { useStore } from "vuex";
 
 export default defineComponent({
   name: "SpanBlock",
@@ -96,16 +143,22 @@ export default defineComponent({
       type: Object,
       default: () => {},
     },
+    spanData: {
+      type: Object,
+      default: () => ({}),
+    },
   },
   emits: ["toggleCollapse"],
+  components: { SpanDetails },
   setup(props, { emit }) {
+    const store = useStore();
     const { searchObj } = useTraces();
     const spanBlock: any = ref(null);
     const spanBlockWidth = ref(0);
     const onePixelPercent = ref(0);
-    const isSpanSelected = computed(() => {
-      if (!searchObj.data.traceDetails.selectedSpanId) return true;
-      return searchObj.data.traceDetails.selectedSpanId === props.span.spanId;
+    const defocusSpan = computed(() => {
+      if (!searchObj.data.traceDetails.selectedSpanId) return false;
+      return searchObj.data.traceDetails.selectedSpanId !== props.span.spanId;
     });
     const selectSpan = () => {
       searchObj.data.traceDetails.showSpanDetails = true;
@@ -114,9 +167,31 @@ export default defineComponent({
     const toggleSpanCollapse = () => {
       emit("toggleCollapse", props.span.spanId);
     };
+
+    const isSpanSelected = computed(() => {
+      return searchObj.data.traceDetails.expandedSpans.includes(
+        props.span.spanId
+      );
+    });
+
+    const spanMarkerRef = ref(null);
+
     const getLeftPosition = computed(() => {
       const left =
         props.span.startTimeMs - props.baseTracePosition["startTimeMs"];
+
+      // if (props.span.startTimeMs < props.baseTracePosition["startTimeMs"]) {
+      //   const left =
+      //     props.baseTracePosition["startTimeMs"] - props.span.startTimeMs;
+      //   // props.baseTracePosition + props.baseTracePosition["durationMs"];
+      //   return -(left / props.baseTracePosition?.durationMs) * 100;
+      // }
+      // // console.log(
+      // //   props.span.startTimeMs,
+      // //   props.baseTracePosition["startTimeMs"],
+      // //   left,
+      // //   props.baseTracePosition?.durationMs
+      // // );
       return (left / props.baseTracePosition?.durationMs) * 100;
     });
     const getWidth = computed(() => {
@@ -129,7 +204,7 @@ export default defineComponent({
     });
     const getDurationStyle = computed(() => {
       const style: any = {
-        top: "2px",
+        top: "10px",
       };
       const onePercent = Number((spanBlockWidth.value / 100).toFixed(2));
       const labelWidth = 60;
@@ -138,24 +213,42 @@ export default defineComponent({
         spanBlockWidth.value
       ) {
         style.right = 0;
-        style.top = "-8px";
+        style.top = "0";
       } else if (getLeftPosition.value > 50) {
-        style.left = getLeftPosition.value * onePercent - labelWidth + "px";
+        style.left =
+          getLeftPosition.value * onePercent - labelWidth + 10 + "px";
       } else {
         style.left =
-          (getLeftPosition.value + getWidth.value) * onePercent + 10 + "px";
+          (getLeftPosition.value +
+            (Math.floor(getWidth.value) ? getWidth.value : 1)) *
+            onePercent +
+          "px";
       }
       return style;
+    });
+
+    const getSpanStartTime = computed(() => {
+      return props.span.startTimeMs - props.baseTracePosition["startTimeMs"];
     });
 
     const onResize = () => {
       spanBlockWidth.value = spanBlock.value.clientWidth;
     };
 
+    const toggleSpanDetails = () => {
+      if (!isSpanSelected.value) {
+        searchObj.data.traceDetails.expandedSpans.push(props.span.spanId);
+      } else {
+        searchObj.data.traceDetails.expandedSpans =
+          searchObj.data.traceDetails.expandedSpans.filter(
+            (val) => props.span.spanId !== val
+          );
+      }
+    };
+
     return {
       formatTimeWithSuffix,
       selectSpan,
-      isSpanSelected,
       toggleSpanCollapse,
       getImageURL,
       getLeftPosition,
@@ -164,6 +257,12 @@ export default defineComponent({
       spanBlock,
       onResize,
       onePixelPercent,
+      getSpanStartTime,
+      spanMarkerRef,
+      toggleSpanDetails,
+      defocusSpan,
+      isSpanSelected,
+      store,
     };
   },
 });
@@ -175,8 +274,7 @@ export default defineComponent({
 }
 
 .collapse-btn {
-  background-color: #ffffff;
-  opacity: 0.4;
+  opacity: 0.6;
 }
 
 .collapse-container {

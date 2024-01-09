@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use actix_web::web;
 
@@ -29,7 +30,8 @@ pub(crate) async fn get(
     folder: &str,
 ) -> Result<Dashboard, anyhow::Error> {
     let key = format!("/dashboard/{org_id}/{folder}/{dashboard_id}");
-    let bytes = infra_db::DEFAULT.get(&key).await?;
+    let db = infra_db::get_db().await;
+    let bytes = db.get(&key).await?;
     let d_version: DashboardVersion = json::from_slice(&bytes)?;
     if d_version.version == 1 {
         let dash: v1::Dashboard = json::from_slice(&bytes)?;
@@ -56,11 +58,17 @@ pub(crate) async fn put(
     body: web::Bytes,
 ) -> Result<Dashboard, anyhow::Error> {
     let key = format!("/dashboard/{org_id}/{folder}/{}", dashboard_id);
+    let db = infra_db::get_db().await;
     let d_version: DashboardVersion = json::from_slice(&body)?;
     if d_version.version == 1 {
         let mut dash: v1::Dashboard = json::from_slice(&body)?;
+        dash.title = dash.title.trim().to_string();
+        if dash.title.is_empty() {
+            return Err(anyhow::anyhow!("Dashboard should have title"));
+        };
         dash.dashboard_id = dashboard_id.to_string();
-        match infra_db::DEFAULT
+
+        match db
             .put(&key, json::to_vec(&dash)?.into(), infra_db::NO_NEED_WATCH)
             .await
         {
@@ -73,8 +81,12 @@ pub(crate) async fn put(
         }
     } else {
         let mut dash: v2::Dashboard = json::from_slice(&body)?;
+        dash.title = dash.title.trim().to_string();
+        if dash.title.is_empty() {
+            return Err(anyhow::anyhow!("Dashboard should have title"));
+        };
         dash.dashboard_id = dashboard_id.to_string();
-        match infra_db::DEFAULT
+        match db
             .put(&key, json::to_vec(&dash)?.into(), infra_db::NO_NEED_WATCH)
             .await
         {
@@ -91,8 +103,8 @@ pub(crate) async fn put(
 #[tracing::instrument]
 pub(crate) async fn list(org_id: &str, folder: &str) -> Result<Vec<Dashboard>, anyhow::Error> {
     let db_key = format!("/dashboard/{org_id}/{folder}/");
-    infra_db::DEFAULT
-        .list(&db_key)
+    let db = infra_db::get_db().await;
+    db.list(&db_key)
         .await?
         .into_values()
         .map(|val| {
@@ -123,15 +135,13 @@ pub(crate) async fn delete(
     folder: &str,
 ) -> Result<(), anyhow::Error> {
     let key = format!("/dashboard/{org_id}/{folder}/{dashboard_id}");
-    Ok(infra_db::DEFAULT
-        .delete(&key, false, infra_db::NO_NEED_WATCH)
-        .await?)
+    let db = infra_db::get_db().await;
+    Ok(db.delete(&key, false, infra_db::NO_NEED_WATCH).await?)
 }
 
 #[tracing::instrument]
 pub async fn reset() -> Result<(), anyhow::Error> {
     let key = "/dashboard/";
-    Ok(infra_db::DEFAULT
-        .delete(key, true, infra_db::NO_NEED_WATCH)
-        .await?)
+    let db = infra_db::get_db().await;
+    Ok(db.delete(key, true, infra_db::NO_NEED_WATCH).await?)
 }

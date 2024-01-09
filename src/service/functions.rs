@@ -1,31 +1,38 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::io::Error;
 
 use actix_web::{
     http::{self, StatusCode},
     HttpResponse,
 };
-use std::io::Error;
+use config::meta::stream::StreamType;
 
-use super::ingestion::compile_vrl_function;
-use crate::common::meta::{
-    functions::{StreamFunctionsList, StreamOrder, StreamTransform},
-    http::HttpResponse as MetaHttpResponse,
+use crate::{
+    common::{
+        infra::config::STREAM_FUNCTIONS,
+        meta::{
+            functions::{
+                FunctionList, StreamFunctionsList, StreamOrder, StreamTransform, Transform,
+            },
+            http::HttpResponse as MetaHttpResponse,
+        },
+    },
+    service::{db, ingestion::compile_vrl_function},
 };
-use crate::common::{infra::config::STREAM_FUNCTIONS, meta::functions::Transform};
-use crate::common::{meta::functions::FunctionList, meta::StreamType};
-use crate::service::db;
 
 const FN_SUCCESS: &str = "Function saved successfully";
 const FN_NOT_FOUND: &str = "Function not found";
@@ -44,7 +51,7 @@ pub async fn save_function(org_id: String, mut func: Transform) -> Result<HttpRe
             FN_ALREADY_EXIST.to_string(),
         )))
     } else {
-        if !func.function.as_str().trim().ends_with('.') {
+        if !func.function.ends_with('.') {
             func.function = format!("{} \n .", func.function);
         }
         if func.trans_type.unwrap() == 0 {
@@ -76,11 +83,11 @@ pub async fn save_function(org_id: String, mut func: Transform) -> Result<HttpRe
 
 #[tracing::instrument(skip(func))]
 pub async fn update_function(
-    org_id: String,
-    fn_name: String,
+    org_id: &str,
+    fn_name: &str,
     mut func: Transform,
 ) -> Result<HttpResponse, Error> {
-    let existing_fn = match check_existing_fn(&org_id, &fn_name).await {
+    let existing_fn = match check_existing_fn(org_id, fn_name).await {
         Some(function) => function,
         None => {
             return Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
@@ -93,14 +100,15 @@ pub async fn update_function(
         return Ok(HttpResponse::Ok().json(func));
     }
 
-    // UI mostly like in 1st version wont send streams, so we need to add them back from existing function
+    // UI mostly like in 1st version wont send streams, so we need to add them back
+    // from existing function
     func.streams = existing_fn.streams;
 
-    if !func.function.as_str().trim().ends_with('.') {
+    if !func.function.ends_with('.') {
         func.function = format!("{} \n .", func.function);
     }
     if func.trans_type.unwrap() == 0 {
-        match compile_vrl_function(&func.function, &org_id) {
+        match compile_vrl_function(&func.function, org_id) {
             Ok(_) => {}
             Err(error) => {
                 return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
@@ -111,7 +119,7 @@ pub async fn update_function(
         }
     }
     extract_num_args(&mut func);
-    if let Err(error) = db::functions::set(&org_id, &func.name, &func).await {
+    if let Err(error) = db::functions::set(org_id, &func.name, &func).await {
         return Ok(
             HttpResponse::InternalServerError().json(MetaHttpResponse::message(
                 http::StatusCode::INTERNAL_SERVER_ERROR.into(),
@@ -220,7 +228,8 @@ pub async fn delete_stream_function(
                 )),
             )
         } else {
-            // cant be removed from watcher of function as stream name & type wont be available , hence being removed here
+            // cant be removed from watcher of function as stream name & type wont be
+            // available , hence being removed here
             let key = format!("{}/{}/{}", org_id, stream_type, stream_name);
             remove_stream_fn_from_cache(&key, fn_name);
             Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
@@ -320,7 +329,7 @@ fn remove_stream_fn_from_cache(key: &str, fn_name: &str) {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[actix_web::test]
@@ -361,8 +370,10 @@ mod test {
         let list_resp = list_functions("nexus".to_string()).await;
         assert!(list_resp.is_ok());
 
-        assert!(delete_function("nexus".to_string(), "dummyfn".to_owned())
-            .await
-            .is_ok());
+        assert!(
+            delete_function("nexus".to_string(), "dummyfn".to_owned())
+                .await
+                .is_ok()
+        );
     }
 }

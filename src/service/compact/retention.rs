@@ -1,38 +1,42 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use chrono::{DateTime, Duration, TimeZone, Utc};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
 };
 
-use crate::common::{
-    infra::{
-        cache,
-        cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-        config::{is_local_disk_storage, CONFIG},
-        dist_lock, file_list as infra_file_list, ider, storage,
-    },
-    meta::{
-        common::{FileKey, FileMeta},
-        stream::{PartitionTimeLevel, StreamStats},
-        StreamType,
-    },
-    utils::json,
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use config::{
+    ider, is_local_disk_storage,
+    meta::stream::{FileKey, FileMeta, StreamType},
+    CONFIG,
 };
-use crate::service::{db, file_list};
+
+use crate::{
+    common::{
+        infra::{
+            cache,
+            cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
+            dist_lock, file_list as infra_file_list, storage,
+        },
+        meta::stream::{PartitionTimeLevel, StreamStats},
+        utils::{json, time::BASE_TIME},
+    },
+    service::{db, file_list},
+};
 
 pub async fn delete_by_stream(
     lifecycle_end: &str,
@@ -51,6 +55,19 @@ pub async fn delete_by_stream(
     let lifecycle_start = lifecycle_start.as_str();
     if lifecycle_start.ge(lifecycle_end) {
         return Ok(()); // created_at is after lifecycle_end, just skip
+    }
+
+    // Hack for 1970-01-01
+    if lifecycle_start.le("1970-01-01") {
+        let lifecycle_end = created_at + Duration::days(1);
+        let lifecycle_end = lifecycle_end.format("%Y-%m-%d").to_string();
+        return db::compact::retention::delete_stream(
+            org_id,
+            stream_name,
+            stream_type,
+            Some((lifecycle_start, lifecycle_end.as_str())),
+        )
+        .await;
     }
 
     // delete files
@@ -140,7 +157,7 @@ pub async fn delete_all(
     // delete from file list
     delete_from_file_list(org_id, stream_name, stream_type, (0, 0)).await?;
     log::info!(
-        "deleted file list for: {}/{}/{}",
+        "deleted file list for: {}/{}/{}/all",
         org_id,
         stream_type,
         stream_name
@@ -231,7 +248,7 @@ pub async fn delete_by_date(
         }
 
         // at the end, fetch a file list from s3 to guatantte there is no file
-        while date_start <= date_end {
+        while date_start < date_end {
             let prefix = format!(
                 "files/{org_id}/{stream_type}/{stream_name}/{}/",
                 date_start.format("%Y/%m/%d")
@@ -257,12 +274,28 @@ pub async fn delete_by_date(
     delete_from_file_list(org_id, stream_name, stream_type, time_range).await?;
 
     // update stream stats retention time
+    let mut stats = cache::stats::get_stream_stats(org_id, stream_name, stream_type);
+    let mut min_ts = if time_range.1 > BASE_TIME.timestamp_micros() {
+        time_range.1
+    } else {
+        infra_file_list::get_min_ts(org_id, stream_type, stream_name)
+            .await
+            .unwrap_or_default()
+    };
+    if min_ts == 0 {
+        min_ts = stats.doc_time_min;
+    };
     infra_file_list::reset_stream_stats_min_ts(
         org_id,
         format!("{org_id}/{stream_type}/{stream_name}").as_str(),
-        time_range.1,
+        min_ts,
     )
     .await?;
+    // update stream stats in cache
+    if min_ts > stats.doc_time_min {
+        stats.doc_time_min = min_ts;
+        cache::stats::set_stream_stats(org_id, stream_name, stream_type, stats);
+    }
 
     // mark delete done
     db::compact::retention::delete_stream_done(org_id, stream_name, stream_type, Some(date_range))

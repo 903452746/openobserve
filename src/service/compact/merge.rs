@@ -1,36 +1,40 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{collections::HashMap, io::Write, sync::Arc};
 
 use ::datafusion::{arrow::datatypes::Schema, common::FileType, error::DataFusionError};
 use ahash::AHashMap;
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
-use std::{collections::HashMap, io::Write, sync::Arc};
-
-use crate::common::{
-    infra::{
-        cache,
-        config::{CONFIG, FILE_EXT_PARQUET},
-        file_list as infra_file_list, ider, metrics, storage,
-    },
-    meta::{
-        common::{FileKey, FileMeta},
-        stream::StreamStats,
-        StreamType,
-    },
-    utils::json,
+use config::{
+    ider,
+    meta::stream::{FileKey, FileMeta, StreamType},
+    metrics,
+    utils::parquet::parse_file_key_columns,
+    CONFIG, FILE_EXT_PARQUET,
 };
-use crate::service::{db, file_list, search::datafusion, stream};
+use tokio::{sync::Semaphore, task::JoinHandle};
+
+use crate::{
+    common::{
+        infra::{cache, file_list as infra_file_list, storage},
+        meta::stream::{PartitionTimeLevel, StreamStats},
+        utils::json,
+    },
+    service::{db, file_list, search::datafusion, stream},
+};
 
 /// compactor run steps on a stream:
 /// 3. get a cluster lock for compactor stream
@@ -80,6 +84,17 @@ pub async fn merge_by_stream(
         )
         .unwrap()
         .timestamp_micros();
+    let offset_time_day = Utc
+        .with_ymd_and_hms(
+            offset_time.year(),
+            offset_time.month(),
+            offset_time.day(),
+            0,
+            0,
+            0,
+        )
+        .unwrap()
+        .timestamp_micros();
 
     // check offset
     let time_now: DateTime<Utc> = Utc::now();
@@ -94,28 +109,41 @@ pub async fn merge_by_stream(
         )
         .unwrap()
         .timestamp_micros();
-    // if offset is future, just wait
-    // if offset is last hour, must wait for at least 3 times of max_file_retention_time
-    // - first period: the last hour local file upload to storage, write file list
-    // - second period, the last hour file list upload to storage
-    // - third period, we can do the merge, at least 3 times of max_file_retention_time
-    if offset >= time_now_hour
-        || (offset_time_hour + Duration::hours(1).num_microseconds().unwrap() == time_now_hour
-            && time_now.timestamp_micros() - time_now_hour
-                < Duration::seconds(CONFIG.limit.max_file_retention_time as i64)
-                    .num_microseconds()
-                    .unwrap()
-                    * 3)
+    // 1. if step_secs less than 1 hour, must wait for at least max_file_retention_time
+    // 2. if step_secs greater than 1 hour, must wait for at least 3 * max_file_retention_time
+    // -- first period: the last hour local file upload to storage, write file list
+    // -- second period, the last hour file list upload to storage
+    // -- third period, we can do the merge, so, at least 3 times of
+    // max_file_retention_time
+    if (CONFIG.compact.step_secs < 3600
+        && time_now.timestamp_micros() - offset
+            <= Duration::seconds(CONFIG.limit.max_file_retention_time as i64)
+                .num_microseconds()
+                .unwrap())
+        || (CONFIG.compact.step_secs >= 3600
+            && (offset >= time_now_hour
+                || time_now.timestamp_micros() - time_now_hour
+                    <= Duration::seconds(CONFIG.limit.max_file_retention_time as i64)
+                        .num_microseconds()
+                        .unwrap()
+                        * 3))
     {
         return Ok(()); // the time is future, just wait
     }
 
-    // get current hour all files
-    let (partition_offset_start, partition_offset_end) = (
-        offset_time_hour,
-        offset_time_hour + Duration::hours(1).num_microseconds().unwrap()
-            - Duration::seconds(1).num_microseconds().unwrap(),
-    );
+    // get current hour(day) all files
+    let (partition_offset_start, partition_offset_end) =
+        if partition_time_level == PartitionTimeLevel::Daily {
+            (
+                offset_time_day,
+                offset_time_day + Duration::hours(24).num_microseconds().unwrap() - 1,
+            )
+        } else {
+            (
+                offset_time_hour,
+                offset_time_hour + Duration::hours(1).num_microseconds().unwrap() - 1,
+            )
+        };
     let files = file_list::query(
         org_id,
         stream_name,
@@ -129,11 +157,15 @@ pub async fn merge_by_stream(
     .map_err(|e| anyhow::anyhow!("query file list failed: {}", e))?;
 
     if files.is_empty() {
-        // this hour is no data, and check if pass allowed_upto, then just write new offset
-        // if offset > 0 && offset_time_hour + Duration::hours(CONFIG.limit.allowed_upto).num_microseconds().unwrap() < time_now_hour {
-        // -- no check it
+        // this hour is no data, and check if pass allowed_upto, then just write new
+        // offset if offset > 0 && offset_time_hour +
+        // Duration::hours(CONFIG.limit.allowed_upto).num_microseconds().unwrap() <
+        // time_now_hour { -- no check it
         // }
-        let offset = offset_time_hour + Duration::hours(1).num_microseconds().unwrap();
+        let offset = offset
+            + Duration::seconds(CONFIG.compact.step_secs)
+                .num_microseconds()
+                .unwrap();
         db::compact::files::set_offset(org_id, stream_name, stream_type, offset).await?;
         return Ok(());
     }
@@ -150,64 +182,105 @@ pub async fn merge_by_stream(
     // collect stream stats
     let mut stream_stats = StreamStats::default();
 
-    for (prefix, files_with_size) in partition_files_with_size.iter_mut() {
-        // sort by file size
-        files_with_size.sort_by(|a, b| a.meta.original_size.cmp(&b.meta.original_size));
-        // delete duplicated files
-        files_with_size.dedup_by(|a, b| a.key == b.key);
-        loop {
-            // yield to other tasks
-            tokio::task::yield_now().await;
-            // merge file and get the big file key
-            let (new_file_name, new_file_meta, new_file_list) = merge_files(
-                org_id,
-                stream_name,
-                stream_type,
-                schema.clone(),
-                prefix,
-                files_with_size,
-            )
-            .await?;
-            if new_file_name.is_empty() {
-                break; // no file need to merge
-            }
-
-            // delete small files keys & write big files keys, use transaction
-            let mut events = Vec::with_capacity(new_file_list.len() + 1);
-            events.push(FileKey {
-                key: new_file_name.clone(),
-                meta: new_file_meta,
-                deleted: false,
-            });
-            for file in new_file_list.iter() {
-                stream_stats = stream_stats - file.meta.clone();
-                events.push(FileKey {
-                    key: file.key.clone(),
-                    meta: FileMeta::default(),
-                    deleted: true,
-                });
-            }
-            events.sort_by(|a, b| a.key.cmp(&b.key));
-
-            // write file list to storage
-            match write_file_list(org_id, &events).await {
-                Ok(_) => {}
-                Err(e) => {
-                    log::error!("[COMPACT] write file list failed: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    continue;
+    // use mutiple threads to merge
+    let semaphore = std::sync::Arc::new(Semaphore::new(CONFIG.limit.file_move_thread_num));
+    let mut tasks = Vec::with_capacity(partition_files_with_size.len());
+    for (prefix, files_with_size) in partition_files_with_size.into_iter() {
+        let org_id = org_id.to_string();
+        let stream_name = stream_name.to_string();
+        let schema = schema.clone();
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let task: JoinHandle<Result<(), anyhow::Error>> = tokio::task::spawn(async move {
+            // sort by file size
+            let mut files_with_size = files_with_size.to_owned();
+            files_with_size.sort_by(|a, b| a.meta.original_size.cmp(&b.meta.original_size));
+            // delete duplicated files
+            files_with_size.dedup_by(|a, b| a.key == b.key);
+            loop {
+                // yield to other tasks
+                tokio::task::yield_now().await;
+                // merge file and get the big file key
+                let (new_file_name, new_file_meta, new_file_list) = match merge_files(
+                    &org_id,
+                    &stream_name,
+                    stream_type,
+                    schema.clone(),
+                    &prefix,
+                    &files_with_size,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("[COMPACT] merge files failed: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+                if new_file_name.is_empty() {
+                    if CONFIG.common.print_key_event {
+                        log::info!(
+                            "[COMPACTOR] processing merge for {org_id}/{stream_type}/{stream_name}, new merge file is empty, new_file_list is {}",
+                            new_file_list.len()
+                        );
+                    }
+                    if new_file_list.is_empty() {
+                        // no file need to merge
+                        break;
+                    } else {
+                        // delete files from file_list and continue
+                        files_with_size.retain(|f| !&new_file_list.contains(f));
+                        continue;
+                    }
                 }
+
+                // delete small files keys & write big files keys, use transaction
+                let mut events = Vec::with_capacity(new_file_list.len() + 1);
+                events.push(FileKey {
+                    key: new_file_name.clone(),
+                    meta: new_file_meta,
+                    deleted: false,
+                });
+                for file in new_file_list.iter() {
+                    stream_stats = stream_stats - file.meta.clone();
+                    events.push(FileKey {
+                        key: file.key.clone(),
+                        meta: FileMeta::default(),
+                        deleted: true,
+                    });
+                }
+                events.sort_by(|a, b| a.key.cmp(&b.key));
+
+                // write file list to storage
+                match write_file_list(&org_id, &events).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error!("[COMPACT] write file list failed: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                }
+
+                // No need delete file here, will use another task to delete files
+
+                // delete files from file list
+                files_with_size.retain(|f| !&new_file_list.contains(f));
             }
+            drop(permit);
+            Ok(())
+        });
+        tasks.push(task);
+    }
 
-            // No need delete file here, will use another task to delete files
-
-            // delete files from file list
-            files_with_size.retain(|f| !&new_file_list.contains(f));
-        }
+    for task in tasks {
+        task.await??;
     }
 
     // write new offset
-    let offset = offset_time_hour + Duration::hours(1).num_microseconds().unwrap();
+    let offset = offset
+        + Duration::seconds(CONFIG.compact.step_secs)
+            .num_microseconds()
+            .unwrap();
     db::compact::files::set_offset(org_id, stream_name, stream_type, offset).await?;
 
     // update stream stats
@@ -225,7 +298,7 @@ pub async fn merge_by_stream(
     // metrics
     let time = start.elapsed().as_secs_f64();
     metrics::COMPACT_USED_TIME
-        .with_label_values(&[org_id, stream_name, stream_type.to_string().as_str()])
+        .with_label_values(&[org_id, stream_type.to_string().as_str()])
         .inc_by(time);
     metrics::COMPACT_DELAY_HOURS
         .with_label_values(&[org_id, stream_name, stream_type.to_string().as_str()])
@@ -234,14 +307,15 @@ pub async fn merge_by_stream(
     Ok(())
 }
 
-/// merge some small files into one big file, upload to storage, returns the big file key and merged files
+/// merge some small files into one big file, upload to storage, returns the big
+/// file key and merged files
 async fn merge_files(
     org_id: &str,
     stream_name: &str,
     stream_type: StreamType,
     schema: Arc<Schema>,
     prefix: &str,
-    files_with_size: &Vec<FileKey>,
+    files_with_size: &[FileKey],
 ) -> Result<(String, FileMeta, Vec<FileKey>), anyhow::Error> {
     if files_with_size.len() <= 1 {
         return Ok((String::from(""), FileMeta::default(), Vec::new()));
@@ -255,20 +329,21 @@ async fn merge_files(
             break;
         }
         new_file_size += file.meta.original_size;
-        new_file_list.push(file.to_owned());
+        new_file_list.push(file.clone());
         log::info!("[COMPACT] merge small file: {}", &file.key);
         // metrics
         metrics::COMPACT_MERGED_FILES
-            .with_label_values(&[org_id, stream_name, stream_type.to_string().as_str()])
+            .with_label_values(&[org_id, stream_type.to_string().as_str()])
             .inc();
         metrics::COMPACT_MERGED_BYTES
-            .with_label_values(&[org_id, stream_name, stream_type.to_string().as_str()])
+            .with_label_values(&[org_id, stream_type.to_string().as_str()])
             .inc_by(file.meta.original_size as u64);
     }
     // no files need to merge
     if new_file_list.len() <= 1 {
         return Ok((String::from(""), FileMeta::default(), Vec::new()));
     }
+    let retain_file_list = new_file_list.clone();
 
     // write parquet files into tmpfs
     let tmp_dir = cache::tmpfs::Directory::default();
@@ -297,13 +372,15 @@ async fn merge_files(
         new_file_list.retain(|f| !deleted_files.contains(&f.key));
     }
     if new_file_list.len() <= 1 {
-        return Ok((String::from(""), FileMeta::default(), Vec::new()));
+        return Ok((String::from(""), FileMeta::default(), retain_file_list));
     }
 
     // convert the file to the latest version of schema
     let schema_versions = db::schema::get_versions(org_id, stream_name, stream_type).await?;
     let schema_latest = schema_versions.last().unwrap();
     let schema_latest_id = schema_versions.len() - 1;
+    let bloom_filter_fields =
+        stream::get_stream_setting_bloom_filter_fields(schema_latest).unwrap();
     if CONFIG.common.widening_schema_evolution && schema_versions.len() > 1 {
         for file in &new_file_list {
             // get the schema version of the file
@@ -345,10 +422,6 @@ async fn merge_files(
             }
 
             // do the convert
-            if CONFIG.compact.fake_mode {
-                log::info!("[COMPACT] fake convert parquet file: {}", &file.key);
-                continue;
-            }
             let mut buf = Vec::new();
             let file_tmp_dir = cache::tmpfs::Directory::default();
             let file_data = storage::get(&file.key).await?;
@@ -357,6 +430,7 @@ async fn merge_files(
                 file_tmp_dir.name(),
                 &mut buf,
                 Arc::new(schema),
+                &bloom_filter_fields,
                 diff_fields,
                 FileType::PARQUET,
             )
@@ -370,20 +444,12 @@ async fn merge_files(
         }
     }
 
-    // FAKE MODE
-    if CONFIG.compact.fake_mode {
-        log::info!(
-            "[COMPACT] fake merge file succeeded, new file: fake.parquet, orginal_size: {new_file_size}, compressed_size: 0", 
-        );
-        return Ok(("".to_string(), FileMeta::default(), vec![]));
-    }
-
     let mut buf = Vec::new();
     let mut new_file_meta = datafusion::exec::merge_parquet_files(
         tmp_dir.name(),
         &mut buf,
         schema,
-        stream_type,
+        &bloom_filter_fields,
         new_file_size,
     )
     .await?;
@@ -397,7 +463,8 @@ async fn merge_files(
     let new_file_key = format!("{prefix}/{id}{}", FILE_EXT_PARQUET);
 
     log::info!(
-        "[COMPACT] merge file succeeded, new file: {}, orginal_size: {}, compressed_size: {}",
+        "[COMPACT] merge file succeeded, {} files into a new file: {}, orginal_size: {}, compressed_size: {}",
+        retain_file_list.len(),
         new_file_key,
         new_file_meta.original_size,
         new_file_meta.compressed_size,
@@ -405,7 +472,7 @@ async fn merge_files(
 
     // upload file
     match storage::put(&new_file_key, buf.into()).await {
-        Ok(_) => Ok((new_file_key, new_file_meta, new_file_list)),
+        Ok(_) => Ok((new_file_key, new_file_meta, retain_file_list)),
         Err(e) => Err(e),
     }
 }
@@ -470,8 +537,7 @@ async fn write_file_list_db_only(org_id: &str, events: &[FileKey]) -> Result<(),
 
 async fn write_file_list_s3(org_id: &str, events: &[FileKey]) -> Result<(), anyhow::Error> {
     // write new data into file_list
-    let (_stream_key, date_key, _file_name) =
-        infra_file_list::parse_file_key_columns(&events.first().unwrap().key)?;
+    let (_stream_key, date_key, _file_name) = parse_file_key_columns(&events.first().unwrap().key)?;
     // upload the new file_list to storage
     let new_file_list_key = format!("file_list/{}/{}.json.zst", date_key, ider::generate());
     let mut buf = zstd::Encoder::new(Vec::new(), 3)?;

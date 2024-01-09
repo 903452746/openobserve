@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -142,7 +143,17 @@ align="left">
                     name="'img:' + getImageURL('images/common/add_icon.svg')"
                   >
                     <q-list data-test="field-list-modal">
-                      <q-item clickable v-close-popup="true">
+                      <q-item
+                        clickable
+                        v-close-popup="true"
+                        v-if="searchObj.data.stream.selectedStreamFields.some(
+                                (item: any) =>
+                                  item.name === value
+                                    ? item.isSchemaField
+                                    : ''
+                              )
+                            "
+                      >
                         <q-item-section>
                           <q-item-label
                             data-test="log-details-include-field-btn"
@@ -163,7 +174,17 @@ align="left">
                         </q-item-section>
                       </q-item>
 
-                      <q-item clickable v-close-popup="true">
+                      <q-item
+                        clickable
+                        v-close-popup="true"
+                        v-if="searchObj.data.stream.selectedStreamFields.some(
+                                (item: any) =>
+                                  item.name === value
+                                    ? item.isSchemaField
+                                    : ''
+                              )
+                            "
+                      >
                         <q-item-section>
                           <q-item-label
                             data-test="log-details-exclude-field-btn"
@@ -180,6 +201,54 @@ align="left">
                                 <NotEqualIcon></NotEqualIcon>
                               </q-icon> </q-btn
                             >{{ t("common.excludeSearchTerm") }}</q-item-label
+                          >
+                        </q-item-section>
+                      </q-item>
+
+                      <q-item
+                        v-if="
+                          !searchObj.data.stream.selectedFields.includes(
+                            value.toString()
+                          )
+                        "
+                        clickable
+                        v-close-popup="true"
+                      >
+                        <q-item-section>
+                          <q-item-label
+                            data-test="log-details-include-field-btn"
+                            @click="addFieldToTable(value.toString())"
+                            ><q-btn
+                              title="Add to table"
+                              size="6px"
+                              round
+                              class="q-mr-sm pointer"
+                            >
+                              <q-icon
+                                color="currentColor"
+                                name="visibility" /></q-btn
+                            >{{ t("common.addFieldToTable") }}</q-item-label
+                          >
+                        </q-item-section>
+                      </q-item>
+                      <q-item v-else clickable
+v-close-popup="true">
+                        <q-item-section>
+                          <q-item-label
+                            data-test="log-details-include-field-btn"
+                            @click="addFieldToTable(value.toString())"
+                            ><q-btn
+                              title="Remove from table "
+                              size="6px"
+                              round
+                              class="q-mr-sm pointer"
+                            >
+                              <q-icon
+                                color="currentColor"
+                                name="visibility_off" /></q-btn
+                            >{{
+                              t("common.removeFieldFromTable")
+                            }}</q-item-label
                           >
                         </q-item-section>
                       </q-item>
@@ -275,7 +344,6 @@ import EqualIcon from "@/components/icons/EqualIcon.vue";
 import NotEqualIcon from "@/components/icons/NotEqualIcon.vue";
 import { copyToClipboard, useQuasar } from "quasar";
 import JsonPreview from "./JsonPreview.vue";
-import { emit } from "process";
 
 const defaultValue: any = () => {
   return {
@@ -343,7 +411,7 @@ export default defineComponent({
     const selectedRelativeValue = ref("10");
     const recordSizeOptions: any = ref([10, 20, 50, 100, 200, 500, 1000]);
     const shouldWrapValues: any = ref(true);
-    const searchObj = useLogs();
+    const { searchObj } = useLogs();
     const $q = useQuasar();
 
     onBeforeMount(() => {
@@ -406,6 +474,7 @@ export default defineComponent({
       toggleWrapLogDetails,
       copyContentToClipboard,
       addFieldToTable,
+      searchObj,
     };
   },
   async created() {
@@ -427,6 +496,7 @@ export default defineComponent({
 .indexDetailsContainer .q-list .q-item {
   height: auto;
   min-height: fit-content;
+  padding: 2px 8px;
 }
 
 .indexDetailsContainer .q-list .q-item .q-item__section {

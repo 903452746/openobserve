@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
 
@@ -27,7 +28,7 @@ pub async fn get(org_id: &str, key: &str) -> Result<bytes::Bytes, anyhow::Error>
     if let Some(it) = KVS.get(&cache_key) {
         return Ok(it.value().clone());
     }
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let val = db.get(&db_key).await?;
     KVS.insert(cache_key, val.clone());
     Ok(val)
@@ -35,7 +36,7 @@ pub async fn get(org_id: &str, key: &str) -> Result<bytes::Bytes, anyhow::Error>
 
 pub async fn set(org_id: &str, key: &str, val: bytes::Bytes) -> Result<(), anyhow::Error> {
     let (cache_key, db_key) = mk_keys(org_id, key);
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     db.put(&db_key, val.clone(), infra_db::NEED_WATCH).await?;
     KVS.insert(cache_key, val);
     Ok(())
@@ -43,13 +44,13 @@ pub async fn set(org_id: &str, key: &str, val: bytes::Bytes) -> Result<(), anyho
 
 pub async fn delete(org_id: &str, key: &str) -> Result<(), anyhow::Error> {
     let (cache_key, db_key) = mk_keys(org_id, key);
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     KVS.remove(&cache_key);
     Ok(db.delete(&db_key, false, infra_db::NEED_WATCH).await?)
 }
 
 pub async fn list(org_id: &str, prefix: &str) -> Result<Vec<String>, anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let cache_key = if prefix.ends_with('*') {
         format!("{org_id}/{}", prefix.strip_suffix('*').unwrap())
     } else {
@@ -66,8 +67,8 @@ pub async fn list(org_id: &str, prefix: &str) -> Result<Vec<String>, anyhow::Err
 
 pub async fn watch() -> Result<(), anyhow::Error> {
     let key = "/kv/";
-    let db = &infra_db::CLUSTER_COORDINATOR;
-    let mut events = db.watch(key).await?;
+    let cluster_coordinator = infra_db::get_coordinator().await;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching kv");
     loop {

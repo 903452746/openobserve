@@ -1,29 +1,35 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{
+    collections::HashMap,
+    io::{prelude::*, Error},
+};
 
 use actix_multipart::form::{bytes::Bytes, MultipartForm};
 use actix_web::{post, web, HttpResponse};
-use ahash::AHashMap;
 use flate2::read::ZlibDecoder;
 use serde::{Deserialize, Serialize};
-use std::io::{prelude::*, Error};
 
-use crate::common::{
-    meta::{http::HttpResponse as MetaHttpResponse, middleware_data::RumExtraData},
-    utils::json,
+use crate::{
+    common::{
+        meta::{http::HttpResponse as MetaHttpResponse, middleware_data::RumExtraData},
+        utils::json,
+    },
+    service::logs,
 };
-use crate::service::logs;
 
 pub const RUM_LOG_STREAM: &str = "_rumlog";
 pub const RUM_SESSION_REPLAY_STREAM: &str = "_sessionreplay";
@@ -84,7 +90,7 @@ pub struct View {
     pub id: String,
 }
 
-/** Rum data ingestion API */
+/// Rum data ingestion API
 #[utoipa::path(
     context_path = "/rum",
     tag = "Rum",
@@ -97,8 +103,8 @@ pub struct View {
     ),
     request_body(content = String, description = "Ingest data (multiple line json)", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/v1/{org_id}/rum")]
@@ -113,7 +119,7 @@ pub async fn data(
     ingest_multi_json(&org_id, RUM_DATA_STREAM, body, extend_json, **thread_id).await
 }
 
-/** Rum log ingestion API */
+/// Rum log ingestion API
 #[utoipa::path(
     context_path = "/rum",
     tag = "Rum",
@@ -126,8 +132,8 @@ pub async fn data(
     ),
     request_body(content = String, description = "Ingest data (json array)", content_type = "application/json", example = json!([{"Year": 1896, "City": "Athens", "Sport": "Aquatics", "Discipline": "Swimming", "Athlete": "Alfred", "Country": "HUN"},{"Year": 1896, "City": "Athens", "Sport": "Aquatics", "Discipline": "Swimming", "Athlete": "HERSCHMANN", "Country":"CHN"}])),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/v1/{org_id}/logs")]
@@ -142,7 +148,7 @@ pub async fn log(
     ingest_multi_json(&org_id, RUM_LOG_STREAM, body, extend_json, **thread_id).await
 }
 
-/** Rum session-replay ingestion API */
+/// Rum session-replay ingestion API
 #[utoipa::path(
     context_path = "/rum",
     tag = "Rum",
@@ -155,8 +161,8 @@ pub async fn log(
     ),
     request_body(content = String, description = "Ingest data (json array)", content_type = "application/json", example = json!([{"Year": 1896, "City": "Athens", "Sport": "Aquatics", "Discipline": "Swimming", "Athlete": "Alfred", "Country": "HUN"},{"Year": 1896, "City": "Athens", "Sport": "Aquatics", "Discipline": "Swimming", "Athlete": "HERSCHMANN", "Country":"CHN"}])),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/v1/{org_id}/replay")]
@@ -199,7 +205,7 @@ async fn ingest_multi_json(
     org_id: &str,
     stream_name: &str,
     body: web::Bytes,
-    extend_json: &AHashMap<String, serde_json::Value>,
+    extend_json: &HashMap<String, serde_json::Value>,
     thread_id: usize,
 ) -> Result<HttpResponse, Error> {
     Ok(

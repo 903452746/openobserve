@@ -1,29 +1,29 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use config::{ider, CONFIG, INSTANCE_ID};
 use regex::Regex;
 
-use crate::common::{
-    infra::{
-        cluster,
-        config::{CONFIG, INSTANCE_ID, SYSLOG_ENABLED},
-        file_list as infra_file_list, ider,
+use crate::{
+    common::{
+        infra::{cluster, config::SYSLOG_ENABLED, file_list as infra_file_list},
+        meta::{organization::DEFAULT_ORG, user::UserRequest},
+        utils::file::clean_empty_dirs,
     },
-    meta::{organization::DEFAULT_ORG, user::UserRequest},
-    utils::file::clean_empty_dirs,
+    service::{compact::stats::update_stats_from_file_list, db, users},
 };
-use crate::service::{compact::stats::update_stats_from_file_list, db, users};
 
 mod alert_manager;
 mod compact;
@@ -48,9 +48,11 @@ pub async fn init() -> Result<(), anyhow::Error> {
             || !email_regex.is_match(&CONFIG.auth.root_user_email)
             || CONFIG.auth.root_user_password.is_empty()
         {
-            panic!("Please set root user email-id & password using ZO_ROOT_USER_EMAIL & ZO_ROOT_USER_PASSWORD environment variables. This can also indicate an invalid email ID. Email ID must comply with ([a-z0-9_+]([a-z0-9_+.-]*[a-z0-9_+])?)@([a-z0-9]+([\\-\\.]{{1}}[a-z0-9]+)*\\.[a-z]{{2,6}})");
+            panic!(
+                "Please set root user email-id & password using ZO_ROOT_USER_EMAIL & ZO_ROOT_USER_PASSWORD environment variables. This can also indicate an invalid email ID. Email ID must comply with ([a-z0-9_+]([a-z0-9_+.-]*[a-z0-9_+])?)@([a-z0-9]+([\\-\\.]{{1}}[a-z0-9]+)*\\.[a-z]{{2,6}})"
+            );
         }
-        let _ = users::post_user(
+        let _ = users::create_root_user(
             DEFAULT_ORG,
             UserRequest {
                 email: CONFIG.auth.root_user_email.clone(),
@@ -58,6 +60,7 @@ pub async fn init() -> Result<(), anyhow::Error> {
                 role: crate::common::meta::user::UserRole::Root,
                 first_name: "root".to_owned(),
                 last_name: "".to_owned(),
+                is_external: false,
             },
         )
         .await;
@@ -75,7 +78,7 @@ pub async fn init() -> Result<(), anyhow::Error> {
         .await
         .expect("organization cache sync failed");
 
-    //set instance id
+    // set instance id
     let instance_id = match db::get_instance().await {
         Ok(Some(instance)) => instance,
         Ok(None) | Err(_) => {
@@ -95,7 +98,7 @@ pub async fn init() -> Result<(), anyhow::Error> {
     }
 
     // telemetry run
-    if CONFIG.common.telemetry_enabled {
+    if CONFIG.common.telemetry_enabled && cluster::is_querier(&cluster::LOCAL_NODE_ROLE) {
         tokio::task::spawn(async move { telemetry::run().await });
     }
 
@@ -107,7 +110,7 @@ pub async fn init() -> Result<(), anyhow::Error> {
     tokio::task::spawn(async move { db::alerts::templates::watch().await });
     tokio::task::spawn(async move { db::alerts::destinations::watch().await });
     tokio::task::spawn(async move { db::alerts::watch().await });
-    tokio::task::spawn(async move { db::triggers::watch().await });
+    tokio::task::spawn(async move { db::alerts::triggers::watch().await });
     tokio::task::spawn(async move { db::organization::watch().await });
     tokio::task::yield_now().await; // yield let other tasks run
 
@@ -131,7 +134,7 @@ pub async fn init() -> Result<(), anyhow::Error> {
         .await
         .expect("alerts destinations cache failed");
     db::alerts::cache().await.expect("alerts cache failed");
-    db::triggers::cache()
+    db::alerts::triggers::cache()
         .await
         .expect("alerts triggers cache failed");
     db::syslog::cache().await.expect("syslog cache failed");
@@ -174,9 +177,11 @@ pub async fn init() -> Result<(), anyhow::Error> {
     // check wal directory
     if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
         // create wal dir
-        std::fs::create_dir_all(&CONFIG.common.data_wal_dir)?;
+        if let Err(e) = std::fs::create_dir_all(&CONFIG.common.data_wal_dir) {
+            log::error!("Failed to create wal dir: {}", e);
+        }
         // clean empty sub dirs
-        clean_empty_dirs(&CONFIG.common.data_wal_dir)?;
+        _ = clean_empty_dirs(&CONFIG.common.data_wal_dir);
     }
 
     tokio::task::spawn(async move { files::run().await });

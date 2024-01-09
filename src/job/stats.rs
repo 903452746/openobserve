@@ -1,27 +1,28 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use config::CONFIG;
 use tokio::time;
 
-use crate::common::infra::{
-    cluster::{is_compactor, is_querier},
-    config::CONFIG,
+use crate::{
+    common::infra::cluster::{is_compactor, is_querier},
+    service::{compact::stats::update_stats_from_file_list, db, usage},
 };
-use crate::service::{compact::stats::update_stats_from_file_list, db, usage};
 
 pub async fn run() -> Result<(), anyhow::Error> {
-    //tokio::task::spawn(async move { usage_report_stats().await });
+    // tokio::task::spawn(async move { usage_report_stats().await });
     tokio::task::spawn(async move { file_list_update_stats().await });
     tokio::task::spawn(async move { cache_stream_stats().await });
     Ok(())
@@ -71,10 +72,11 @@ async fn cache_stream_stats() -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    // should run it every 10 minutes
-    let mut interval = time::interval(time::Duration::from_secs(
+    // should run it every minute
+    let mut interval = time::interval(time::Duration::from_secs(std::cmp::min(
         CONFIG.limit.calculate_stats_interval,
-    ));
+        60,
+    )));
     interval.tick().await; // trigger the first run
     loop {
         interval.tick().await;

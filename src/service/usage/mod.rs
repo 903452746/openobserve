@@ -1,38 +1,36 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::sync::Arc;
 
 use ahash::AHashMap;
 use chrono::{Datelike, Timelike, Utc};
+use config::{meta::stream::StreamType, metrics, CONFIG, SIZE_IN_MB};
 use once_cell::sync::Lazy;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::common::{
-    meta::usage::{STATS_STREAM, USAGE_STREAM},
-    utils::json,
-    {
-        infra::{
-            config::{CONFIG, SIZE_IN_MB},
-            metrics,
+use crate::{
+    common::{
+        meta::usage::{
+            AggregatedData, GroupKey, RequestStats, UsageData, UsageEvent, UsageType, STATS_STREAM,
+            USAGE_STREAM,
         },
-        meta::{
-            usage::{AggregatedData, GroupKey, RequestStats, UsageData, UsageEvent, UsageType},
-            StreamType,
-        },
+        utils::json,
     },
+    handler::grpc::cluster_rpc,
 };
-use crate::handler::grpc::cluster_rpc;
 
 pub mod ingestion_service;
 pub mod stats;
@@ -77,6 +75,13 @@ pub async fn report_request_usage_stats(
             hour: now.hour(),
             month: now.month(),
             year: now.year(),
+            event_time_hour: format!(
+                "{:04}{:02}{:02}{:02}",
+                now.year(),
+                now.month(),
+                now.day(),
+                now.hour()
+            ),
             org_id: org_id.to_owned(),
             request_body: request_body.to_owned(),
             size: stats.size,
@@ -99,6 +104,13 @@ pub async fn report_request_usage_stats(
             hour: now.hour(),
             month: now.month(),
             year: now.year(),
+            event_time_hour: format!(
+                "{:04}{:02}{:02}{:02}",
+                now.year(),
+                now.month(),
+                now.day(),
+                now.hour()
+            ),
             org_id: org_id.to_owned(),
             request_body: request_body.to_owned(),
             size: stats.size,
@@ -139,6 +151,13 @@ pub async fn report_compression_stats(
         month: now.month(),
         day: now.day(),
         hour: now.hour(),
+        event_time_hour: format!(
+            "{:04}{:02}{:02}{:02}",
+            now.year(),
+            now.month(),
+            now.day(),
+            now.hour()
+        ),
         org_id: org_id.to_owned(),
         request_body: "".to_owned(),
         size: stats.size,

@@ -1,33 +1,52 @@
 // Copyright 2023 Zinc Labs Inc.
-
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-
-//      http:www.apache.org/licenses/LICENSE-2.0
-
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import store from "../stores";
+import type { AxiosInstance } from 'axios';
 import axios from "axios";
 import config from "../aws-exports";
 
 const http = ({ headers } = {} as any) => {
-  const instance = axios.create({
-    // timeout: 10000,
-    baseURL: store.state.API_ENDPOINT,
-    headers: {
+
+  let instance: AxiosInstance;
+  if (config.isEnterprise == "false") {
+    headers = {
       Authorization:
-        config.isCloud == "true"
+        (config.isCloud == "true")
           ? "Bearer " + localStorage.getItem("token")
           : localStorage.getItem("token") || "",
       ...headers,
-    },
-  });
+    };
+    instance = axios.create({
+      // timeout: 10000,
+      baseURL: store.state.API_ENDPOINT,
+      headers,
+    });
+  } else {
+    headers = {
+      Authorization: "Bearer " + localStorage.getItem("access_token"),
+      ...headers,
+    };
+    instance = axios.create({
+      // timeout: 10000,
+      baseURL: store.state.API_ENDPOINT,
+      withCredentials: config.isEnterprise,
+      headers,
+    });
+  }
+
 
   instance.interceptors.response.use(
     function (response) {
@@ -47,11 +66,33 @@ const http = ({ headers } = {} as any) => {
                 error.response.data["error"] || "Invalid credentials"
               )
             );
-            if (!error.request.responseURL.includes("/auth/login")) {
+            if ((config.isCloud == "true") && !error.request.responseURL.includes("/auth/login")) {
               store.dispatch("logout");
               localStorage.clear();
               sessionStorage.clear();
               window.location.reload();
+            }
+            // Check if the failing request is not the login or refresh token request
+            else if ((config.isEnterprise == "true") && !error.config.url.includes('/config/dex_login') && !error.config.url.includes('/config/dex_refresh')) {
+              // Call refresh token API
+              const refreshToken = localStorage.getItem('refresh_token');
+
+              // Modify the request to include the refresh token
+              return instance.get('/config/dex_refresh', {
+                headers: { 'Authorization': `${refreshToken}` }
+              }).then(res => {
+                localStorage.setItem('access_token', res.data);
+                error.config.headers['Authorization'] = 'Bearer ' + res.data;
+                return instance(error.config);
+              }).catch(refreshError => {
+                store.dispatch('logout');
+                localStorage.clear();
+                sessionStorage.clear();
+                window.location.reload();
+                return Promise.reject(refreshError);
+              });
+            } else {
+              console.log(JSON.stringify(error.response.data["error"] || "Invalid credentials"));
             }
             break;
           case 404:

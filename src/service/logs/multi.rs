@@ -1,40 +1,45 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader},
+};
 
 use actix_web::{http, web};
-use ahash::AHashMap;
 use chrono::{Duration, Utc};
+use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
 use datafusion::arrow::datatypes::Schema;
-use std::io::{BufRead, BufReader};
 
-use crate::common::{
-    infra::{
-        config::{CONFIG, DISTINCT_FIELDS},
-        metrics,
+use crate::{
+    common::{
+        meta::{
+            alerts::Alert,
+            ingestion::{IngestionResponse, StreamStatus},
+            stream::{SchemaRecords, StreamParams},
+            usage::UsageType,
+        },
+        utils::{flatten, json, time::parse_timestamp_micro_from_value},
     },
-    meta::{
-        alert::{Alert, Trigger},
-        ingestion::{IngestionResponse, StreamStatus},
-        stream::StreamParams,
-        usage::UsageType,
-        StreamType,
+    service::{
+        distinct_values, get_formatted_stream_name,
+        ingestion::{evaluate_trigger, is_ingestion_allowed, write_file, TriggerAlertData},
+        logs::StreamMeta,
+        schema::get_upto_discard_error,
+        usage::report_request_usage_stats,
     },
-    utils::{flatten, json, time::parse_timestamp_micro_from_value},
-};
-use crate::service::{
-    distinct_values, get_formatted_stream_name, ingestion::is_ingestion_allowed,
-    ingestion::write_file, logs::StreamMeta, usage::report_request_usage_stats,
 };
 
 /// Ingest a multiline json body but add extra keys to each json row
@@ -45,51 +50,26 @@ use crate::service::{
 /// - body: incoming payload
 /// - extend_json: a hashmap of string -> string values which should be extended in each json row
 /// - thread_id: a unique thread-id associated with this process
-///
 pub async fn ingest_with_keys(
     org_id: &str,
     in_stream_name: &str,
     body: web::Bytes,
-    extend_json: &AHashMap<String, serde_json::Value>,
+    extend_json: &HashMap<String, serde_json::Value>,
     thread_id: usize,
 ) -> Result<IngestionResponse, anyhow::Error> {
     ingest_inner(org_id, in_stream_name, body, extend_json, thread_id).await
-}
-
-/// Ingest a multiline json body
-///
-/// ### Args
-/// - org_id: org id to ingest data in
-/// - in_stream_name: stream to write data in
-/// - body: incoming payload
-/// - thread_id: a unique thread-id associated with this process
-///
-pub async fn ingest(
-    org_id: &str,
-    in_stream_name: &str,
-    body: web::Bytes,
-    thread_id: usize,
-) -> Result<IngestionResponse, anyhow::Error> {
-    ingest_inner(
-        org_id,
-        in_stream_name,
-        body,
-        &AHashMap::default(),
-        thread_id,
-    )
-    .await
 }
 
 async fn ingest_inner(
     org_id: &str,
     in_stream_name: &str,
     body: web::Bytes,
-    extend_json: &AHashMap<String, serde_json::Value>,
+    extend_json: &HashMap<String, serde_json::Value>,
     thread_id: usize,
 ) -> Result<IngestionResponse, anyhow::Error> {
     let start = std::time::Instant::now();
 
-    let mut stream_schema_map: AHashMap<String, Schema> = AHashMap::new();
+    let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let mut distinct_values = Vec::with_capacity(16);
     let mut stream_params = StreamParams::new(org_id, in_stream_name, StreamType::Logs);
     let stream_name = &get_formatted_stream_name(&mut stream_params, &mut stream_schema_map).await;
@@ -99,12 +79,12 @@ async fn ingest_inner(
     }
     let mut runtime = crate::service::ingestion::init_functions_runtime();
 
-    let mut min_ts =
-        (Utc::now() + Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
+    let min_ts =
+        (Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
 
-    let mut stream_alerts_map: AHashMap<String, Vec<Alert>> = AHashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut stream_status = StreamStatus::new(stream_name);
-    let mut trigger: Option<Trigger> = None;
+    let mut trigger: TriggerAlertData = None;
 
     // Start Register Transforms for stream
     let (local_trans, stream_vrl_map) = crate::service::ingestion::register_stream_transforms(
@@ -120,11 +100,16 @@ async fn ingest_inner(
     let partition_time_level = partition_det.partition_time_level;
 
     // Start get stream alerts
-    let key = format!("{}/{}/{}", &org_id, StreamType::Logs, &stream_name);
-    crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+    crate::service::ingestion::get_stream_alerts(
+        org_id,
+        StreamType::Logs,
+        stream_name,
+        &mut stream_alerts_map,
+    )
+    .await;
     // End get stream alert
 
-    let mut buf: AHashMap<String, Vec<String>> = AHashMap::new();
+    let mut buf: HashMap<String, SchemaRecords> = HashMap::new();
     let reader = BufReader::new(body.as_ref());
     for line in reader.lines() {
         let line = line?;
@@ -139,13 +124,13 @@ async fn ingest_inner(
         }
 
         // JSON Flattening
-        value = flatten::flatten(&value)?;
+        value = flatten::flatten(value)?;
         // Start row based transform
 
         if !local_trans.is_empty() {
             value = crate::service::ingestion::apply_stream_transform(
                 &local_trans,
-                &value,
+                value,
                 &stream_vrl_map,
                 stream_name,
                 &mut runtime,
@@ -174,14 +159,10 @@ async fn ingest_inner(
             None => Utc::now().timestamp_micros(),
         };
         // check ingestion time
-        let earliest_time = Utc::now() + Duration::hours(0 - CONFIG.limit.ingest_allowed_upto);
-        if timestamp < earliest_time.timestamp_micros() {
-            stream_status.status.failed += 1; // to old data, just discard
-            stream_status.status.error = super::get_upto_discard_error();
-            continue;
-        }
         if timestamp < min_ts {
-            min_ts = timestamp;
+            stream_status.status.failed += 1; // to old data, just discard
+            stream_status.status.error = get_upto_discard_error().to_string();
+            continue;
         }
         local_val.insert(
             CONFIG.common.column_timestamp.clone(),
@@ -189,7 +170,7 @@ async fn ingest_inner(
         );
 
         // write data
-        let local_trigger = super::add_valid_record(
+        let local_trigger = match super::add_valid_record(
             &StreamMeta {
                 org_id: org_id.to_string(),
                 stream_name: stream_name.to_string(),
@@ -201,8 +182,20 @@ async fn ingest_inner(
             &mut stream_status.status,
             &mut buf,
             local_val,
+            trigger.is_none(),
         )
-        .await;
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                stream_status.status.failed += 1;
+                stream_status.status.error = e.to_string();
+                continue;
+            }
+        };
+        if local_trigger.is_some() {
+            trigger = local_trigger;
+        }
 
         // get distinct_value item
         for field in DISTINCT_FIELDS.iter() {
@@ -219,33 +212,17 @@ async fn ingest_inner(
                 }
             }
         }
-
-        if local_trigger.is_some() {
-            trigger = Some(local_trigger.unwrap());
-        }
     }
 
-    // write to file
-    let mut stream_file_name = "".to_string();
-
-    let mut req_stats = write_file(
-        &buf,
-        thread_id,
-        &stream_params,
-        &mut stream_file_name,
-        partition_time_level,
-    )
-    .await;
-
-    if stream_file_name.is_empty() {
-        return Ok(IngestionResponse::new(
-            http::StatusCode::OK.into(),
-            vec![stream_status],
-        ));
+    // write data to wal
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
+    let mut req_stats = write_file(&writer, stream_name, buf).await;
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
     }
 
     // only one trigger per request, as it updates etcd
-    super::evaluate_trigger(trigger, &stream_alerts_map).await;
+    evaluate_trigger(trigger).await;
 
     // send distinct_values
     if !distinct_values.is_empty() {
@@ -255,7 +232,7 @@ async fn ingest_inner(
     }
 
     req_stats.response_time = start.elapsed().as_secs_f64();
-    //metric + data usage
+    // metric + data usage
     report_request_usage_stats(
         req_stats,
         org_id,

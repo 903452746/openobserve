@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use bytes::BytesMut;
 use tokio::{
@@ -27,9 +28,21 @@ pub async fn udp_server(socket: UdpSocket) {
     let sender = BROADCASTER.read().await;
     let mut udp_receiver_rx = sender.subscribe();
     loop {
-        let (recv_len, addr) = socket.recv_from(&mut buf_udp).await.unwrap();
+        let (recv_len, addr) = match socket.recv_from(&mut buf_udp).await {
+            Ok(val) => val,
+            Err(e) => {
+                log::error!("Error while reading from UDP socket: {}", e);
+                continue;
+            }
+        };
         let message = BytesMut::from(&buf_udp[..recv_len]);
-        let input_str = String::from_utf8(message.to_vec()).unwrap();
+        let input_str = match String::from_utf8(message.to_vec()) {
+            Ok(val) => val,
+            Err(e) => {
+                log::error!("Error while converting UDP message to UTF8 string: {}", e);
+                continue;
+            }
+        };
         if input_str != STOP_SRV {
             let _ = syslog::ingest(&input_str, addr).await;
         }
@@ -48,13 +61,31 @@ pub async fn tcp_server(listener: TcpListener) {
     let mut tcp_receiver_rx = sender.subscribe();
     let mut buf_tcp = vec![0u8; 1460];
     loop {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = match listener.accept().await {
+            Ok(val) => val,
+            Err(e) => {
+                log::error!("Error while accepting TCP connection: {}", e);
+                continue;
+            }
+        };
 
         match stream.peer_addr() {
             Ok(addr) => {
-                let len = stream.read(&mut buf_tcp).await.unwrap();
+                let len = match stream.read(&mut buf_tcp).await {
+                    Ok(val) => val,
+                    Err(e) => {
+                        log::error!("Error while reading from TCP stream: {}", e);
+                        continue;
+                    }
+                };
                 let message = BytesMut::from(&buf_tcp[..len]);
-                let input_str = String::from_utf8(message.to_vec()).unwrap();
+                let input_str = match String::from_utf8(message.to_vec()) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        log::error!("Error while converting TCP message to UTF8 string: {}", e);
+                        continue;
+                    }
+                };
                 if input_str != STOP_SRV {
                     let _ = syslog::ingest(&input_str, addr).await;
                 }

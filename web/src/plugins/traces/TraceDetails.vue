@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -32,21 +33,57 @@
           <div class="text-h6 q-mr-lg">
             {{ traceTree[0]["operationName"] }}
           </div>
-          <div class="q-pb-xs q-mr-lg">
-            Trace ID: {{ spanList[0]["trace_id"] }}
+          <div class="q-pb-xs q-mr-lg flex items-center">
+            <div>Trace ID: {{ spanList[0]["trace_id"] }}</div>
+            <q-icon
+              class="q-ml-xs text-grey-8 cursor-pointer trace-copy-icon"
+              size="12px"
+              name="content_copy"
+              title="Copy"
+              @click="copyTraceId"
+            />
           </div>
-          <div class="q-pb-xs">Spans: {{ spanList.length - 1 }}</div>
+
+          <div class="q-pb-xs">Spans: {{ spanList.length }}</div>
         </div>
-        <q-btn v-close-popup="true" round flat icon="cancel" size="md" />
+        <div class="flex items-center">
+          <q-btn
+            data-test="logs-search-bar-share-link-btn"
+            class="q-mr-sm download-logs-btn q-px-sm"
+            size="sm"
+            icon="share"
+            round
+            flat
+            no-outline
+            :title="t('search.shareLink')"
+            @click="shareLink"
+          />
+          <q-btn v-close-popup="true" round flat icon="cancel" size="md" />
+        </div>
       </div>
       <q-separator style="width: 100%" />
-      <div class="col-12 flex justify-between items-end q-px-sm q-pt-sm">
-        <div class="text-subtitle2 text-bold">
-          {{
-            activeVisual === "timeline" ? "Trace Timeline" : "Trace Service Map"
-          }}
-        </div>
+      <div class="col-12 flex justify-between items-end q-pr-sm q-pt-sm">
         <div
+          class="trace-chart-btn flex items-center no-wrap cursor-pointer q-mb-sm"
+          @click="toggleTimeline"
+        >
+          <q-icon
+            name="expand_more"
+            :class="!isTimelineExpanded ? 'rotate-270' : ''"
+            size="22px"
+            class="cursor-pointer text-grey-10"
+          />
+          <div class="text-subtitle2 text-bold">
+            {{
+              activeVisual === "timeline"
+                ? "Trace Timeline"
+                : "Trace Service Map"
+            }}
+          </div>
+        </div>
+
+        <div
+          v-if="isTimelineExpanded"
           class="rounded-borders"
           style="border: 1px solid #cacaca; padding: 2px"
         >
@@ -66,58 +103,75 @@
           </template>
         </div>
       </div>
-      <div class="col-12" v-if="activeVisual === 'timeline'">
+      <div
+        v-show="isTimelineExpanded"
+        class="col-12"
+        :key="isTimelineExpanded.toString()"
+      >
         <ChartRenderer
+          v-if="activeVisual === 'timeline'"
           class="trace-details-chart"
           id="trace_details_gantt_chart"
           :data="ChartData"
           @updated:chart="updateChart"
           style="height: 200px"
         />
-      </div>
-      <div class="col-12" v-else>
-        <ChartRenderer :data="traceServiceMap" style="height: 200px" />
+        <ChartRenderer v-else :data="traceServiceMap" style="height: 200px" />
       </div>
       <q-separator style="width: 100%" class="q-mb-sm" />
       <div
-        :class="
-          isSidebarOpen ? 'histogram-container' : 'histogram-container-full'
-        "
+        class="histogram-spans-container"
+        :class="[
+          isSidebarOpen ? 'histogram-container' : 'histogram-container-full',
+          isTimelineExpanded ? '' : 'full',
+        ]"
       >
         <trace-header
           :baseTracePosition="baseTracePosition"
-          :splitterWidth="splitterModel"
+          :splitterWidth="leftWidth"
         />
-        <div class="histogram-spans-container">
-          <q-splitter v-model="splitterModel" :style="{ height: '100%' }">
-            <template v-slot:before>
-              <div class="trace-tree-container">
-                <trace-tree
-                  :collapseMapping="collapseMapping"
-                  :spans="spanPositionList"
-                  :baseTracePosition="baseTracePosition"
-                  :spanDimensions="spanDimensions"
-                  class="trace-tree"
-                  @toggle-collapse="toggleSpanCollapse"
-                />
-              </div>
-            </template>
-            <template v-slot:after>
-              <SpanRenderer
+        <div class="relative-position full-height">
+          <div
+            class="trace-tree-container"
+            :class="store.state.theme === 'dark' ? 'bg-dark' : 'bg-white'"
+          >
+            <div class="q-pt-sm position-relative">
+              <div
+                :style="{
+                  width: '1px',
+                  left: `${leftWidth}px`,
+                  backgroundColor:
+                    store.state.theme === 'dark' ? '#3c3c3c' : '#ececec',
+                  zIndex: 999,
+                  top: '-28px',
+                  height: 'calc(100% + 30px) !important',
+                  cursor: 'col-resize',
+                }"
+                class="absolute full-height"
+                @mousedown="startResize"
+              />
+              <trace-tree
                 :collapseMapping="collapseMapping"
                 :spans="spanPositionList"
                 :baseTracePosition="baseTracePosition"
                 :spanDimensions="spanDimensions"
-                ref="traceRootSpan"
+                :spanMap="spanMap"
+                :leftWidth="leftWidth"
+                class="trace-tree"
+                @toggle-collapse="toggleSpanCollapse"
               />
-            </template>
-          </q-splitter>
+            </div>
+          </div>
         </div>
       </div>
       <q-separator vertical />
-      <div v-if="isSidebarOpen && selectedSpanId" class="histogram-sidebar">
+      <div
+        v-if="isSidebarOpen && selectedSpanId"
+        class="histogram-sidebar"
+        :class="isTimelineExpanded ? '' : 'full'"
+      >
         <trace-details-sidebar
-          :span="spanMapping[selectedSpanId]"
+          :span="spanMap[selectedSpanId as string]"
           @close="closeSidebar"
         />
       </div>
@@ -135,7 +189,7 @@
 
 <script lang="ts">
 import { defineComponent, ref, type Ref, onMounted, watch } from "vue";
-import { cloneDeep, range } from "lodash";
+import { cloneDeep } from "lodash";
 import SpanRenderer from "./SpanRenderer.vue";
 import useTraces from "@/composables/useTraces";
 import { computed } from "vue";
@@ -143,7 +197,6 @@ import TraceDetailsSidebar from "./TraceDetailsSidebar.vue";
 import TraceTree from "./TraceTree.vue";
 import TraceHeader from "./TraceHeader.vue";
 import { useStore } from "vuex";
-import { duration } from "moment";
 import D3Chart from "@/components/D3Chart.vue";
 import { formatTimeWithSuffix, getImageURL } from "@/utils/zincutils";
 import TraceTimelineIcon from "@/components/icons/TraceTimelineIcon.vue";
@@ -153,6 +206,9 @@ import {
   convertTraceServiceMapData,
 } from "@/utils/traces/convertTraceData";
 import ChartRenderer from "@/components/dashboards/panels/ChartRenderer.vue";
+import { throttle } from "lodash";
+import { copyToClipboard, useQuasar } from "quasar";
+import { useI18n } from "vue-i18n";
 
 export default defineComponent({
   name: "TraceDetails",
@@ -172,10 +228,10 @@ export default defineComponent({
     ServiceMapIcon,
     ChartRenderer,
   },
-
-  setup() {
+  emits: ["shareLink"],
+  setup(props, { emit }) {
     const traceTree: any = ref([]);
-    const spanMapping: any = ref({});
+    const spanMap: any = ref({});
     const { searchObj } = useTraces();
     const baseTracePosition: any = ref({});
     const collapseMapping: any = ref({});
@@ -186,12 +242,12 @@ export default defineComponent({
     const store = useStore();
     const traceServiceMap: any = ref({});
     const spanDimensions = {
-      height: 25,
+      height: 30,
       barHeight: 8,
       textHeight: 25,
       gap: 15,
-      collapseHeight: 8,
-      collapseWidth: 8,
+      collapseHeight: "14",
+      collapseWidth: 14,
       connectorPadding: 2,
       paddingLeft: 8,
       hConnectorWidth: 20,
@@ -199,6 +255,10 @@ export default defineComponent({
       dotConnectorHeight: 6,
       colors: ["#b7885e", "#1ab8be", "#ffcb99", "#f89570", "#839ae2"],
     };
+
+    const { t } = useI18n();
+
+    const $q = useQuasar();
 
     const traceVisuals = [
       { label: "Timeline", value: "timeline", icon: TraceTimelineIcon },
@@ -213,9 +273,17 @@ export default defineComponent({
 
     const ChartData: any = ref({});
 
+    const leftWidth: Ref<number> = ref(250);
+    const initialX: Ref<number> = ref(0);
+    const initialWidth: Ref<number> = ref(0);
+
+    const throttledResizing = ref<any>(null);
+
     const spanList: any = computed(() => {
       return searchObj.data.traceDetails.spanList;
     });
+
+    const isTimelineExpanded = ref(false);
 
     onMounted(() => {
       buildTracesTree();
@@ -250,7 +318,7 @@ export default defineComponent({
         tics.push({
           value: Number(time.toFixed(2)),
           label: `${formatTimeWithSuffix(time * 1000)}`,
-          left: `${25 * i}%`,
+          left: i === 0 ? "-1px" : `${25 * i}%`,
         });
         time += quarterMs;
       }
@@ -258,23 +326,28 @@ export default defineComponent({
     };
 
     // Find out spans who has reference_parent_span_id as span_id of first span in sampleTrace
-    const buildTracesTree = async () => {
+    async function buildTracesTree() {
       if (!spanList.value?.length) return;
 
-      spanMapping.value = {};
+      spanMap.value = {};
       traceTree.value = [];
       spanPositionList.value = [];
       collapseMapping.value = {};
       let lowestStartTime: number = spanList.value[0].start_time;
       let highestEndTime: number = spanList.value[0].end_time;
 
-      const traceTreeMock: any = {};
-      const serviceColorMapping: any = {};
-
       if (!spanList.value?.length) return;
-      spanMapping.value[spanList.value[0].span_id] = spanList.value[0];
-      let colorIndex = 0;
-      let noParentSpans = [];
+
+      spanList.value.forEach((spanData: any) => {
+        spanMap.value[spanData.span_id] = spanData;
+      });
+
+      const formattedSpanMap: any = {};
+
+      spanList.value.forEach((spanData: any) => {
+        formattedSpanMap[spanData.span_id] = getFormattedSpan(spanData);
+      });
+
       for (let i = 0; i < spanList.value.length; i++) {
         if (spanList.value[i].start_time < lowestStartTime) {
           lowestStartTime = spanList.value[i].start_time;
@@ -283,62 +356,45 @@ export default defineComponent({
           highestEndTime = spanList.value[i].end_time;
         }
 
-        spanMapping.value[spanList.value[i].span_id] = cloneDeep(
-          spanList.value[i]
-        );
+        const span = formattedSpanMap[spanList.value[i].span_id];
 
-        const span = getFormattedSpan(spanList.value[i]);
+        span.style.color = searchObj.meta.serviceColors[span.serviceName];
 
-        if (span.serviceName && !serviceColorMapping[span.serviceName]) {
-          serviceColorMapping[span.serviceName] =
-            spanDimensions.colors[colorIndex];
-          colorIndex++;
-          if (colorIndex > spanDimensions.colors.length - 1) colorIndex = 0;
-        }
-
-        span.style.color = serviceColorMapping[span.serviceName];
+        span.style.backgroundColor = adjustOpacity(span.style.color, 0.2);
 
         span.index = i;
 
         collapseMapping.value[span.spanId] = true;
 
-        if (span.parentId && !traceTreeMock[span.parentId]) {
-          noParentSpans.push(span);
+        if (!span.parentId) {
+          traceTree.value.push(span);
+        } else if (!formattedSpanMap[span.parentId]) {
+          traceTree.value.push(span);
+        } else if (span.parentId && formattedSpanMap[span.parentId]) {
+          const parentSpan = formattedSpanMap[span.parentId];
+          if (!parentSpan.spans) parentSpan.spans = [];
+          parentSpan.spans.push(span);
         }
-
-        if (span.parentId && traceTreeMock[span.parentId])
-          traceTreeMock[span.parentId].push(span);
-
-        if (!traceTreeMock[span.spanId]) traceTreeMock[span.spanId] = [];
-
-        if (!span["spans"]) span["spans"] = traceTreeMock[span.spanId];
       }
 
-      traceTree.value = [];
-      traceTree.value.push(getFormattedSpan(spanList.value[0]));
-      traceTree.value[0]["index"] = 0;
       traceTree.value[0].lowestStartTime =
         converTimeFromNsToMs(lowestStartTime);
       traceTree.value[0].highestEndTime = converTimeFromNsToMs(highestEndTime);
       traceTree.value[0].style.color =
-        serviceColorMapping[traceTree.value[0].serviceName];
-      traceTree.value[0]["spans"] = cloneDeep(
-        traceTreeMock[spanList.value[0]["span_id"]] || []
-      );
-      traceTree.value.push(...noParentSpans);
+        searchObj.meta.serviceColors[traceTree.value[0].serviceName];
+
       traceTree.value.forEach((span: any) => {
         addSpansPositions(span, 0);
       });
 
-      timeRange.value.end = (
-        traceTree.value[0].highestEndTime - traceTree.value[0].lowestStartTime
-      ).toFixed(2);
+      timeRange.value.end = 0;
       timeRange.value.start = 0;
 
       calculateTracePosition();
       buildTraceChart();
-      buildServiceTree(serviceColorMapping);
-    };
+      buildServiceTree();
+    }
+
     let index = 0;
     const addSpansPositions = (span: any, depth: number) => {
       if (!span.index) index = 0;
@@ -347,6 +403,7 @@ export default defineComponent({
         Object.assign(span, {
           style: {
             color: span.style.color,
+            backgroundColor: span.style.backgroundColor,
             top: index * spanDimensions.height + "px",
             left: spanDimensions.gap * depth + "px",
           },
@@ -372,7 +429,20 @@ export default defineComponent({
       }
     };
 
-    const buildServiceTree = (serviceColors: any) => {
+    function adjustOpacity(hexColor: string, opacity: number) {
+      // Ensure opacity is between 0 and 1
+      opacity = Math.max(0, Math.min(1, opacity));
+
+      // Convert opacity to a hex value
+      const opacityHex = Math.round(opacity * 255)
+        .toString(16)
+        .padStart(2, "0");
+
+      // Append the opacity hex value to the original hex color
+      return hexColor + opacityHex;
+    }
+
+    const buildServiceTree = () => {
       const serviceTree: any[] = [];
       let maxDepth = 0;
       let maxHeight: number[] = [0];
@@ -393,7 +463,7 @@ export default defineComponent({
             duration: span.durationMs,
             children: children,
             itemStyle: {
-              color: serviceColors[span.serviceName],
+              color: searchObj.meta.serviceColors[span.serviceName],
             },
             emphasis: {
               disabled: true,
@@ -420,7 +490,8 @@ export default defineComponent({
         getService(span, serviceTree, "", 1, 1);
       });
       traceServiceMap.value = convertTraceServiceMapData(
-        cloneDeep(serviceTree)
+        cloneDeep(serviceTree),
+        maxDepth
       );
     };
 
@@ -432,16 +503,17 @@ export default defineComponent({
           span[store.state.zoConfig.timestamp_column],
         startTimeMs: converTimeFromNsToMs(span.start_time),
         endTimeMs: converTimeFromNsToMs(span.end_time),
-        durationMs: Number((span.duration / 1000).toFixed(2)), // This key is standard, we use for calculating width of span block. This should always be in ms
-        durationUs: Number(span.duration.toFixed(2)), // This key is used for displaying duration in span block. We convert this us to ms, s in span block
+        durationMs: Number((span.duration / 1000).toFixed(4)), // This key is standard, we use for calculating width of span block. This should always be in ms
+        durationUs: Number(span.duration.toFixed(4)), // This key is used for displaying duration in span block. We convert this us to ms, s in span block
         idleMs: convertTime(span.idle_ns),
         busyMs: convertTime(span.busy_ns),
         spanId: span.span_id,
         operationName: span.operation_name,
         serviceName: span.service_name,
+        spanStatus: span.span_status,
         spanKind: getSpanKind(span.span_kind.toString()),
         parentId: span.reference_parent_span_id,
-        spans: null,
+        spans: [],
         index: 0,
         style: {
           color: "",
@@ -494,7 +566,7 @@ export default defineComponent({
           x0: absoluteStartTime,
           x1: Number(
             (absoluteStartTime + spanPositionList.value[i].durationMs).toFixed(
-              2
+              4
             )
           ),
           fillcolor: spanPositionList.value[i].style.color,
@@ -602,7 +674,50 @@ export default defineComponent({
         ],
       },
     ];
+
+    onMounted(() => {
+      throttledResizing.value = throttle(resizing, 50);
+    });
+
+    const startResize = (event: any) => {
+      initialX.value = event.clientX;
+      initialWidth.value = leftWidth.value;
+
+      window.addEventListener("mousemove", throttledResizing.value);
+      window.addEventListener("mouseup", stopResize);
+      document.body.classList.add("no-select");
+    };
+
+    const resizing = (event: any) => {
+      const deltaX = event.clientX - initialX.value;
+      leftWidth.value = initialWidth.value + deltaX;
+    };
+
+    const stopResize = () => {
+      window.removeEventListener("mousemove", throttledResizing.value);
+      window.removeEventListener("mouseup", stopResize);
+      document.body.classList.remove("no-select");
+    };
+
+    const toggleTimeline = () => {
+      isTimelineExpanded.value = !isTimelineExpanded.value;
+    };
+
+    const copyTraceId = () => {
+      $q.notify({
+        type: "positive",
+        message: "Trace ID copied to clipboard",
+        timeout: 2000,
+      });
+      copyToClipboard(spanList.value[0]["trace_id"]);
+    };
+
+    const shareLink = () => {
+      emit("shareLink");
+    };
+
     return {
+      t,
       traceTree,
       collapseMapping,
       traceRootSpan,
@@ -611,7 +726,7 @@ export default defineComponent({
       spanList,
       isSidebarOpen,
       selectedSpanId,
-      spanMapping,
+      spanMap,
       closeSidebar,
       toggleSpanCollapse,
       spanPositionList,
@@ -626,6 +741,13 @@ export default defineComponent({
       traceVisuals,
       getImageURL,
       store,
+      leftWidth,
+      startResize,
+      isTimelineExpanded,
+      toggleTimeline,
+      copyToClipboard,
+      copyTraceId,
+      shareLink,
     };
   },
 });
@@ -637,6 +759,9 @@ $seperatorWidth: 2px;
 $toolbarHeight: 50px;
 $traceHeaderHeight: 30px;
 $traceChartHeight: 210px;
+
+$traceChartCollapseHeight: 42px;
+
 .toolbar {
   height: $toolbarHeight;
 }
@@ -654,21 +779,44 @@ $traceChartHeight: 210px;
 .histogram-sidebar {
   width: $sidebarWidth;
   height: calc(100vh - $toolbarHeight - $traceChartHeight - 44px);
-  overflow-y: scroll;
+  overflow-y: auto;
   overflow-x: hidden;
+
+  &.full {
+    height: calc(100vh - $toolbarHeight - 8px - 44px);
+  }
 }
 
 .histogram-spans-container {
-  height: calc(
-    100vh - $toolbarHeight - $traceHeaderHeight - $traceChartHeight - 44px
-  );
+  height: calc(100vh - $toolbarHeight - $traceChartHeight - 44px);
   overflow-y: auto;
   position: relative;
   overflow-x: hidden;
+
+  &.full {
+    height: calc(100vh - $toolbarHeight - 8px - 44px);
+  }
 }
 
 .trace-tree-container {
   overflow: auto;
+}
+
+.trace-chart-btn {
+  cursor: pointer;
+  padding-right: 8px;
+  border-radius: 2px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+
+  &:hover {
+    background-color: rgba($primary, 0.9);
+    color: #ffffff;
+
+    .q-icon {
+      color: #ffffff !important;
+    }
+  }
 }
 </style>
 <style lang="scss">
@@ -697,6 +845,21 @@ $traceChartHeight: 210px;
     .q-icon {
       padding-right: 5px;
       font-size: 15px;
+    }
+  }
+}
+
+.no-select {
+  user-select: none !important;
+  -moz-user-select: none !important;
+  -webkit-user-select: none !important;
+  -ms-user-select: none !important;
+}
+
+.trace-copy-icon {
+  &:hover {
+    &.q-icon {
+      text-shadow: 0px 2px 8px rgba(0, 0, 0, 0.5);
     }
   }
 }

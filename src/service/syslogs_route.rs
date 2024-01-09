@@ -1,26 +1,35 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use actix_web::{http::StatusCode, HttpResponse};
-use ipnetwork::IpNetwork;
 use std::io;
 
-use crate::common::infra::config::SYSLOG_ROUTES;
-use crate::common::meta::http::HttpResponse as MetaHttpResponse;
-use crate::common::meta::syslog::{SyslogRoute, SyslogRoutes, SyslogServer};
-use crate::job;
-use crate::service::db::syslog;
+use actix_web::{http::StatusCode, HttpResponse};
+use config::ider;
+use ipnetwork::IpNetwork;
+
+use crate::{
+    common::{
+        infra::config::SYSLOG_ROUTES,
+        meta::{
+            http::HttpResponse as MetaHttpResponse,
+            syslog::{SyslogRoute, SyslogRoutes, SyslogServer},
+        },
+    },
+    job,
+    service::db::syslog,
+};
 
 #[tracing::instrument(skip_all)]
 pub async fn create_route(mut route: SyslogRoute) -> Result<HttpResponse, io::Error> {
@@ -50,7 +59,7 @@ pub async fn create_route(mut route: SyslogRoute) -> Result<HttpResponse, io::Er
         }
     }
 
-    route.id = crate::common::infra::ider::generate();
+    route.id = ider::generate();
     if let Err(e) = syslog::set(&route).await {
         return Ok(Response::InternalServerError(e).into());
     }

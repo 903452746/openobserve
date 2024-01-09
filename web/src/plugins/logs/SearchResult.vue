@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <!-- eslint-disable vue/v-on-event-hyphenation -->
@@ -23,7 +24,7 @@
       style="width: 100%"
     >
       <div class="text-center">
-        {{ searchObj.data.histogram.chartParams.title }}
+        {{ noOfRecordsTitle }}
       </div>
       <ChartRenderer
         data-test="logs-search-result-bar-chart"
@@ -33,9 +34,25 @@
           !searchObj.meta.sqlMode &&
           searchObj.data.stream.streamType !== 'enrichment_tables'
         "
-        style="max-height: 150px"
+        style="max-height: 100px"
         @updated:dataZoom="onChartUpdate"
       />
+      <div
+        class="q-pb-lg"
+        v-if="
+          searchObj.meta.showHistogram &&
+          !searchObj.meta.sqlMode &&
+          searchObj.data.stream.streamType !== 'enrichment_tables' &&
+          searchObj.data.histogram.xData.length === 0
+        "
+        style="top: 50px; position: absolute; left: 45%"
+      >
+        <q-spinner-hourglass
+          color="primary"
+          size="25px"
+          style="margin: 0 auto; display: block"
+        />
+      </div>
       <q-virtual-scroll
         data-test="logs-search-result-logs-table"
         id="searchGridComponent"
@@ -59,7 +76,7 @@
           height:
             !searchObj.meta.showHistogram || searchObj.meta.sqlMode
               ? 'calc(100% - 0px)'
-              : 'calc(100% - 150px)',
+              : 'calc(100% - 100px)',
         }"
       >
         <template v-slot:before>
@@ -217,6 +234,7 @@
         </template>
       </q-virtual-scroll>
       <q-dialog
+        data-test="logs-search-result-detail-dialog"
         v-model="searchObj.meta.showDetailTab"
         position="right"
         full-height
@@ -256,11 +274,7 @@ import { useI18n } from "vue-i18n";
 import HighLight from "../../components/HighLight.vue";
 import { byString } from "../../utils/json";
 import DetailTable from "./DetailTable.vue";
-import {
-  getImageURL,
-  timestampToTimezoneDate,
-  useLocalWrapContent,
-} from "../../utils/zincutils";
+import { getImageURL, useLocalWrapContent } from "../../utils/zincutils";
 import EqualIcon from "../../components/icons/EqualIcon.vue";
 import NotEqualIcon from "../../components/icons/NotEqualIcon.vue";
 import useLogs from "../../composables/useLogs";
@@ -307,11 +321,7 @@ export default defineComponent({
     },
     onChartUpdate({ start, end }: { start: any; end: any }) {
       this.searchObj.meta.showDetailTab = false;
-      this.searchObj.data.datetime.type = "absolute";
-      this.searchObj.data.datetime.startTime = new Date(start).getTime() * 1000;
-      this.searchObj.data.datetime.endTime = new Date(end).getTime() * 1000;
-      this.searchObj.runQuery = true;
-      this.$emit("update:datetime");
+      this.$emit("update:datetime", { start, end });
     },
     onScroll(info: any) {
       this.searchObj.meta.scrollInfo = info;
@@ -339,6 +349,7 @@ export default defineComponent({
     const store = useStore();
     const $q = useQuasar();
     const searchListContainer = ref(null);
+    const noOfRecordsTitle = ref("");
 
     const {
       searchObj,
@@ -468,6 +479,7 @@ export default defineComponent({
       extractFTSFields,
       evaluateWrapContentFlag,
       useLocalWrapContent,
+      noOfRecordsTitle,
     };
   },
   computed: {
@@ -477,6 +489,9 @@ export default defineComponent({
     findFTSFields() {
       return this.searchObj.data.stream.selectedStreamFields;
     },
+    updateTitle() {
+      return this.searchObj.data.histogram.chartParams.title;
+    }
   },
   watch: {
     toggleWrapFlag() {
@@ -486,6 +501,9 @@ export default defineComponent({
       this.extractFTSFields();
       this.evaluateWrapContentFlag();
     },
+    updateTitle() {
+      this.noOfRecordsTitle = this.searchObj.data.histogram.chartParams.title;
+    }
   },
 });
 </script>

@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -29,18 +30,20 @@
       @click="closeSidebar"
     ></q-btn>
   </div>
-  <div class="q-pb-sm">
+  <div class="q-pb-sm q-pt-xs flex">
     <div
       :title="span.operation_name"
-      class="q-px-sm q-pb-none text-subtitle1 ellipsis non-selectable"
+      class="q-px-sm q-pb-none ellipsis non-selectable"
+      style="font-size: 14px"
     >
-      {{ span.operation_name }}
+      <span class="text-grey-7">Operation Name: </span>{{ span.operation_name }}
     </div>
     <div
-      class="q-px-sm text-caption ellipsis non-selectable"
+      class="q-px-sm ellipsis non-selectable"
       :title="span.service_name"
+      style="font-size: 14px"
     >
-      {{ span.service_name }}
+      <span class="text-grey-7">Service Name: </span> {{ span.service_name }}
     </div>
   </div>
   <q-tabs
@@ -49,18 +52,80 @@
     inline-label
     class="text-bold q-mx-sm span_details_tabs"
   >
-    <q-tab name="tags" :label="t('common.attributes')" style="text-transform: capitalize" />
-    <q-tab name="events" :label="t('common.events')" style="text-transform: capitalize" />
+    <q-tab
+      name="tags"
+      :label="t('common.tags')"
+      style="text-transform: capitalize"
+    />
+    <q-tab
+      name="process"
+      :label="t('common.process')"
+      style="text-transform: capitalize"
+    />
+    <q-tab
+      name="events"
+      :label="t('common.events')"
+      style="text-transform: capitalize"
+    />
+    <q-tab
+      name="exceptions"
+      :label="t('common.exceptions')"
+      style="text-transform: capitalize"
+    />
+    <q-tab
+      name="attributes"
+      :label="t('common.attributes')"
+      style="text-transform: capitalize"
+    />
   </q-tabs>
   <q-separator style="width: 100%" />
   <q-tab-panels v-model="activeTab" class="span_details_tab-panels">
     <q-tab-panel name="tags">
-      <div v-for="key in Object.keys(spanDetails.attrs)" :key="key">
-        <div class="row q-py-xs q-px-sm border-bottom">
-          <span class="attr-text q-pr-sm text-bold">{{ key }}:</span>
-          <span class="attr-text">{{ spanDetails.attrs[key] }}</span>
-        </div>
-      </div>
+      <table class="q-my-sm">
+        <tbody>
+          <template v-for="(val, key) in tags" :key="key">
+            <tr>
+              <td
+                class="q-py-xs q-px-sm"
+                :class="
+                  store.state.theme === 'dark' ? 'text-red-5' : 'text-red-10'
+                "
+              >
+                {{ key }}
+              </td>
+              <td class="q-py-xs q-px-sm">
+                {{ val }}
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </q-tab-panel>
+    <q-tab-panel name="process">
+      <table class="q-my-sm">
+        <tbody>
+          <template v-for="(val, key) in processes" :key="key">
+            <tr>
+              <td
+                class="q-py-xs q-px-sm"
+                :class="
+                  store.state.theme === 'dark' ? 'text-red-5' : 'text-red-10'
+                "
+              >
+                {{ key }}
+              </td>
+              <td class="q-py-xs q-px-sm">
+                {{ val }}
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </q-tab-panel>
+    <q-tab-panel name="attributes">
+      <pre class="attr-text">{{
+        JSON.stringify(spanDetails.attrs, null, 2)
+      }}</pre>
     </q-tab-panel>
     <q-tab-panel name="events">
       <q-virtual-scroll
@@ -132,15 +197,119 @@
         No events present for this span
       </div>
     </q-tab-panel>
+    <q-tab-panel name="exceptions">
+      <q-virtual-scroll
+        type="table"
+        ref="searchTableRef"
+        style="max-height: 100%"
+        :items="getExceptionEvents"
+      >
+        <template v-slot:before>
+          <thead class="thead-sticky text-left">
+            <tr>
+              <th
+                v-for="(col, index) in exceptionEventColumns"
+                :key="'result_' + index"
+                class="table-header"
+                :data-test="`trace-events-table-th-${col.label}`"
+              >
+                {{ col.label }}
+              </th>
+            </tr>
+          </thead>
+        </template>
+
+        <template v-slot="{ item: row, index }">
+          <q-tr
+            :data-test="`trace-event-detail-${
+              row[store.state.zoConfig.timestamp_column]
+            }`"
+            :key="'expand_' + index"
+            @click="expandEvent(index)"
+            style="cursor: pointer"
+            class="pointer"
+          >
+            <q-td
+              v-for="column in exceptionEventColumns"
+              :key="index + '-' + column.name"
+              class="field_list"
+              style="cursor: pointer"
+            >
+              <div class="flex row items-center no-wrap">
+                <q-btn
+                  v-if="column.name === '@timestamp'"
+                  :icon="
+                    expandedEvents[index.toString()]
+                      ? 'expand_more'
+                      : 'chevron_right'
+                  "
+                  dense
+                  size="xs"
+                  flat
+                  class="q-mr-xs"
+                  @click.stop="expandEvent(index)"
+                ></q-btn>
+                {{ column.prop(row) }}
+              </div>
+            </q-td>
+          </q-tr>
+          <q-tr v-if="expandedEvents[index.toString()]">
+            <td colspan="2" style="font-size: 12px; font-family: monospace">
+              <div class="q-pl-sm">
+                <div>
+                  <span>Type: </span>
+                  <span>"{{ row["exception.type"] }}"</span>
+                </div>
+
+                <div class="q-mt-xs">
+                  <span>Message: </span>
+                  <span>"{{ row["exception.message"] }}"</span>
+                </div>
+
+                <div class="q-mt-xs">
+                  <span>Escaped: </span>
+                  <span>"{{ row["exception.escaped"] }}"</span>
+                </div>
+
+                <div class="q-mt-xs">
+                  <span>Stacktrace: </span>
+                  <div
+                    class="q-px-sm q-mt-xs"
+                    style="
+                      background-color: #ffffff !important;
+                      border: 1px solid #c1c1c1;
+                      border-radius: 4px;
+                    "
+                  >
+                    <pre
+                      style="font-size: 12px; text-wrap: wrap"
+                      class="q-mt-xs"
+                      >{{ formatStackTrace(row["exception.stacktrace"]) }}</pre
+                    >
+                  </div>
+                </div>
+              </div>
+            </td>
+          </q-tr>
+        </template>
+      </q-virtual-scroll>
+      <div
+        class="full-width text-center q-pt-lg text-bold"
+        v-if="!getExceptionEvents.length"
+      >
+        No events present for this span
+      </div>
+    </q-tab-panel>
   </q-tab-panels>
 </template>
 
 <script lang="ts">
 import { cloneDeep } from "lodash-es";
 import { date, type QTableProps } from "quasar";
-import { defineComponent, onBeforeMount, ref, watch } from "vue";
+import { defineComponent, onBeforeMount, ref, watch, type Ref } from "vue";
 import { useStore } from "vuex";
 import { useI18n } from "vue-i18n";
+import { computed } from "vue";
 
 export default defineComponent({
   name: "TraceDetailsSidebar",
@@ -154,6 +323,8 @@ export default defineComponent({
   setup(props, { emit }) {
     const { t } = useI18n();
     const activeTab = ref("tags");
+    const tags: Ref<{ [key: string]: string }> = ref({});
+    const processes: Ref<{ [key: string]: string }> = ref({});
     const closeSidebar = () => {
       emit("close");
     };
@@ -205,6 +376,39 @@ export default defineComponent({
       },
     ]);
 
+    const exceptionEventColumns = ref([
+      {
+        name: "@timestamp",
+        field: (row: any) =>
+          date.formatDate(
+            Math.floor(row[store.state.zoConfig.timestamp_column] / 1000000),
+            "MMM DD, YYYY HH:mm:ss.SSS Z"
+          ),
+        prop: (row: any) =>
+          date.formatDate(
+            Math.floor(row[store.state.zoConfig.timestamp_column] / 1000000),
+            "MMM DD, YYYY HH:mm:ss.SSS Z"
+          ),
+        label: "Timestamp",
+        align: "left",
+        sortable: true,
+      },
+      {
+        name: "type",
+        field: (row: any) => row["exception.type"],
+        prop: (row: any) => row["exception.type"],
+        label: "Type",
+        align: "left",
+        sortable: true,
+      },
+    ]);
+
+    const getExceptionEvents = computed(() => {
+      return spanDetails.value.events.filter(
+        (event: any) => event.name === "exception"
+      );
+    });
+
     const expandEvent = (index: number) => {
       if (expandedEvents.value[index.toString()])
         delete expandedEvents.value[index.toString()];
@@ -249,6 +453,57 @@ export default defineComponent({
       return spanDetails;
     };
 
+    const span_details = new Set([
+      "span_id",
+      "trace_id",
+      "operation_name",
+      store.state.zoConfig.timestamp_column,
+      "start_time",
+      "end_time",
+      "duration",
+      "busy_ns",
+      "idle_ns",
+      "events",
+    ]);
+
+    watch(
+      () => props.span,
+      () => {
+        Object.keys(props.span).forEach((key: string) => {
+          if (!span_details.has(key)) {
+            tags.value[key] = props.span[key];
+          }
+        });
+
+        processes.value["service_name"] = props.span["service_name"];
+        processes.value["service_service_instance"] =
+          props.span["service_service_instance"];
+        processes.value["service_service_version"] =
+          props.span["service_service_version"];
+      },
+      {
+        deep: true,
+        immediate: true,
+      }
+    );
+    function formatStackTrace(trace: any) {
+      // Split the trace into lines
+      const lines = trace.split("\n");
+
+      // Process each line
+      const formattedLines = lines.map((line: string) => {
+        // Apply formatting rules
+        // For example, indent lines that contain file paths
+        if (line.trim().startsWith("/")) {
+          return "" + line; // Indent the line
+        }
+        return line;
+      });
+
+      // Reassemble the formatted trace
+      return formattedLines.join("\n");
+    }
+
     return {
       t,
       activeTab,
@@ -259,12 +514,33 @@ export default defineComponent({
       pagination,
       spanDetails,
       store,
+      tags,
+      processes,
+      formatStackTrace,
+      getExceptionEvents,
+      exceptionEventColumns,
     };
   },
 });
 </script>
 
 <style scoped lang="scss">
+.span_details_tab-panels {
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    /* Other styling properties */
+  }
+
+  th,
+  td {
+    border: 1px solid #f0f0f0;
+    text-align: left;
+    padding: 4px 8px !important;
+    font-size: 13px;
+    /* Other styling properties */
+  }
+}
 .attr-text {
   font-size: 12px;
   font-family: monospace;
@@ -420,8 +696,8 @@ export default defineComponent({
   }
 }
 .span_details_tab-panels {
-  height: calc(100% - 130px);
-  overflow-y: scroll;
+  height: calc(100% - 102px);
+  overflow-y: auto;
   overflow-x: hidden;
 }
 

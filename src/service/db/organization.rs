@@ -1,16 +1,21 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::sync::Arc;
+
+use bytes::Bytes;
 
 use crate::common::{
     infra::{
@@ -21,14 +26,12 @@ use crate::common::{
     meta::organization::OrganizationSetting,
     utils::json,
 };
-use bytes::Bytes;
-use std::sync::Arc;
 
 // DBKey to set settings for an org
 pub const ORG_SETTINGS_KEY_PREFIX: &str = "/organization/setting";
 
 pub async fn set_org_setting(org_name: &str, setting: &OrganizationSetting) -> errors::Result<()> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("{}/{}", ORG_SETTINGS_KEY_PREFIX, org_name);
     db.put(
         &key,
@@ -47,7 +50,7 @@ pub async fn set_org_setting(org_name: &str, setting: &OrganizationSetting) -> e
 }
 
 pub async fn get_org_setting(org_id: &str) -> Result<Bytes, Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("{}/{}", ORG_SETTINGS_KEY_PREFIX, org_id);
     match ORGANIZATION_SETTING.clone().read().await.get(&key) {
         Some(v) => Ok(json::to_vec(v).unwrap().into()),
@@ -58,7 +61,8 @@ pub async fn get_org_setting(org_id: &str) -> Result<Bytes, Error> {
 /// Cache the existing org settings in the beginning
 pub async fn cache() -> Result<(), anyhow::Error> {
     let prefix = ORG_SETTINGS_KEY_PREFIX;
-    let ret = infra_db::DEFAULT.list(prefix).await?;
+    let db = infra_db::get_db().await;
+    let ret = db.list(prefix).await?;
     for (key, item_value) in ret {
         let json_val: OrganizationSetting = json::from_slice(&item_value).unwrap();
         ORGANIZATION_SETTING
@@ -73,8 +77,8 @@ pub async fn cache() -> Result<(), anyhow::Error> {
 
 pub async fn watch() -> Result<(), anyhow::Error> {
     let key = ORG_SETTINGS_KEY_PREFIX;
-    let db = &infra_db::CLUSTER_COORDINATOR;
-    let mut events = db.watch(key).await?;
+    let cluster_coordinator = infra_db::get_coordinator().await;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching organization settings");
     loop {

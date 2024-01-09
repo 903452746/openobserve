@@ -1,25 +1,34 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{
+    io::{Error, ErrorKind},
+    sync::Arc,
+};
 
 use actix_web::HttpResponse;
-use datafusion::arrow::{datatypes::Schema, json as arrow_json, record_batch::RecordBatch};
-use datafusion::{datasource::MemTable, prelude::SessionContext};
-use std::io::{Error, ErrorKind};
-use std::sync::Arc;
+use config::{
+    meta::stream::{FileMeta, StreamType},
+    CONFIG, FILE_EXT_JSON,
+};
+use datafusion::{
+    arrow::{datatypes::Schema, json as arrow_json, record_batch::RecordBatch},
+    datasource::MemTable,
+    prelude::SessionContext,
+};
 
-use crate::common::infra::config::{CONFIG, FILE_EXT_JSON};
-use crate::common::meta::{common::FileMeta, StreamType};
 use crate::common::utils::json;
 
 #[inline(always)]
@@ -48,7 +57,8 @@ pub fn get_stream_file_num_v1(file_name: &str) -> u32 {
 
 #[inline(always)]
 pub fn get_file_name_v1(org_id: &str, stream_name: &str, suffix: u32) -> String {
-    // creates file name like "./data/openobserve/olympics/olympics#2022#09#13#13_1.json"
+    // creates file name like
+    // "./data/openobserve/olympics/olympics#2022#09#13#13_1.json"
     format!(
         "{}{}/{}/{}/{}_{}{}",
         &CONFIG.common.data_wal_dir,
@@ -109,8 +119,10 @@ pub async fn populate_file_meta(
 
 #[cfg(test)]
 mod tests {
-    use datafusion::arrow::array::{Int64Array, StringArray};
-    use datafusion::arrow::datatypes::{DataType, Field};
+    use datafusion::arrow::{
+        array::{Int64Array, StringArray},
+        datatypes::{DataType, Field},
+    };
 
     use super::*;
 
@@ -130,9 +142,11 @@ mod tests {
     #[test]
     fn test_get_file_name_v1() {
         let file_key = get_file_name_v1("nexus", "Olympics", 2);
-        assert!(file_key
-            .as_str()
-            .ends_with("/wal/nexus/logs/Olympics/Olympics_2.json"));
+        assert!(
+            file_key
+                .as_str()
+                .ends_with("/wal/nexus/logs/Olympics/Olympics_2.json")
+        );
     }
 
     #[test]
@@ -162,7 +176,7 @@ mod tests {
             ],
         )
         .unwrap();
-        //let file_name = path.file_name();
+        // let file_name = path.file_name();
         let mut file_meta = FileMeta {
             min_ts: 0,
             max_ts: 0,

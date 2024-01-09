@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -131,6 +132,9 @@ flat icon="close" />
                   <th v-if="showPartitionColumn">
                     {{ t("logStream.streamPartitionKey") }}
                   </th>
+                  <th>
+                    {{ t("logStream.streamBloomKey") }}
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -160,7 +164,7 @@ flat icon="close" />
                       :data-test="`schema-stream-${schema.name}-field-fts-key-checkbox`"
                       v-model="schema.ftsKey"
                       size="sm"
-                      @click="markFormDirty"
+                      @click="markFormDirty(schema.name, 'fts')"
                     />
                   </td>
                   <td v-if="showPartitionColumn" class="text-center">
@@ -171,9 +175,20 @@ flat icon="close" />
                       :data-test="`schema-stream-${schema.name}-field-partition-key-checkbox`"
                       v-model="schema.partitionKey"
                       size="sm"
-                      @click="markFormDirty"
+                      @click="markFormDirty(schema.name, 'partition')"
                     >
                     </q-checkbox>
+                  </td>
+                  <td class="text-center">
+                    <q-checkbox
+                      v-if="
+                        schema.name !== store.state.zoConfig.timestamp_column
+                      "
+                      :data-test="`schema-stream-${schema.name}-field-bloom-key-checkbox`"
+                      v-model="schema.bloomKey"
+                      size="sm"
+                      @click="markFormDirty(schema.name, 'bloom')"
+                    />
                   </td>
                 </tr>
               </tbody>
@@ -290,8 +305,9 @@ export default defineComponent({
       }
     };
 
-    const markFormDirty = () => {
+    const markFormDirty = (field_name: string, type: string) => {
       formDirtyFlag.value = true;
+      checkSingleSelection(field_name, type);
     };
 
     const deleteFields = async () => {
@@ -376,6 +392,15 @@ export default defineComponent({
               property.ftsKey = false;
             }
 
+            if (
+              res.data.settings.bloom_filter_fields.length > 0 &&
+              res.data.settings.bloom_filter_fields.includes(property.name)
+            ) {
+              property.bloomKey = true;
+            } else {
+              property.bloomKey = false;
+            }
+
             property["delete"] = false;
 
             if (
@@ -411,6 +436,7 @@ export default defineComponent({
       let settings = {
         partition_keys: [],
         full_text_search_keys: [],
+        bloom_filter_fields: [],
       };
 
       if (showDataRetention.value && dataRetentionDays.value < 1) {
@@ -436,6 +462,14 @@ export default defineComponent({
           settings.partition_keys.push(property.name);
         } else if (property.partitionKey) {
           added_part_keys.push(property.name);
+        }
+
+        if (property.bloomKey) {
+          settings.bloom_filter_fields.push(property.name);
+        }
+
+        if (property.delete) {
+          deleteFieldList.value.push(property.name);
         }
       }
       if (added_part_keys.length > 0) {
@@ -490,6 +524,41 @@ export default defineComponent({
         modelValue.stream_type !== "enrichment_tables"
     );
 
+    const checkSingleSelection = (field_name: string, type: string) => {
+      var property: any;
+      if (type === "bloom") {
+        for (property of indexData.value.schema) {
+          if (property.name == field_name) {
+            if (property.bloomKey == true) {
+              property.ftsKey = false;
+              property.partitionKey = false;
+            }
+            break;
+          }
+        }
+      } else if (type === "fts") {
+        for (property of indexData.value.schema) {
+          if (property.name == field_name) {
+            if (property.ftsKey == true) {
+              property.bloomKey = false;
+              property.partitionKey = false;
+            }
+            break;
+          }
+        }
+      } else {
+        for (property of indexData.value.schema) {
+          if (property.name == field_name) {
+            if (property.partitionKey == true) {
+              property.bloomKey = false;
+              property.ftsKey = false;
+            }
+            break;
+          }
+        }
+      }
+    };
+
     return {
       t,
       q,
@@ -512,6 +581,7 @@ export default defineComponent({
       deleteFields,
       markFormDirty,
       formDirtyFlag,
+      checkSingleSelection,
     };
   },
   created() {
@@ -526,7 +596,7 @@ export default defineComponent({
 });
 </script>
 
-<style lang="scss">
+<style lang="scss" scoped>
 .indexDetailsContainer {
   padding: 1.25rem;
   width: 100%;
@@ -549,15 +619,18 @@ export default defineComponent({
       th {
         font-size: 0.875rem;
         font-weight: 700;
+        height: 35px;
       }
     }
 
     tbody tr {
-      height: 3.25rem;
+      height: 15px;
 
       td {
         font-size: 0.875rem;
         font-weight: 600;
+        height: 35px;
+        padding: 0px 5px;
       }
     }
   }

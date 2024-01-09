@@ -1,24 +1,29 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use segment::{message::Track, Client, Message};
 use std::collections::HashMap;
+
+use config::{CONFIG, INSTANCE_ID, SIZE_IN_MB, TELEMETRY_CLIENT};
+use hashbrown::HashSet;
+use segment::{message::Track, Client, Message};
 use sysinfo::SystemExt;
 
-use crate::common::infra::db;
-use crate::common::infra::{cache::stats, config::*};
-use crate::common::utils::json;
+use crate::common::{
+    infra::{cache::stats, config::*, db},
+    utils::json,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct Telemetry {
@@ -111,14 +116,16 @@ pub fn get_base_info(data: &mut HashMap<String, json::Value>) -> HashMap<String,
 }
 
 pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<String, json::Value> {
-    let db = &db::DEFAULT;
     let iter = STREAM_SCHEMAS.iter().clone();
     let mut num_streams = 0;
     let mut logs_streams = 0;
     let mut metrics_streams = 0;
+    let mut orgs = HashSet::new();
     for item in iter {
         num_streams += item.value().len();
+
         let stream_type = item.key().split('/').collect::<Vec<&str>>();
+        orgs.insert(stream_type[0].to_string());
         if stream_type.len() < 2 {
             continue;
         }
@@ -128,7 +135,8 @@ pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<Stri
             _ => (),
         }
     }
-    data.insert("num_org".to_string(), STREAM_SCHEMAS.len().into());
+
+    data.insert("num_org".to_string(), orgs.len().into());
     data.insert("num_streams".to_string(), num_streams.into());
     data.insert("num_logs_streams".to_string(), logs_streams.into());
     data.insert("num_metrics_streams".to_string(), metrics_streams.into());
@@ -143,6 +151,7 @@ pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<Stri
             CONFIG.common.local_mode_storage.clone().into(),
         );
     }
+    let db = db::get_db().await;
     match db.list_keys("/dashboard/").await {
         Ok(keys) => {
             data.insert("num_dashboards".to_string(), keys.len().into());
@@ -158,6 +167,20 @@ pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<Stri
             Some(nodes) => {
                 data.insert("is_HA_mode".to_string(), json::Value::Bool(true));
                 data.insert("number_of_nodes".to_string(), nodes.len().into());
+                data.insert(
+                    "querier_nodes".to_string(),
+                    crate::common::infra::cluster::get_cached_online_querier_nodes()
+                        .unwrap_or_default()
+                        .len()
+                        .into(),
+                );
+                data.insert(
+                    "ingester_nodes".to_string(),
+                    crate::common::infra::cluster::get_cached_online_ingester_nodes()
+                        .unwrap_or_default()
+                        .len()
+                        .into(),
+                );
             }
             None => {
                 data.insert("is_HA_mode".to_string(), json::Value::Bool(false));
@@ -242,10 +265,9 @@ pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<Stri
 
     let mut rt_alerts = 0;
     let mut scheduled_alerts = 0;
-    let iter = STREAM_ALERTS.iter().clone();
-
-    for item in iter {
-        for alert in &item.value().list {
+    let alert_cacher = STREAM_ALERTS.read().await;
+    for (_, alerts) in alert_cacher.iter() {
+        for alert in alerts.iter() {
             if alert.is_real_time {
                 rt_alerts += 1
             } else {
@@ -253,6 +275,7 @@ pub async fn add_zo_info(mut data: HashMap<String, json::Value>) -> HashMap<Stri
             }
         }
     }
+    drop(alert_cacher);
     data.insert("real_time_alerts".to_string(), rt_alerts.into());
     data.insert("scheduled_alerts".to_string(), scheduled_alerts.into());
     data

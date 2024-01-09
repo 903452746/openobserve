@@ -1,46 +1,22 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="tabContent q-ma-md">
-    <div class="tabContent__head">
-      <div class="copy_action">
-        <q-btn
-          data-test="traces-copy-btn"
-          flat
-          round
-          size="0.5rem"
-          padding="0.6rem"
-          color="grey"
-          icon="content_copy"
-          @click="$emit('copy-to-clipboard-fn', copyTracesContent)"
-        />
-      </div>
-    </div>
-    <pre ref="copyTracesContent" data-test="traces-content-text">
-[[outputs.http]]
-  ## URL is the address to send metrics to
-  url = "{{ endpoint.url }}/api/{{ currOrgIdentifier }}/prometheus/api/v1/write"
-  ## Data format to output.
-  data_format = "prometheusremotewrite"
-
-  [outputs.http.headers]
-     Content-Type = "application/x-protobuf"
-     Content-Encoding = "snappy"
-     X-Prometheus-Remote-Write-Version = "0.1.0"
-     Authorization = "Basic {{ accessKey }}"</pre>
+  <div class="q-ma-md">
+    <CopyContent class="q-mt-sm" :content="content" />
   </div>
 </template>
 
@@ -49,8 +25,8 @@ import { defineComponent, ref, type Ref } from "vue";
 import config from "../../../aws-exports";
 import { useStore } from "vuex";
 import { getImageURL, b64EncodeUnicode } from "../../../utils/zincutils";
-import type { Endpoint } from "@/ts/interfaces";
-import { computed } from "vue";
+import CopyContent from "@/components/CopyContent.vue";
+
 export default defineComponent({
   name: "traces-otlp",
   props: {
@@ -61,6 +37,7 @@ export default defineComponent({
       type: String,
     },
   },
+  components: { CopyContent },
   setup(props) {
     const store = useStore();
     const endpoint: any = ref({
@@ -78,18 +55,24 @@ export default defineComponent({
       protocol: url.protocol.replace(":", ""),
       tls: url.protocol === "https:" ? "On" : "Off",
     };
-    const accessKey = computed(() => {
-      return b64EncodeUnicode(
-        `${props.currUserEmail}:${store.state.organizationData.organizationPasscode}`
-      );
-    });
-    const copyTracesContent = ref(null);
+
+    const content = `[[outputs.http]]
+  ## URL is the address to send metrics to
+  url = "${endpoint.value.url}/api/${store.state.selectedOrganization.identifier}/prometheus/api/v1/write"
+  ## Data format to output.
+  data_format = "prometheusremotewrite"
+
+  [outputs.http.headers]
+     Content-Type = "application/x-protobuf"
+     Content-Encoding = "snappy"
+     X-Prometheus-Remote-Write-Version = "0.1.0"
+     Authorization = "Basic [BASIC_PASSCODE]"`;
+
     return {
       store,
       config,
       endpoint,
-      copyTracesContent,
-      accessKey,
+      content,
       getImageURL,
     };
   },

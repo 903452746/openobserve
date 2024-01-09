@@ -1,52 +1,56 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use ahash::AHashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
+
 use arrow_schema::Schema;
-use bytes::{BufMut, BytesMut};
 use chrono::{TimeZone, Utc};
-use std::{collections::BTreeMap, io::BufReader};
+use config::{meta::stream::StreamType, SIZE_IN_MB};
 use vector_enrichment::TableRegistry;
 use vrl::{
     compiler::{runtime::Runtime, CompilationResult, TargetValueRef},
     prelude::state,
 };
 
-use crate::common::{
-    infra::{
-        cluster,
-        config::{CONFIG, SIZE_IN_MB, STREAM_ALERTS, STREAM_FUNCTIONS},
-        wal::get_or_create,
+use crate::{
+    common::{
+        infra::{
+            cluster,
+            config::{STREAM_ALERTS, STREAM_FUNCTIONS, TRIGGERS},
+        },
+        meta::{
+            alerts::Alert,
+            functions::{StreamTransform, VRLResultResolver, VRLRuntimeConfig},
+            stream::{PartitionTimeLevel, PartitioningDetails, SchemaRecords},
+            usage::RequestStats,
+        },
+        utils::{
+            flatten,
+            functions::get_vrl_compiler_config,
+            json::{self, Map, Value},
+        },
     },
-    meta::{
-        alert::{Alert, Trigger},
-        functions::{StreamTransform, VRLResultResolver, VRLRuntimeConfig},
-        stream::{PartitionTimeLevel, PartitioningDetails, StreamParams},
-        usage::RequestStats,
-        StreamType,
-    },
-    utils::{
-        flatten,
-        functions::get_vrl_compiler_config,
-        json::{Map, Value},
-        notification::send_notification,
-        schema::infer_json_schema,
-    },
+    service::{db, format_partition_key, stream::stream_settings},
 };
-use crate::service::{db, format_partition_key, stream::stream_settings, triggers};
 
 pub mod grpc;
+
+pub type TriggerAlertData = Option<Vec<(Alert, Vec<Map<String, Value>>)>>;
 
 pub fn compile_vrl_function(func: &str, org_id: &str) -> Result<VRLRuntimeConfig, std::io::Error> {
     if func.contains("get_env_var") {
@@ -109,8 +113,8 @@ pub async fn get_stream_transforms<'a>(
     org_id: &str,
     stream_type: StreamType,
     stream_name: &str,
-    stream_transform_map: &mut AHashMap<String, Vec<StreamTransform>>,
-    stream_vrl_map: &mut AHashMap<String, VRLResultResolver>,
+    stream_transform_map: &mut HashMap<String, Vec<StreamTransform>>,
+    stream_vrl_map: &mut HashMap<String, VRLResultResolver>,
 ) {
     let key = format!("{}/{}/{}", &org_id, stream_type, &stream_name);
     if stream_transform_map.contains_key(&key) {
@@ -124,7 +128,7 @@ pub async fn get_stream_transforms<'a>(
 
 pub async fn get_stream_partition_keys(
     stream_name: &str,
-    stream_schema_map: &AHashMap<String, Schema>,
+    stream_schema_map: &HashMap<String, Schema>,
 ) -> PartitioningDetails {
     let schema = match stream_schema_map.get(stream_name) {
         Some(schema) => schema,
@@ -138,20 +142,50 @@ pub async fn get_stream_partition_keys(
     }
 }
 
-pub async fn get_stream_alerts<'a>(
-    key: String,
-    stream_alerts_map: &mut AHashMap<String, Vec<Alert>>,
+pub async fn get_stream_alerts(
+    org_id: &str,
+    stream_type: StreamType,
+    stream_name: &str,
+    stream_alerts_map: &mut HashMap<String, Vec<Alert>>,
 ) {
+    let key = format!("{}/{}/{}", org_id, stream_type, stream_name);
     if stream_alerts_map.contains_key(&key) {
         return;
     }
-    let alerts_list = STREAM_ALERTS.get(&key);
+
+    let alerts_cacher = STREAM_ALERTS.read().await;
+    let alerts_list = alerts_cacher.get(&key);
     if alerts_list.is_none() {
         return;
     }
-    let mut alerts = alerts_list.unwrap().list.clone();
-    alerts.retain(|alert| alert.is_real_time);
+    let triggers_cacher = TRIGGERS.read().await;
+    let alerts = alerts_list
+        .unwrap()
+        .iter()
+        .filter(|alert| alert.enabled && alert.is_real_time)
+        .filter(|alert| {
+            let key = format!("{}/{}", key, alert.name);
+            match triggers_cacher.get(&key) {
+                Some(v) => !v.is_silenced,
+                None => true,
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
     stream_alerts_map.insert(key, alerts);
+}
+
+pub async fn evaluate_trigger(trigger: TriggerAlertData) {
+    if trigger.is_none() {
+        return;
+    }
+    let trigger = trigger.unwrap();
+    for (alert, val) in trigger.iter() {
+        if let Err(e) = alert.send_notification(val).await {
+            log::error!("Failed to send notification: {}", e)
+        }
+    }
 }
 
 pub fn get_wal_time_key(
@@ -193,28 +227,13 @@ pub fn get_wal_time_key(
     time_key
 }
 
-pub async fn send_ingest_notification(trigger: Trigger, alert: Alert) {
-    log::info!(
-        "Sending notification for alert {} {}",
-        alert.name,
-        alert.stream
-    );
-    let _ = send_notification(&alert, &trigger).await;
-    let trigger_to_save = Trigger {
-        last_sent_at: Utc::now().timestamp_micros(),
-        count: trigger.count + 1,
-        ..trigger
-    };
-    let _ = triggers::save_trigger(&trigger_to_save.alert_name, &trigger_to_save).await;
-}
-
 pub fn register_stream_transforms(
     org_id: &str,
     stream_type: StreamType,
     stream_name: &str,
-) -> (Vec<StreamTransform>, AHashMap<String, VRLResultResolver>) {
+) -> (Vec<StreamTransform>, HashMap<String, VRLResultResolver>) {
     let mut local_trans = vec![];
-    let mut stream_vrl_map: AHashMap<String, VRLResultResolver> = AHashMap::new();
+    let mut stream_vrl_map: HashMap<String, VRLResultResolver> = HashMap::new();
     let key = format!("{}/{}/{}", &org_id, stream_type, &stream_name);
 
     if let Some(transforms) = STREAM_FUNCTIONS.get(&key) {
@@ -243,14 +262,13 @@ pub fn register_stream_transforms(
     (local_trans, stream_vrl_map)
 }
 
-pub fn apply_stream_transform<'a>(
-    local_trans: &Vec<StreamTransform>,
-    value: &'a Value,
-    stream_vrl_map: &'a AHashMap<String, VRLResultResolver>,
+pub fn apply_stream_transform(
+    local_trans: &[StreamTransform],
+    mut value: Value,
+    stream_vrl_map: &HashMap<String, VRLResultResolver>,
     stream_name: &str,
     runtime: &mut Runtime,
 ) -> Result<Value, anyhow::Error> {
-    let mut value = value.clone();
     for trans in local_trans {
         let func_key = format!("{stream_name}/{}", trans.transform.name);
         if stream_vrl_map.contains_key(&func_key) && !value.is_null() {
@@ -258,44 +276,7 @@ pub fn apply_stream_transform<'a>(
             value = apply_vrl_fn(runtime, vrl_runtime, &value);
         }
     }
-    flatten::flatten(&value)
-}
-
-pub async fn chk_schema_by_record(
-    stream_schema_map: &mut AHashMap<String, Schema>,
-    org_id: &str,
-    stream_type: StreamType,
-    stream_name: &str,
-    record_ts: i64,
-    record_val: &str,
-) {
-    let schema = if stream_schema_map.contains_key(stream_name) {
-        stream_schema_map.get(stream_name).unwrap().clone()
-    } else {
-        let schema = db::schema::get(org_id, stream_name, stream_type)
-            .await
-            .unwrap();
-        stream_schema_map.insert(stream_name.to_string(), schema.clone());
-        schema
-    };
-    if !schema.fields().is_empty() {
-        return;
-    }
-
-    let mut schema_reader = BufReader::new(record_val.as_bytes());
-    let inferred_schema = infer_json_schema(&mut schema_reader, None, stream_type).unwrap();
-    let inferred_schema = inferred_schema.with_metadata(schema.metadata().clone());
-    stream_schema_map.insert(stream_name.to_string(), inferred_schema.clone());
-    db::schema::set(
-        org_id,
-        stream_name,
-        stream_type,
-        &inferred_schema,
-        Some(record_ts),
-        true,
-    )
-    .await
-    .unwrap();
+    flatten::flatten(value)
 }
 
 pub fn init_functions_runtime() -> Runtime {
@@ -303,55 +284,36 @@ pub fn init_functions_runtime() -> Runtime {
 }
 
 pub async fn write_file(
-    buf: &AHashMap<String, Vec<String>>,
-    thread_id: usize,
-    stream: &StreamParams,
-    stream_file_name: &mut String,
-    partition_time_level: Option<PartitionTimeLevel>,
+    writer: &Arc<ingester::Writer>,
+    stream_name: &str,
+    buf: HashMap<String, SchemaRecords>,
 ) -> RequestStats {
-    let mut write_buf = BytesMut::new();
     let mut req_stats = RequestStats::default();
-    for (key, entry) in buf {
-        if entry.is_empty() {
+    for (hour_key, entry) in buf {
+        if entry.records.is_empty() {
             continue;
         }
-        write_buf.clear();
-        for row in entry {
-            write_buf.put(row.as_bytes());
-            write_buf.put("\n".as_bytes());
+        let entry_records = entry.records.len();
+        if let Err(e) = writer
+            .write(
+                entry.schema,
+                ingester::Entry {
+                    stream: Arc::from(stream_name),
+                    schema_key: Arc::from(entry.schema_key.as_str()),
+                    partition_key: Arc::from(hour_key.as_str()),
+                    data: entry.records,
+                    data_size: entry.records_size,
+                },
+            )
+            .await
+        {
+            log::error!("ingestion write file error: {}", e);
         }
-        let file = get_or_create(
-            thread_id,
-            stream.clone(),
-            partition_time_level,
-            key,
-            CONFIG.common.wal_memory_mode_enabled,
-        )
-        .await;
-        if stream_file_name.is_empty() {
-            *stream_file_name = file.full_name();
-        }
-        file.write(write_buf.as_ref()).await;
-        req_stats.size += write_buf.len() as f64 / SIZE_IN_MB;
-        req_stats.records += entry.len() as i64;
+
+        req_stats.size += entry.records_size as f64 / SIZE_IN_MB;
+        req_stats.records += entry_records as i64;
     }
     req_stats
-}
-
-pub fn get_value(value: &Value) -> String {
-    if value.is_boolean() {
-        value.as_bool().unwrap().to_string()
-    } else if value.is_f64() {
-        value.as_f64().unwrap().to_string()
-    } else if value.is_i64() {
-        value.as_i64().unwrap().to_string()
-    } else if value.is_u64() {
-        value.as_u64().unwrap().to_string()
-    } else if value.is_string() {
-        value.as_str().unwrap().to_string()
-    } else {
-        "".to_string()
-    }
 }
 
 pub fn is_ingestion_allowed(org_id: &str, stream_name: Option<&str>) -> Option<anyhow::Error> {
@@ -370,6 +332,119 @@ pub fn is_ingestion_allowed(org_id: &str, stream_name: Option<&str>) -> Option<a
     };
 
     None
+}
+
+pub fn get_float_value(val: &Value) -> f64 {
+    match val {
+        Value::String(v) => v.parse::<f64>().unwrap_or(0.0),
+        Value::Number(v) => v.as_f64().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+pub fn get_int_value(val: &Value) -> i64 {
+    match val {
+        Value::String(v) => v.parse::<i64>().unwrap_or(0),
+        Value::Number(v) => v.as_i64().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+pub fn get_string_value(value: &Value) -> String {
+    if value.is_boolean() {
+        value.as_bool().unwrap_or_default().to_string()
+    } else if value.is_i64() {
+        value.as_i64().unwrap_or_default().to_string()
+    } else if value.is_u64() {
+        value.as_u64().unwrap_or_default().to_string()
+    } else if value.is_f64() {
+        value.as_f64().unwrap_or_default().to_string()
+    } else if value.is_string() {
+        value.as_str().unwrap_or_default().to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+pub fn get_val_for_attr(attr_val: &Value) -> Value {
+    let local_val = attr_val.as_object().unwrap();
+    if let Some((key, value)) = local_val.into_iter().next() {
+        match key.as_str() {
+            "stringValue" | "string_value" => {
+                return json::json!(get_string_value(value));
+            }
+            "boolValue" | "bool_value" => {
+                return json::json!(value.as_bool().unwrap_or(false).to_string());
+            }
+            "intValue" | "int_value" => {
+                return json::json!(get_int_value(value).to_string());
+            }
+            "doubleValue" | "double_value" => {
+                return json::json!(get_float_value(value).to_string());
+            }
+
+            "bytesValue" | "bytes_value" => {
+                return json::json!(value.as_str().unwrap_or("").to_string());
+            }
+
+            "arrayValue" | "array_value" => {
+                let mut vals = vec![];
+                for item in value
+                    .get("values")
+                    .unwrap()
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                {
+                    vals.push(get_val_for_attr(item));
+                }
+                return json::json!(vals);
+            }
+
+            "kvlistValue" | "kvlist_value" => {
+                let mut vals = json::Map::new();
+                for item in value
+                    .get("values")
+                    .unwrap()
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                {
+                    let mut key = item.get("key").unwrap().as_str().unwrap_or("").to_string();
+                    flatten::format_key(&mut key);
+                    let value = item.get("value").unwrap().clone();
+                    vals.insert(key, get_val_for_attr(&value));
+                }
+                return json::json!(vals);
+            }
+
+            _ => {
+                return json::json!(get_string_value(value));
+            }
+        }
+    };
+    attr_val.clone()
+}
+
+pub fn get_val_with_type_retained(val: &Value) -> Value {
+    match val {
+        Value::String(val) => {
+            json::json!(val)
+        }
+        Value::Bool(val) => {
+            json::json!(val)
+        }
+        Value::Number(val) => {
+            json::json!(val)
+        }
+        Value::Array(val) => {
+            json::json!(val)
+        }
+        Value::Object(val) => {
+            json::json!(val)
+        }
+        Value::Null => Value::Null,
+    }
 }
 
 #[cfg(test)]
@@ -430,7 +505,7 @@ mod tests {
     }
     #[actix_web::test]
     async fn test_get_stream_partition_keys() {
-        let mut stream_schema_map = AHashMap::new();
+        let mut stream_schema_map = HashMap::new();
         let mut meta = HashMap::new();
         meta.insert(
             "settings".to_string(),

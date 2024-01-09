@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
 
@@ -37,7 +38,7 @@ pub async fn get(org_id: Option<&str>, name: &str) -> Result<Option<User>, anyho
 
     let org_id = org_id.expect("Missing org_id");
 
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/user/{name}");
     let val = db.get(&key).await?;
     let db_user: DBUser = json::from_slice(&val).unwrap();
@@ -60,7 +61,7 @@ pub async fn get_by_token(
 
     let org_id = org_id.expect("Missing org_id");
 
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/user/";
     let ret = db.list_values(key).await.unwrap();
 
@@ -85,14 +86,14 @@ pub async fn get_by_token(
 }
 
 pub async fn get_db_user(name: &str) -> Result<DBUser, anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/user/{name}");
     let val = db.get(&key).await?;
     Ok(json::from_slice::<DBUser>(&val).unwrap())
 }
 
 pub async fn set(user: DBUser) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/user/{}", user.email);
     db.put(
         &key,
@@ -113,6 +114,7 @@ pub async fn set(user: DBUser) -> Result<(), anyhow::Error> {
             token: org.token,
             rum_token: org.rum_token.clone(),
             salt: user.salt.clone(),
+            is_external: user.is_external,
         };
         USERS.insert(
             format!("{}/{}", org.name.clone(), user.email.clone()),
@@ -129,7 +131,7 @@ pub async fn set(user: DBUser) -> Result<(), anyhow::Error> {
 }
 
 pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/user/{name}");
     match db.delete(&key, false, infra_db::NEED_WATCH).await {
         Ok(_) => {}
@@ -143,8 +145,8 @@ pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
 
 pub async fn watch() -> Result<(), anyhow::Error> {
     let key = "/user/";
-    let db = &infra_db::CLUSTER_COORDINATOR;
-    let mut events = db.watch(key).await?;
+    let cluster_coordinator = infra_db::get_coordinator().await;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching user");
     loop {
@@ -187,11 +189,11 @@ pub async fn watch() -> Result<(), anyhow::Error> {
 }
 
 pub async fn cache() -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/user/";
     let ret = db.list(key).await?;
     for (_, item_value) in ret {
-        //let item_key = item_key.strip_prefix(key).unwrap();
+        // let item_key = item_key.strip_prefix(key).unwrap();
         let json_val: DBUser = json::from_slice(&item_value).unwrap();
         let users = json_val.get_all_users();
         for user in users {
@@ -211,9 +213,9 @@ pub async fn cache() -> Result<(), anyhow::Error> {
 }
 
 pub async fn root_user_exists() -> bool {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/user/";
-    let mut ret = db.list_values(key).await.unwrap();
+    let mut ret = db.list_values(key).await.unwrap_or_default();
     ret.retain(|item| {
         let user: DBUser = json::from_slice(item).unwrap();
         user.organizations
@@ -227,10 +229,26 @@ pub async fn root_user_exists() -> bool {
 }
 
 pub async fn reset() -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/user/";
     db.delete(key, true, infra_db::NO_NEED_WATCH).await?;
     Ok(())
+}
+
+pub async fn get_user_by_email(email: &str) -> Option<DBUser> {
+    let db = infra_db::get_db().await;
+    let key = "/user/";
+    let mut ret = db.list_values(key).await.unwrap();
+    ret.retain(|item| {
+        let user: DBUser = serde_json::from_slice(item).unwrap();
+        user.email.eq(email)
+    });
+    if !ret.is_empty() {
+        let user: DBUser = serde_json::from_slice(&ret[0]).unwrap();
+        Some(user)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +266,7 @@ mod tests {
             salt: String::from("sdfjshdkfshdfkshdfkshdfkjh"),
             first_name: "admin".to_owned(),
             last_name: "".to_owned(),
+            is_external: false,
             organizations: vec![UserOrg {
                 role: crate::common::meta::user::UserRole::Admin,
                 name: org_id.clone(),

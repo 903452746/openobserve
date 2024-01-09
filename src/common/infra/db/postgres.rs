@@ -1,29 +1,32 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{str::FromStr, sync::Arc};
 
 use ahash::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
+use config::CONFIG;
 use once_cell::sync::Lazy;
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     ConnectOptions, Pool, Postgres,
 };
-use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 
-use crate::common::infra::{config::CONFIG, errors::*};
+use crate::common::infra::errors::*;
 
 pub static CLIENT: Lazy<Pool<Postgres>> = Lazy::new(connect);
 
@@ -32,10 +35,10 @@ fn connect() -> Pool<Postgres> {
         .expect("postgres connect options create failed")
         .disable_statement_logging();
 
-    let pool_opts = PgPoolOptions::new();
-    let pool_opts = pool_opts.min_connections(CONFIG.limit.cpu_num as u32);
-    let pool_opts = pool_opts.max_connections(CONFIG.limit.query_thread_num as u32);
-    pool_opts.connect_lazy_with(db_opts)
+    PgPoolOptions::new()
+        .min_connections(10)
+        .max_connections(512)
+        .connect_lazy_with(db_opts)
 }
 
 pub struct PostgresDb {}
@@ -60,7 +63,7 @@ impl super::Db for PostgresDb {
 
     async fn stats(&self) -> Result<super::Stats> {
         let pool = CLIENT.clone();
-        let keys_count: i64 = sqlx::query_scalar(r#"SELECT COUNT(*)::BIGINT as num FROM meta;"#)
+        let keys_count: i64 = sqlx::query_scalar(r#"SELECT COUNT(*)::BIGINT AS num FROM meta;"#)
             .fetch_one(&pool)
             .await
             .unwrap_or_default();
@@ -94,17 +97,20 @@ impl super::Db for PostgresDb {
         let (module, key1, key2) = super::parse_key(key);
         let pool = CLIENT.clone();
         let mut tx = pool.begin().await?;
-        sqlx::query(
-            r#"
-INSERT INTO meta (module, key1, key2, value) 
-    VALUES ($1, $2, $3, '')
-    ON CONFLICT DO NOTHING;"#,
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO meta (module, key1, key2, value) VALUES ($1, $2, $3, '') ON CONFLICT DO NOTHING;"#,
         )
         .bind(&module)
         .bind(&key1)
         .bind(&key2)
         .execute(&mut *tx)
-        .await?;
+        .await
+        {
+            if let Err(e) = tx.rollback().await {
+                log::error!("[POSTGRES] rollback put meta error: {}", e);
+            }
+            return Err(e.into());
+        }
         if let Err(e) = sqlx::query(
             r#"UPDATE meta SET value=$4 WHERE module = $1 AND key1 = $2 AND key2 = $3;"#,
         )
@@ -127,8 +133,8 @@ INSERT INTO meta (module, key1, key2, value)
 
         // event watch
         if need_watch {
-            let tx = &super::CLUSTER_COORDINATOR;
-            tx.put(key, value, true).await?;
+            let cluster_coordinator = super::get_coordinator().await;
+            cluster_coordinator.put(key, value, true).await?;
         }
 
         Ok(())
@@ -143,10 +149,10 @@ INSERT INTO meta (module, key1, key2, value)
             } else {
                 vec![key.to_string()]
             };
-            let tx = &super::CLUSTER_COORDINATOR;
+            let cluster_coordinator = super::get_coordinator().await;
             tokio::task::spawn(async move {
                 for key in items {
-                    if let Err(e) = tx.delete(&key, false, true).await {
+                    if let Err(e) = cluster_coordinator.delete(&key, false, true).await {
                         log::error!("[POSTGRES] send event error: {}", e);
                     }
                 }
@@ -269,9 +275,9 @@ pub async fn create_table() -> Result<()> {
 CREATE TABLE IF NOT EXISTS meta
 (
     id      BIGINT GENERATED ALWAYS AS IDENTITY,
-    module  VARCHAR  not null,
-    key1    VARCHAR not null,
-    key2    VARCHAR not null,
+    module  VARCHAR(100) not null,
+    key1    VARCHAR(256) not null,
+    key2    VARCHAR(256) not null,
     value   TEXT not null
 );
         "#,
@@ -284,42 +290,28 @@ CREATE TABLE IF NOT EXISTS meta
         }
         return Err(e.into());
     }
-
-    // create table index
-    if let Err(e) = sqlx::query("CREATE INDEX IF NOT EXISTS meta_module_idx on meta (module);")
-        .execute(&mut *tx)
-        .await
-    {
-        if let Err(e) = tx.rollback().await {
-            log::error!("[POSTGRES] rollback create table meta index error: {}", e);
-        }
-        return Err(e.into());
-    }
-    if let Err(e) =
-        sqlx::query("CREATE INDEX IF NOT EXISTS meta_module_key1_idx on meta (module, key1);")
-            .execute(&mut *tx)
-            .await
-    {
-        if let Err(e) = tx.rollback().await {
-            log::error!("[POSTGRES] rollback create table meta index error: {}", e);
-        }
-        return Err(e.into());
-    }
-    if let Err(e) = sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS meta_module_key2_idx on meta (module, key1, key2);",
-    )
-    .execute(&mut *tx)
-    .await
-    {
-        if let Err(e) = tx.rollback().await {
-            log::error!("[POSTGRES] rollback create table meta index error: {}", e);
-        }
-        return Err(e.into());
-    }
     if let Err(e) = tx.commit().await {
         log::error!("[POSTGRES] commit create table meta error: {}", e);
         return Err(e.into());
     }
 
+    // create table index
+    create_index_item("CREATE INDEX IF NOT EXISTS meta_module_idx on meta (module);").await?;
+    create_index_item("CREATE INDEX IF NOT EXISTS meta_module_key1_idx on meta (module, key1);")
+        .await?;
+    create_index_item(
+        "CREATE UNIQUE INDEX IF NOT EXISTS meta_module_key2_idx on meta (module, key1, key2);",
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn create_index_item(sql: &str) -> Result<()> {
+    let pool = CLIENT.clone();
+    if let Err(e) = sqlx::query(sql).execute(&pool).await {
+        log::error!("[POSTGRES] create table meta index error: {}", e);
+        return Err(e.into());
+    }
     Ok(())
 }

@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -28,7 +29,11 @@
 
       <br />
       <div class="text-subtitle1 q-mt-xs" v-html="npmStep2"></div>
-      <copy-content :content="initConfiguration"></copy-content>
+      <CopyContent
+        :key="displayConfiguration"
+        :content="initConfiguration"
+        :displayContent="displayConfiguration"
+      ></CopyContent>
     </div>
     <div v-else class="q-mt-xs">
       {{ t("ingestion.generateRUMTokenMessage") }}
@@ -37,10 +42,10 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, onMounted, onUpdated } from "vue";
+import { defineComponent, ref, onMounted, onUpdated, onActivated } from "vue";
 import { useStore } from "vuex";
 import { useI18n } from "vue-i18n";
-import { getImageURL } from "../../../utils/zincutils";
+import { getImageURL, maskText } from "../../../utils/zincutils";
 import CopyContent from "../../CopyContent.vue";
 
 export default defineComponent({
@@ -96,6 +101,7 @@ openobserveRum.init({
   trackUserInteractions: true,
   apiVersion: options.apiVersion,
   insecureHTTP: options.insecureHTTP,
+  defaultPrivacyLevel: 'allow' // 'allow' or 'mask-user-input' or 'mask'. Use one of the 3 values.
 });
 
 openobserveLogs.init({
@@ -119,6 +125,7 @@ openobserveRum.setUser({
 
 openobserveRum.startSessionReplayRecording();`;
     const initConfiguration = ref(defaultConfig);
+    const displayConfiguration = ref(defaultConfig);
 
     onMounted(() => {
       if (store.state.organizationData.rumToken) {
@@ -132,14 +139,13 @@ openobserveRum.startSessionReplayRecording();`;
       }
     });
 
+    onActivated(() => {
+      replaceStaticValues();
+    });
+
     const replaceStaticValues = () => {
       rumToken.value = store.state.organizationData.rumToken.rum_token;
       let configData = defaultConfig;
-      configData = configData.replace(
-        /<OPENOBSERVE_CLIENT_TOKEN>/g,
-        rumToken.value
-      );
-
       configData = configData.replace(
         /<OPENOBSERVE_SITE>/g,
         store.state.API_ENDPOINT.replace("https://", "")
@@ -158,7 +164,15 @@ openobserveRum.startSessionReplayRecording();`;
         configData = configData.replace(/<INSECUREHTTP>/g, "true");
       }
 
-      initConfiguration.value = configData;
+      initConfiguration.value = configData.replace(
+        /<OPENOBSERVE_CLIENT_TOKEN>/g,
+        rumToken.value
+      );
+
+      displayConfiguration.value = configData.replace(
+        /<OPENOBSERVE_CLIENT_TOKEN>/g,
+        maskText(rumToken.value)
+      );
     };
 
     return {
@@ -169,6 +183,7 @@ openobserveRum.startSessionReplayRecording();`;
       npmStep1,
       npmStep2,
       initConfiguration,
+      displayConfiguration,
       replaceStaticValues,
     };
   },

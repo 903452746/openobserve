@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -28,10 +29,72 @@
           v-model="searchObj.meta.sqlMode"
           :label="t('search.sqlModeLabel')"
         />
+        <q-btn
+          label="Reset Filters"
+          no-caps
+          size="sm"
+          icon="restart_alt"
+          class="q-pr-sm q-pl-xs reset-filters q-ml-md"
+          @click="resetFilters"
+        />
         <syntax-guide
           data-test="logs-search-bar-sql-mode-toggle-btn"
           :sqlmode="searchObj.meta.sqlMode"
         ></syntax-guide>
+        <q-btn-group class="q-ml-sm no-outline q-pa-none no-border">
+          <q-btn-dropdown
+            data-test="logs-search-saved-views-btn"
+            v-model="savedViewDropdownModel"
+            auto-close
+            size="12px"
+            icon="save"
+            icon-right="saved_search"
+            :title="t('search.savedViewsLabel')"
+            @click="fnSavedView"
+            split
+            class="no-outline saved-views-dropdown no-border"
+          >
+            <q-list>
+              <q-item-label header class="q-pa-sm">{{
+                t("search.savedViewDropdownLabel")
+              }}</q-item-label>
+              <q-separator inset></q-separator>
+
+              <div v-if="searchObj.data.savedViews.length">
+                <q-item
+                  class="q-pa-sm saved-view-item"
+                  clickable
+                  v-for="(item, i) in searchObj.data.savedViews"
+                  :key="'saved-view-' + i"
+                  v-close-popup
+                >
+                  <q-item-section
+                    @click.stop="applySavedView(item)"
+                    v-close-popup
+                  >
+                    <q-item-label>{{ item.view_name }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section
+                    :data-test="`logs-search-bar-delete-${item.view_name}-saved-view-btn`"
+                    side
+                    @click.stop="handleDeleteSavedView(item)"
+                  >
+                    <q-icon name="delete" color="grey" size="xs" />
+                  </q-item-section>
+                </q-item>
+              </div>
+              <div v-else>
+                <q-item>
+                  <q-item-section>
+                    <q-item-label>{{
+                      t("search.savedViewsNotFound")
+                    }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </div>
+            </q-list>
+          </q-btn-dropdown>
+        </q-btn-group>
       </div>
       <div class="float-right col-auto q-mb-xs">
         <q-toggle
@@ -46,65 +109,67 @@
         <q-toggle
           data-test="logs-search-bar-show-query-toggle-btn"
           v-model="searchObj.meta.toggleFunction"
-          icon="functions"
+          :icon="'img:' + getImageURL('images/common/function.svg')"
           title="Toggle Function Editor"
           class="float-left"
           size="32px"
         />
-        <q-select
-          v-model="functionModel"
-          :options="functionOptions"
-          option-label="name"
-          option-value="function"
-          :placeholder="t('search.functionPlaceholder')"
-          data-cy="index-dropdown"
-          input-debounce="10"
-          use-input
-          hide-selected
-          behavior="default"
-          fill-input
-          dense
-          :loading="false"
-          @filter="filterFn"
-          @new-value="createNewValue"
-          @blur="updateSelectedValue"
-          @update:model-value="populateFunctionImplementation"
-          class="float-left function-dropdown q-mr-sm"
+        <q-btn-group
+          class="q-ml-sm no-outline q-pa-none no-border float-left q-mr-sm"
+          :disable="!searchObj.meta.toggleFunction"
         >
-          <template v-slot:append>
-            <q-icon
-              v-if="functionModel !== null"
-              class="cursor-pointer"
-              name="clear"
-              size="xs"
-              @click.stop.prevent="functionModel = null"
-            />
-          </template>
-          <template #no-option>
-            <q-item>
-              <q-item-section class="text-xs"
-                >{{t('search.functionMessage')}}</q-item-section
-              >
-            </q-item>
-          </template>
-        </q-select>
+          <q-btn-dropdown
+            data-test="logs-search-bar-function-dropdown"
+            v-model="functionModel"
+            auto-close
+            size="12px"
+            icon="save"
+            :icon-right="'img:' + getImageURL('images/common/function.svg')"
+            :title="t('search.savedViewsLabel')"
+            split
+            class="no-outline saved-views-dropdown no-border btn-function"
+            @click="fnSavedFunctionDialog"
+          >
+            <q-list>
+              <q-item-label header class="q-pa-sm">{{
+                t("search.functionPlaceholder")
+              }}</q-item-label>
+              <q-separator inset></q-separator>
+
+              <div v-if="functionOptions.length">
+                <q-item
+                  class="q-pa-sm saved-view-item"
+                  clickable
+                  v-for="(item, i) in functionOptions"
+                  :key="'saved-view-' + i"
+                  v-close-popup
+                >
+                  <q-item-section
+                    @click.stop="populateFunctionImplementation(item, true)"
+                    v-close-popup
+                  >
+                    <q-item-label>{{ item.name }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </div>
+              <div v-else>
+                <q-item>
+                  <q-item-section>
+                    <q-item-label>{{
+                      t("search.savedFunctionNotFound")
+                    }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </div>
+            </q-list>
+          </q-btn-dropdown>
+        </q-btn-group>
         <q-btn
-          :disable="
-            !functionModel ||
-            !searchObj.data.tempFunctionContent ||
-            functionModel.function == searchObj.data.tempFunctionContent
-          "
-          :title="t('search.saveFunctionLabel')"
-          icon="save"
-          icon-right="functions"
-          size="sm"
-          class="q-px-xs q-mr-sm float-left download-logs-btn"
-          @click="saveFunction"
-        ></q-btn>
-        <q-btn
+          data-test="logs-search-bar-reset-function-btn"
           class="q-mr-sm download-logs-btn q-px-sm"
           size="sm"
-          :disabled="
+          v-bind:disable="
+            searchObj.data.queryResults &&
             searchObj.data.queryResults.hasOwnProperty('hits') &&
             !searchObj.data.queryResults.hits.length
           "
@@ -112,8 +177,17 @@
           :title="t('search.exportLogs')"
           @click="downloadLogs"
         ></q-btn>
+        <q-btn
+          data-test="logs-search-bar-share-link-btn"
+          class="q-mr-sm download-logs-btn q-px-sm"
+          size="sm"
+          icon="share"
+          :title="t('search.shareLink')"
+          @click="shareLink"
+        ></q-btn>
         <div class="float-left">
           <date-time
+            ref="dateTimeRef"
             auto-apply
             :default-type="searchObj.data.datetime.type"
             :default-absolute-time="{
@@ -126,7 +200,7 @@
             @on:timezone-change="updateTimezone"
           />
         </div>
-        <div class="search-time q-pl-sm float-left q-mr-sm">
+        <div class="search-time float-left q-mr-sm">
           <div class="flex">
             <auto-refresh-interval
               class="q-mr-sm q-px-none logs-auto-refresh-interval"
@@ -143,9 +217,11 @@
               class="q-pa-none search-button"
               @click="handleRunQuery"
               :disable="
-                searchObj.loading || searchObj.data.streamResults.length == 0
+                searchObj.loading ||
+                (searchObj.data.hasOwnProperty('streamResults') &&
+                  searchObj.data.streamResults.length == 0)
               "
-              >{{t('search.runQuery')}}</q-btn
+              >{{ t("search.runQuery") }}</q-btn
             >
           </div>
         </div>
@@ -162,6 +238,7 @@
         >
           <template #before>
             <query-editor
+              data-test="logs-search-bar-query-editor"
               editor-id="logsQueryEditor"
               ref="queryEditorRef"
               class="monaco-editor"
@@ -185,6 +262,7 @@
               style="height: 100%"
             >
               <div
+                data-test="logs-vrl-function-editor"
                 ref="fnEditorRef"
                 id="fnEditor"
                 style="height: 100%"
@@ -208,23 +286,232 @@
         </q-card-section>
 
         <q-card-actions align="right">
-          <q-btn :label="t('confirmDialog.cancel')" color="primary"
-@click="cancelConfirmDialog" />
-          <q-btn :label="t('confirmDialog.ok')" color="positive"
-@click="confirmDialogOK" />
+          <q-btn
+            data-test="logs-search-bar-confirm-dialog-cancel-btn"
+            :label="t('confirmDialog.cancel')"
+            color="primary"
+            @click="cancelConfirmDialog"
+          />
+          <q-btn
+            data-test="logs-search-bar-confirm-dialog-ok-btn"
+            :label="t('confirmDialog.ok')"
+            color="positive"
+            @click="confirmDialogOK"
+          />
         </q-card-actions>
       </q-card>
     </q-dialog>
+    <q-dialog v-model="store.state.savedViewDialog">
+      <q-card style="width: 700px; max-width: 80vw">
+        <q-card-section>
+          <div class="text-h6">{{ t("search.savedViewsLabel") }}</div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none">
+          <span>Update</span>
+          <q-toggle
+            data-test="saved-view-action-toggle"
+            v-bind:disable="searchObj.data.savedViews.length == 0"
+            name="saved_view_action"
+            v-model="isSavedViewAction"
+            true-value="create"
+            false-value="update"
+            label=""
+            @change="savedViewName = ''"
+          />
+          <span>Create</span>
+          <div v-if="isSavedViewAction == 'create'">
+            <q-input
+              data-test="add-alert-name-input"
+              v-model="savedViewName"
+              :label="t('search.savedViewName')"
+              color="input-border"
+              bg-color="input-bg"
+              class="showLabelOnTop"
+              stack-label
+              outlined
+              filled
+              dense
+              :rules="[
+                (val) => !!val.trim() || 'This field is required',
+                (val) =>
+                  /^[-A-Za-z0-9 /@/_]+$/.test(val) ||
+                  'Input must be alphanumeric',
+              ]"
+              tabindex="0"
+            />
+          </div>
+          <div v-else>
+            <q-select
+              data-test="saved-view-name-select"
+              v-model="savedViewSelectedName"
+              :options="searchObj.data.savedViews"
+              option-label="view_name"
+              option-value="view_id"
+              :label="t('search.savedViewName')"
+              :popup-content-style="{ textTransform: 'capitalize' }"
+              color="input-border"
+              bg-color="input-bg"
+              class="q-py-sm showLabelOnTop"
+              stack-label
+              outlined
+              filled
+              dense
+              :rules="[(val: any) => !!val || 'Field is required!']"
+            />
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right" class="bg-white text-teal">
+          <q-btn
+            data-test="saved-view-dialog-cancel-btn"
+            unelevated
+            no-caps
+            class="q-mr-sm text-bold"
+            :label="t('confirmDialog.cancel')"
+            color="secondary"
+            v-close-popup
+          />
+          <q-btn
+            data-test="saved-view-dialog-save-btn"
+            v-if="!saveViewLoader"
+            unelevated
+            no-caps
+            :label="t('confirmDialog.ok')"
+            color="primary"
+            class="text-bold"
+            @click="handleSavedView"
+          />
+          <q-btn
+            data-test="saved-view-dialog-loading-btn"
+            v-if="saveViewLoader"
+            unelevated
+            no-caps
+            :label="t('confirmDialog.loading')"
+            color="primary"
+            class="text-bold"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+    <q-dialog v-model="store.state.savedFunctionDialog">
+      <q-card style="width: 700px; max-width: 80vw">
+        <q-card-section>
+          <div class="text-h6">{{ t("search.functionPlaceholder") }}</div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none">
+          <span>Update</span>
+          <q-toggle
+            data-test="saved-function-action-toggle"
+            v-bind:disable="functionOptions.length == 0"
+            name="saved_function_action"
+            v-model="isSavedFunctionAction"
+            true-value="create"
+            false-value="update"
+            label=""
+            @change="savedFunctionName = ''"
+          />
+          <span>Create</span>
+          <div v-if="isSavedFunctionAction == 'create'">
+            <q-input
+              data-test="saved-function-name-input"
+              v-model="savedFunctionName"
+              :label="t('search.saveFunctionName')"
+              color="input-border"
+              bg-color="input-bg"
+              class="showLabelOnTop"
+              stack-label
+              outlined
+              filled
+              dense
+              :rules="[
+                (val) => !!val.trim() || 'This field is required',
+                (val) =>
+                  /^[-A-Za-z0-9/_]+$/.test(val) || 'Input must be alphanumeric',
+              ]"
+              tabindex="0"
+            />
+          </div>
+          <div v-else>
+            <q-select
+              data-test="saved-function-name-select"
+              v-model="savedFunctionSelectedName"
+              :options="functionOptions"
+              option-label="name"
+              option-value="name"
+              :label="t('search.saveFunctionName')"
+              placeholder="Select Function Name"
+              :popup-content-style="{ textTransform: 'capitalize' }"
+              color="input-border"
+              bg-color="input-bg"
+              class="q-py-sm showLabelOnTop"
+              stack-label
+              outlined
+              filled
+              dense
+              :rules="[(val: any) => !!val || 'Field is required!']"
+            />
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right" class="bg-white text-teal">
+          <q-btn
+            data-test="saved-function-dialog-cancel-btn"
+            unelevated
+            no-caps
+            class="q-mr-sm text-bold"
+            :label="t('confirmDialog.cancel')"
+            color="secondary"
+            v-close-popup
+          />
+          <q-btn
+            data-test="saved-view-dialog-save-btn"
+            v-if="!saveFunctionLoader"
+            unelevated
+            no-caps
+            :label="t('confirmDialog.ok')"
+            color="primary"
+            class="text-bold"
+            @click="saveFunction"
+          />
+          <q-btn
+            data-test="saved-function-dialog-loading-btn"
+            v-if="saveFunctionLoader"
+            unelevated
+            no-caps
+            :label="t('confirmDialog.loading')"
+            color="primary"
+            class="text-bold"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+    <ConfirmDialog
+      title="Delete Saved View"
+      message="Are you sure you want to delete saved view?"
+      @update:ok="confirmDeleteSavedViews"
+      @update:cancel="confirmDelete = false"
+      v-model="confirmDelete"
+    />
   </div>
 </template>
 
 <script lang="ts">
 // @ts-nocheck
-import { defineComponent, ref, onMounted, nextTick, watch } from "vue";
+import {
+  defineComponent,
+  ref,
+  onMounted,
+  nextTick,
+  watch,
+  toRaw,
+  onActivated,
+} from "vue";
 import { useI18n } from "vue-i18n";
 import { onBeforeRouteUpdate, useRouter } from "vue-router";
 import { useStore } from "vuex";
-import { useQuasar } from "quasar";
+import { useQuasar, copyToClipboard } from "quasar";
 
 import DateTime from "@/components/DateTime.vue";
 import useLogs from "@/composables/useLogs";
@@ -242,7 +529,9 @@ import AutoRefreshInterval from "@/components/AutoRefreshInterval.vue";
 import stream from "@/services/stream";
 import { getConsumableDateTime } from "@/utils/commons";
 import useSqlSuggestions from "@/composables/useSuggestions";
-import { cloneDeep } from "lodash-es";
+import { mergeDeep, b64DecodeUnicode, getImageURL } from "@/utils/zincutils";
+import savedviewsService from "@/services/saved_views";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
 
 const defaultValue: any = () => {
   return {
@@ -260,6 +549,7 @@ export default defineComponent({
     QueryEditor,
     SyntaxGuide,
     AutoRefreshInterval,
+    ConfirmDialog,
   },
   emits: ["searchdata", "onChangeInterval", "onChangeTimezone"],
   methods: {
@@ -286,6 +576,14 @@ export default defineComponent({
         this.functionOptions.push(this.functionModel);
       }
     },
+    handleDeleteSavedView(item: any) {
+      this.savedViewDropdownModel = false;
+      this.deleteViewID = item.view_id;
+      this.confirmDelete = true;
+    },
+    confirmDeleteSavedViews() {
+      this.deleteSavedViews();
+    },
   },
   props: {
     fieldValues: {
@@ -299,7 +597,17 @@ export default defineComponent({
     const $q = useQuasar();
     const store = useStore();
 
-    const { searchObj, refreshData, handleRunQuery } = useLogs();
+    const {
+      searchObj,
+      refreshData,
+      handleRunQuery,
+      updatedLocalLogFilterField,
+      getSavedViews,
+      getQueryData,
+      getStreams,
+      updateUrlQueryParams,
+      generateURLQuery,
+    } = useLogs();
     const queryEditorRef = ref(null);
 
     const formData: any = ref(defaultValue());
@@ -307,12 +615,20 @@ export default defineComponent({
 
     const functionModel: string = ref(null);
     const fnEditorRef: any = ref(null);
+
+    const isSavedFunctionAction: string = ref("create");
+    const savedFunctionName: string = ref("");
+    const savedFunctionSelectedName: string = ref("");
+    const saveFunctionLoader = ref(false);
+
     const confirmDialogVisible: boolean = ref(false);
     let confirmCallback;
     let fnEditorobj: any = null;
     let streamName = "";
 
     const parser = new Parser();
+    const dateTimeRef = ref(null);
+    const saveViewLoader = ref(false);
 
     const {
       autoCompleteData,
@@ -326,6 +642,13 @@ export default defineComponent({
     const refreshTimeChange = (item) => {
       searchObj.meta.refreshInterval = item.value;
     };
+
+    const isSavedViewAction = ref("create");
+    const savedViewName = ref("");
+    const savedViewSelectedName = ref("");
+    const confirmDelete = ref(false);
+    const deleteViewID = ref("");
+    const savedViewDropdownModel = ref(false);
 
     watch(
       () => searchObj.data.stream.selectedStreamFields,
@@ -401,7 +724,7 @@ export default defineComponent({
       }
     };
 
-    const updateDateTime = (value: object) => {
+    const updateDateTime = async (value: object) => {
       searchObj.data.datetime = {
         startTime: value.startTime,
         endTime: value.endTime,
@@ -409,7 +732,19 @@ export default defineComponent({
           ? value.relativeTimePeriod
           : searchObj.data.datetime.relativeTimePeriod,
         type: value.relativeTimePeriod ? "relative" : "absolute",
+        selectedDate: value?.selectedDate,
+        selectedTime: value?.selectedTime,
       };
+
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      await nextTick();
+
+      if (searchObj.loading == false) {
+        searchObj.loading = true;
+        searchObj.runQuery = true;
+      }
 
       if (config.isCloud == "true" && value.userChangedValue) {
         segment.track("Button Click", {
@@ -431,7 +766,6 @@ export default defineComponent({
     };
 
     const udpateQuery = () => {
-      // alert(searchObj.data.query);
       if (queryEditorRef.value?.setValue)
         queryEditorRef.value.setValue(searchObj.data.query);
     };
@@ -544,19 +878,34 @@ export default defineComponent({
     onMounted(async () => {
       initFunctionEditor();
 
+      if (router.currentRoute.value.query.functionContent) {
+        searchObj.meta.toggleFunction = true;
+        fnEditorobj.setValue(
+          b64DecodeUnicode(router.currentRoute.value.query.functionContent)
+        );
+        fnEditorobj.layout();
+        searchObj.config.fnSplitterModel = 60;
+      }
+
       window.addEventListener("click", () => {
         fnEditorobj.layout();
         // queryEditorRef.value.resetEditorLayout();
       });
     });
 
+    onActivated(() => {
+      udpateQuery();
+    });
+
     const saveFunction = () => {
+      saveFunctionLoader.value = true;
       let callTransform: Promise<{ data: any }>;
       const content = fnEditorobj.getValue();
-
-      let fnName = functionModel.value;
-      if (typeof functionModel.value == "object") {
-        fnName = functionModel.value.name;
+      let fnName = "";
+      if (isSavedFunctionAction.value == "create") {
+        fnName = savedFunctionName.value;
+      } else {
+        fnName = savedFunctionSelectedName.value.name;
       }
 
       if (content.trim() == "") {
@@ -565,6 +914,7 @@ export default defineComponent({
           message:
             "The function field must contain a value and cannot be left empty.",
         });
+        saveFunctionLoader.value = false;
         return;
       }
 
@@ -574,6 +924,7 @@ export default defineComponent({
           type: "negative",
           message: "Function name is not valid.",
         });
+        saveFunctionLoader.value = false;
         return;
       }
 
@@ -581,9 +932,10 @@ export default defineComponent({
       formData.value.function = content;
       formData.value.transType = 0;
       formData.value.name = fnName;
+      searchObj.data.tempFunctionContent = content;
 
-      const result = functionOptions.value.find((obj) => obj.name === fnName);
-      if (!result) {
+      // const result = functionOptions.value.find((obj) => obj.name === fnName);
+      if (isSavedFunctionAction.value == "create") {
         callTransform = jsTransformService.create(
           store.state.selectedOrganization.identifier,
           formData.value
@@ -591,8 +943,6 @@ export default defineComponent({
 
         callTransform
           .then((res: { data: any }) => {
-            searchObj.data.tempFunctionLoading = false;
-
             $q.notify({
               type: "positive",
               message: res.data.message,
@@ -608,9 +958,14 @@ export default defineComponent({
               transType: 0,
               params: "row",
             });
+            store.dispatch("setSavedFunctionDialog", false);
+            isSavedFunctionAction.value = "create";
+            savedFunctionName.value = "";
+            saveFunctionLoader.value = false;
+            savedFunctionSelectedName.value = "";
           })
           .catch((err) => {
-            searchObj.data.tempFunctionLoading = false;
+            saveFunctionLoader.value = false;
             $q.notify({
               type: "negative",
               message:
@@ -620,7 +975,9 @@ export default defineComponent({
             });
           });
       } else {
+        saveFunctionLoader.value = false;
         showConfirmDialog(() => {
+          saveFunctionLoader.value = true;
           callTransform = jsTransformService.update(
             store.state.selectedOrganization.identifier,
             formData.value
@@ -628,8 +985,6 @@ export default defineComponent({
 
           callTransform
             .then((res: { data: any }) => {
-              searchObj.data.tempFunctionLoading = false;
-
               $q.notify({
                 type: "positive",
                 message: "Function updated successfully.",
@@ -646,9 +1001,14 @@ export default defineComponent({
               }
 
               functionOptions.value = searchObj.data.transforms;
+              store.dispatch("setSavedFunctionDialog", false);
+              isSavedFunctionAction.value = "create";
+              savedFunctionName.value = "";
+              saveFunctionLoader.value = false;
+              savedFunctionSelectedName.value = "";
             })
             .catch((err) => {
-              searchObj.data.tempFunctionLoading = false;
+              saveFunctionLoader.value = false;
               $q.notify({
                 type: "negative",
                 message:
@@ -662,13 +1022,12 @@ export default defineComponent({
     };
 
     const resetFunctionContent = () => {
-      formData.value.function = "";
       fnEditorobj.setValue("");
-      formData.value.name = "";
-      functionModel.value = "";
-      searchObj.data.tempFunctionLoading = false;
-      searchObj.data.tempFunctionName = "";
-      searchObj.data.tempFunctionContent = "";
+      store.dispatch("setSavedFunctionDialog", false);
+      isSavedFunctionAction.value = "create";
+      savedFunctionName.value = "";
+      saveFunctionLoader.value = false;
+      savedFunctionSelectedName.value = "";
     };
 
     const resetEditorLayout = () => {
@@ -678,10 +1037,35 @@ export default defineComponent({
       }, 100);
     };
 
-    const populateFunctionImplementation = (fnValue) => {
+    const populateFunctionImplementation = (fnValue, flag = false) => {
+      if (flag) {
+        $q.notify({
+          type: "positive",
+          message: `${fnValue.name} function applied successfully.`,
+          timeout: 3000,
+        });
+      }
+      searchObj.meta.toggleFunction = true;
+      searchObj.config.fnSplitterModel = 60;
       fnEditorobj.setValue(fnValue.function);
       searchObj.data.tempFunctionName = fnValue.name;
       searchObj.data.tempFunctionContent = fnValue.function;
+    };
+
+    const fnSavedFunctionDialog = () => {
+      const content = fnEditorobj.getValue();
+      if (content == "") {
+        $q.notify({
+          type: "negative",
+          message: "No function definition found.",
+        });
+        return;
+      }
+      store.dispatch("setSavedFunctionDialog", true);
+      isSavedFunctionAction.value = "create";
+      savedFunctionName.value = "";
+      saveFunctionLoader.value = false;
+      savedFunctionSelectedName.value = "";
     };
 
     const showConfirmDialog = (callback) => {
@@ -719,6 +1103,410 @@ export default defineComponent({
       emit("onChangeInterval");
     };
 
+    const fnSavedView = () => {
+      if (!searchObj.data.stream.selectedStream.value) {
+        $q.notify({
+          type: "negative",
+          message: "No stream available to save view.",
+        });
+        return;
+      }
+      store.dispatch("setSavedViewDialog", true);
+      isSavedViewAction.value = "create";
+      savedViewName.value = "";
+      saveViewLoader.value = false;
+      savedViewSelectedName.value = "";
+      savedViewDropdownModel.value = false;
+    };
+
+    const applySavedView = (item) => {
+      savedviewsService
+        .getViewDetail(
+          store.state.selectedOrganization.identifier,
+          item.view_id
+        )
+        .then(async (res) => {
+          if (res.status == 200) {
+            store.dispatch("setSavedViewFlag", true);
+            // const extractedObj = JSON.parse(b64DecodeUnicode(res.data.data));
+            const extractedObj = res.data.data;
+            // alert(JSON.stringify(searchObj.data.stream.selectedStream))
+            // if (
+            //   extractedObj.data.stream.selectedStream.value !=
+            //   searchObj.data.stream.selectedStream.value
+            // ) {
+            if (extractedObj.data?.timezone) {
+              store.dispatch("setTimezone", extractedObj.data.timezone);
+            }
+
+            extractedObj.data.stream.streamLists =
+              searchObj.data.stream.streamLists;
+            extractedObj.data.transforms = searchObj.data.transforms;
+            extractedObj.data.stream.functions =
+              searchObj.data.stream.functions;
+            extractedObj.data.histogram = {
+              xData: [],
+              yData: [],
+              chartParams: {},
+            };
+            extractedObj.data.savedViews = searchObj.data.savedViews;
+            extractedObj.data.queryResults = [];
+            extractedObj.meta.scrollInfo = {};
+            searchObj.value = mergeDeep(searchObj, extractedObj);
+            await nextTick();
+            if (extractedObj.data.tempFunctionContent != "") {
+              populateFunctionImplementation(
+                {
+                  name: "",
+                  function: searchObj.data.tempFunctionContent,
+                },
+                false
+              );
+              searchObj.data.tempFunctionContent =
+                extractedObj.data.tempFunctionContent;
+              searchObj.meta.functionEditorPlaceholderFlag = false;
+            } else {
+              populateFunctionImplementation(
+                {
+                  name: "",
+                  function: "",
+                },
+                false
+              );
+              searchObj.data.tempFunctionContent = "";
+              searchObj.meta.functionEditorPlaceholderFlag = true;
+            }
+            dateTimeRef.value.setSavedDate(searchObj.data.datetime);
+            if (searchObj.meta.refreshInterval != "0") {
+              onRefreshIntervalUpdate();
+            } else {
+              clearInterval(store.state.refreshIntervalID);
+            }
+            await updatedLocalLogFilterField();
+            await getStreams("logs", true);
+            $q.notify({
+              message: `${item.view_name} view applied successfully.`,
+              color: "positive",
+              position: "bottom",
+              timeout: 1000,
+            });
+            setTimeout(async () => {
+              searchObj.loading = true;
+              await getQueryData();
+              store.dispatch("setSavedViewFlag", false);
+              updateUrlQueryParams();
+            }, 1000);
+
+            // } else {
+            //   searchObj.value = mergeDeep(searchObj, extractedObj);
+            //   await nextTick();
+            //   updatedLocalLogFilterField();
+            //   handleRunQuery();
+            // }
+          } else {
+            store.dispatch("setSavedViewFlag", false);
+            $q.notify({
+              message: `Error while applying saved view. ${res.data.error_detail}`,
+              color: "negative",
+              position: "bottom",
+              timeout: 1000,
+            });
+          }
+        })
+        .catch((err) => {
+          store.dispatch("setSavedViewFlag", false);
+          $q.notify({
+            message: `Error while applying saved view.`,
+            color: "negative",
+            position: "bottom",
+            timeout: 1000,
+          });
+          console.log(err);
+        });
+      // const extractedObj = JSON.parse(b64DecodeUnicode(item.data));
+      // searchObj.value = mergeDeep(searchObj, extractedObj);
+      // await nextTick();
+      // updatedLocalLogFilterField();
+      // handleRunQuery();
+    };
+
+    const handleSavedView = () => {
+      if (isSavedViewAction.value == "create") {
+        if (
+          savedViewName.value == "" ||
+          !/^[A-Za-z0-9 ]+$/.test(savedViewName.value)
+        ) {
+          $q.notify({
+            message: `Please provide valid view name.`,
+            color: "negative",
+            position: "bottom",
+            timeout: 1000,
+          });
+        } else {
+          saveViewLoader.value = true;
+          createSavedViews(savedViewName.value);
+        }
+      } else {
+        if (savedViewSelectedName.value.view_id) {
+          saveViewLoader.value = true;
+          updateSavedViews(
+            savedViewSelectedName.value.view_id,
+            savedViewSelectedName.value.view_name
+          );
+        } else {
+          $q.notify({
+            message: `Please select saved view to update.`,
+            color: "negative",
+            position: "bottom",
+            timeout: 1000,
+          });
+        }
+      }
+    };
+
+    const deleteSavedViews = async () => {
+      try {
+        savedviewsService
+          .delete(
+            store.state.selectedOrganization.identifier,
+            deleteViewID.value
+          )
+          .then((res) => {
+            if (res.status == 200) {
+              $q.notify({
+                message: `View deleted successfully.`,
+                color: "positive",
+                position: "bottom",
+                timeout: 1000,
+              });
+              getSavedViews();
+            } else {
+              $q.notify({
+                message: `Error while deleting saved view. ${res.data.error_detail}`,
+                color: "negative",
+                position: "bottom",
+                timeout: 1000,
+              });
+            }
+          })
+          .catch((err) => {
+            $q.notify({
+              message: `Error while deleting saved view.`,
+              color: "negative",
+              position: "bottom",
+              timeout: 1000,
+            });
+            console.log(err);
+          });
+      } catch (e: any) {
+        console.log("Error while getting saved views", e);
+      }
+    };
+
+    const getSearchObj = () => {
+      try {
+        delete searchObj.meta.scrollInfo;
+        delete searchObj?.value;
+        let savedSearchObj = toRaw(searchObj);
+        savedSearchObj = JSON.parse(JSON.stringify(savedSearchObj));
+
+        delete savedSearchObj.data.queryResults;
+        delete savedSearchObj.data.histogram;
+        delete savedSearchObj.data.sortedQueryResults;
+        delete savedSearchObj.data.stream.streamLists;
+        delete savedSearchObj.data.stream.functions;
+        delete savedSearchObj.data.streamResults;
+        delete savedSearchObj.data.savedViews;
+        delete savedSearchObj.data.transforms;
+
+        savedSearchObj.data.timezone = store.state.timezone;
+        delete savedSearchObj.value;
+
+        return savedSearchObj;
+        // return b64EncodeUnicode(JSON.stringify(savedSearchObj));
+      } catch (e) {
+        console.log("Error while encoding search obj", e);
+      }
+    };
+
+    const createSavedViews = (viewName: string) => {
+      try {
+        if (viewName.trim() == "") {
+          $q.notify({
+            message: `Please provide valid view name.`,
+            color: "negative",
+            position: "bottom",
+            timeout: 1000,
+          });
+          saveViewLoader.value = false;
+          return;
+        }
+
+        const viewObj: any = {
+          data: getSearchObj(),
+          view_name: viewName,
+        };
+
+        savedviewsService
+          .post(store.state.selectedOrganization.identifier, viewObj)
+          .then((res) => {
+            if (res.status == 200) {
+              store.dispatch("setSavedViewDialog", false);
+              if (searchObj.data.hasOwnProperty("savedViews") == false) {
+                searchObj.data.savedViews = [];
+              }
+              searchObj.data.savedViews.push({
+                org_id: res.data.org_id,
+                payload: viewObj.data,
+                view_id: res.data.view_id,
+                view_name: viewName,
+              });
+              $q.notify({
+                message: `View created successfully.`,
+                color: "positive",
+                position: "bottom",
+                timeout: 1000,
+              });
+              getSavedViews();
+              isSavedViewAction.value = "create";
+              savedViewName.value = "";
+              saveViewLoader.value = false;
+            } else {
+              saveViewLoader.value = false;
+              $q.notify({
+                message: `Error while creating saved view. ${res.data.error_detail}`,
+                color: "negative",
+                position: "bottom",
+                timeout: 1000,
+              });
+            }
+          })
+          .catch((err) => {
+            saveViewLoader.value = false;
+            $q.notify({
+              message: `Error while creating saved view.`,
+              color: "negative",
+              position: "bottom",
+              timeout: 1000,
+            });
+            console.log(err);
+          });
+      } catch (e: any) {
+        isSavedViewAction.value = "create";
+        savedViewName.value = "";
+        saveViewLoader.value = false;
+        $q.notify({
+          message: `Error while saving view: ${e}`,
+          color: "negative",
+          position: "bottom",
+          timeout: 1000,
+        });
+        console.log("Error while saving view", e);
+      }
+    };
+
+    const updateSavedViews = (viewID: string, viewName: string) => {
+      try {
+        const viewObj: any = {
+          data: getSearchObj(),
+          view_name: viewName,
+        };
+
+        savedviewsService
+          .put(store.state.selectedOrganization.identifier, viewID, viewObj)
+          .then((res) => {
+            if (res.status == 200) {
+              store.dispatch("setSavedViewDialog", false);
+              //update the payload and view_name in savedViews object based on id
+              searchObj.data.savedViews.forEach(
+                (item: { view_id: string }, index: string | number) => {
+                  if (item.view_id == viewID) {
+                    searchObj.data.savedViews[index].payload = viewObj.data;
+                    searchObj.data.savedViews[index].view_name = viewName;
+                  }
+                }
+              );
+
+              $q.notify({
+                message: `View updated successfully.`,
+                color: "positive",
+                position: "bottom",
+                timeout: 1000,
+              });
+              isSavedViewAction.value = "create";
+              savedViewSelectedName.value = "";
+              saveViewLoader.value = false;
+            } else {
+              saveViewLoader.value = false;
+              $q.notify({
+                message: `Error while updating saved view. ${res.data.error_detail}`,
+                color: "negative",
+                position: "bottom",
+                timeout: 1000,
+              });
+            }
+          })
+          .catch((err) => {
+            saveViewLoader.value = false;
+            $q.notify({
+              message: `Error while updating saved view.`,
+              color: "negative",
+              position: "bottom",
+              timeout: 1000,
+            });
+            console.log(err);
+          });
+      } catch (e: any) {
+        isSavedViewAction.value = "create";
+        savedViewSelectedName.value = "";
+        saveViewLoader.value = false;
+        $q.notify({
+          message: `Error while saving view: ${e}`,
+          color: "negative",
+          position: "bottom",
+          timeout: 1000,
+        });
+        console.log("Error while saving view", e);
+      }
+    };
+
+    const shareLink = () => {
+      const queryObj = generateURLQuery(true);
+      const queryString = Object.entries(queryObj)
+        .map(
+          ([key, value]) =>
+            `${encodeURIComponent(key)}=${encodeURIComponent(value)}`
+        )
+        .join("&");
+
+      let shareURL = window.location.origin + window.location.pathname;
+
+      if (queryString != "") {
+        shareURL += "?" + queryString;
+      }
+
+      copyToClipboard(shareURL)
+        .then(() => {
+          $q.notify({
+            type: "positive",
+            message: "Link Copied Successfully!",
+            timeout: 5000,
+          });
+        })
+        .catch(() => {
+          $q.notify({
+            type: "negative",
+            message: "Error while copy link.",
+            timeout: 5000,
+          });
+        });
+    };
+
+    const resetFilters = () => {
+      searchObj.data.query = "";
+      searchObj.data.editorValue = "";
+    };
+
     return {
       t,
       store,
@@ -752,6 +1540,26 @@ export default defineComponent({
       autoCompleteSuggestions,
       onRefreshIntervalUpdate,
       updateTimezone,
+      dateTimeRef,
+      fnSavedView,
+      applySavedView,
+      isSavedViewAction,
+      savedViewName,
+      savedViewSelectedName,
+      handleSavedView,
+      deleteSavedViews,
+      deleteViewID,
+      confirmDelete,
+      saveViewLoader,
+      savedViewDropdownModel,
+      fnSavedFunctionDialog,
+      isSavedFunctionAction,
+      savedFunctionName,
+      savedFunctionSelectedName,
+      saveFunctionLoader,
+      shareLink,
+      getImageURL,
+      resetFilters,
     };
   },
   computed: {
@@ -760,9 +1568,6 @@ export default defineComponent({
     },
     toggleFunction() {
       return this.searchObj.meta.toggleFunction;
-    },
-    selectFunction() {
-      return this.functionModel;
     },
     confirmMessage() {
       return "Are you sure you want to update the function?";
@@ -827,14 +1632,8 @@ export default defineComponent({
       }
       this.resetEditorLayout();
     },
-    selectFunction(newVal) {
-      if (newVal != "") {
-        this.searchObj.config.fnSplitterModel = 60;
-        this.searchObj.meta.toggleFunction = true;
-      }
-    },
     resetFunction(newVal) {
-      if (newVal == "") {
+      if (newVal == "" && store.state.savedViewFlag == false) {
         this.resetFunctionContent();
       }
     },
@@ -1035,7 +1834,7 @@ export default defineComponent({
 }
 
 .query-editor-container {
-  height: calc(100% - 37px) !important;
+  height: calc(100% - 30px) !important;
 }
 
 .logs-auto-refresh-interval {
@@ -1043,6 +1842,45 @@ export default defineComponent({
     min-height: 30px;
     max-height: 30px;
     padding: 0 4px;
+  }
+}
+
+.saved-views-dropdown {
+  border-radius: 4px;
+  button {
+    padding: 4px 5px;
+  }
+}
+
+.savedview-dropdown {
+  width: 215px;
+  display: inline-block;
+  border: 1px solid #dbdbdb;
+
+  .q-field__input {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .q-field__native,
+  .q-field__control {
+    min-height: 29px !important;
+    height: 29px;
+    padding: 0px 0px 0px 4px;
+  }
+
+  .q-field__marginal {
+    height: 30px;
+  }
+}
+
+.saved-view-item {
+  padding: 4px 5px !important;
+}
+
+.body--dark{
+  .btn-function {
+    filter: brightness(100);
   }
 }
 </style>

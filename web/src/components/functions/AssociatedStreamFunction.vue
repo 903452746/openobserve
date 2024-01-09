@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <!-- eslint-disable vue/v-on-event-hyphenation -->
@@ -35,8 +36,7 @@
       <template v-slot:header="props">
         <q-tr :props="props">
           <q-th auto-width />
-          <q-th v-for="col in props.cols" :key="col.name"
-:props="props">
+          <q-th v-for="col in props.cols" :key="col.name" :props="props">
             {{ col.label }}
           </q-th>
         </q-tr>
@@ -59,13 +59,15 @@
               "
             />
           </q-td>
-          <q-td v-for="col in props.cols" :key="col.name"
-:props="props">
+          <q-td v-for="col in props.cols" :key="col.name" :props="props">
             {{ col.value }}
           </q-td>
         </q-tr>
         <q-tr
-          v-show="expandedRow.name == props.row.name"
+          v-show="
+            expandedRow.name == props.row.name &&
+            expandedRow.stream_type === props.row.stream_type
+          "
           :props="props"
           no-hover
           style="
@@ -76,18 +78,18 @@
         >
           <q-td colspan="100%">
             <div
-              v-show="loadingFunctions == props.row.name"
+              v-show="loadingFunctions"
               class="q-pl-md q-py-xs"
               style="height: 60px"
             >
               <q-inner-loading
                 size="sm"
-                :showing="loadingFunctions == props.row.name"
+                :showing="loadingFunctions"
                 label="Fetching functions..."
                 label-style="font-size: 1.1em"
               />
             </div>
-            <div v-show="loadingFunctions != props.row.name">
+            <div v-show="!loadingFunctions">
               <q-table
                 class="border"
                 hide-bottom

@@ -1,34 +1,38 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use bytes::Buf;
-use chrono::{DateTime, Duration, TimeZone, Utc};
-use futures::future::try_join_all;
-use once_cell::sync::Lazy;
 use std::{
     collections::HashSet,
     io::{BufRead, BufReader},
     sync::atomic,
 };
+
+use bytes::Buf;
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use config::{meta::stream::FileKey, CONFIG};
+use futures::future::try_join_all;
+use once_cell::sync::Lazy;
 use tokio::{sync::RwLock, time};
 
-use crate::common::{
-    infra::{cache::stats, config::CONFIG, file_list as infra_file_list, storage},
-    meta::common::FileKey,
-    utils::json,
+use crate::{
+    common::{
+        infra::{cache::stats, file_list as infra_file_list, storage},
+        utils::json,
+    },
+    service::db,
 };
-use crate::service::db;
 
 pub static LOADED_FILES: Lazy<RwLock<HashSet<String>>> =
     Lazy::new(|| RwLock::new(HashSet::with_capacity(24)));
@@ -44,7 +48,8 @@ pub async fn cache(prefix: &str, force: bool) -> Result<(), anyhow::Error> {
     let start = std::time::Instant::now();
     let mut stats = ProcessStats::default();
 
-    let files = storage::list(&prefix).await?;
+    let mut files = storage::list(&prefix).await?;
+    files.reverse(); // reverse order let deleted files be the first
     let files_num = files.len();
     log::info!("Load file_list [{prefix}] gets {} files", files_num);
     if files.is_empty() {
@@ -159,12 +164,24 @@ async fn process_file(file: &str) -> Result<Vec<FileKey>, anyhow::Error> {
     let uncompress_reader = BufReader::new(uncompress.reader());
     // parse file list
     let mut records = Vec::with_capacity(1024);
-    for line in uncompress_reader.lines() {
+    for (line_no, line) in uncompress_reader.lines().enumerate() {
         let line = line?;
         if line.is_empty() {
             continue;
         }
-        let item: FileKey = json::from_slice(line.as_bytes())?;
+        let item: FileKey = match json::from_slice(line.as_bytes()) {
+            Ok(item) => item,
+            Err(err) => {
+                log::error!(
+                    "parse remote file list failed:\nfile: {}\nline_no: {}\nline: {}\nerr: {}",
+                    file,
+                    line_no,
+                    line,
+                    err
+                );
+                continue;
+            }
+        };
         // check backlist
         if !super::BLOCKED_ORGS.is_empty() {
             let columns = item.key.split('/').collect::<Vec<&str>>();
@@ -175,6 +192,9 @@ async fn process_file(file: &str) -> Result<Vec<FileKey>, anyhow::Error> {
             }
         }
         // check deleted files
+        if super::DELETED_FILES.contains_key(&item.key) {
+            continue;
+        }
         if item.deleted {
             super::DELETED_FILES.insert(item.key, item.meta.to_owned());
             continue;
@@ -237,7 +257,7 @@ pub async fn cache_all() -> Result<(), anyhow::Error> {
     for prefix in prefixes {
         cache(&prefix, false).await?;
     }
-    LOADED_ALL_FILES.store(true, atomic::Ordering::Relaxed);
+    LOADED_ALL_FILES.store(true, atomic::Ordering::Release);
     Ok(())
 }
 

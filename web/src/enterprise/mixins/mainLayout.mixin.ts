@@ -25,7 +25,7 @@ const MainLayoutCloudMixin = {
       // });
       linksList.value.splice(5, 0, {
         title: t("menu.function"),
-        icon: "functions",
+        icon: "img:" + getImageURL("images/common/function.svg"),
         link: "/functions",
       });
       linksList.value.splice(7, 0, {
@@ -61,10 +61,13 @@ const MainLayoutCloudMixin = {
      */
     const getOrganizationThreshold = async (store: any) => {
       const organization: {
-        identifier: "";
-        subscription_type: "Free-Plan-USD-Monthly";
+        identifier: string;
+        subscription_type: string;
       } = store.state.selectedOrganization;
-      if (organization.subscription_type == "Free-Plan-USD-Monthly") {
+      if (
+        organization.subscription_type == config.freePlan ||
+        organization.subscription_type == ""
+      ) {
         await billingService
           .get_quota_threshold(organization.identifier)
           .then((res: any) => {

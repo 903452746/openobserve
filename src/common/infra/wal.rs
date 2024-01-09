@@ -1,22 +1,24 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{path::Path, sync::Arc};
 
 use ahash::HashMap;
-use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
+use config::{ider, meta::stream::StreamType, metrics, CONFIG, FILE_EXT_JSON};
 use once_cell::sync::Lazy;
-use std::{path::Path, sync::Arc};
 use tokio::{
     fs::{create_dir_all, File, OpenOptions},
     io::AsyncWriteExt,
@@ -24,25 +26,13 @@ use tokio::{
 };
 
 use crate::common::{
-    infra::{
-        config::{RwAHashSet, CONFIG, FILE_EXT_JSON},
-        ider, metrics,
-    },
-    meta::{
-        stream::{PartitionTimeLevel, StreamParams},
-        StreamType,
-    },
+    infra::config::SEARCHING_FILES,
+    meta::stream::{PartitionTimeLevel, StreamParams},
     utils::asynchronism::file::get_file_contents,
 };
 
-// SEARCHING_FILES for searching files, in use, should not move to s3
-static SEARCHING_FILES: Lazy<RwAHashSet<String>> = Lazy::new(|| RwLock::new(Default::default()));
-
 // MANAGER for manage using WAL files, in use, should not move to s3
 static MANAGER: Lazy<Manager> = Lazy::new(Manager::new);
-
-// MEMORY_FILES for in-memory mode WAL files, already not in use, should move to s3
-pub static MEMORY_FILES: Lazy<MemoryFiles> = Lazy::new(MemoryFiles::new);
 
 type RwData = RwLock<HashMap<String, Arc<RwFile>>>;
 
@@ -50,14 +40,8 @@ struct Manager {
     data: Arc<Vec<RwData>>,
 }
 
-pub struct MemoryFiles {
-    pub data: Arc<RwLock<HashMap<String, Bytes>>>,
-}
-
 pub struct RwFile {
-    use_cache: bool,
     file: Option<RwLock<File>>,
-    cache: Option<RwLock<BytesMut>>,
     org_id: String,
     stream_name: String,
     stream_type: StreamType,
@@ -68,7 +52,6 @@ pub struct RwFile {
 
 pub async fn init() -> Result<(), anyhow::Error> {
     _ = MANAGER.data.len();
-    _ = MEMORY_FILES.list("").await.len();
     _ = SEARCHING_FILES.read().await.len();
     Ok(())
 }
@@ -78,10 +61,9 @@ pub async fn get_or_create(
     stream: StreamParams,
     partition_time_level: Option<PartitionTimeLevel>,
     key: &str,
-    use_cache: bool,
 ) -> Arc<RwFile> {
     MANAGER
-        .get_or_create(thread_id, stream, partition_time_level, key, use_cache)
+        .get_or_create(thread_id, stream, partition_time_level, key)
         .await
 }
 
@@ -89,54 +71,11 @@ pub async fn check_in_use(stream: StreamParams, file_name: &str) -> bool {
     MANAGER.check_in_use(stream, file_name).await
 }
 
-pub async fn get_search_in_memory_files(
-    org_id: &str,
-    stream_name: &str,
-    stream_type: StreamType,
-) -> Result<Vec<(String, Vec<u8>)>, std::io::Error> {
-    if !CONFIG.common.wal_memory_mode_enabled {
-        return Ok(vec![]);
-    }
-
-    let mut files = Vec::new();
-    for file in MANAGER.data.iter() {
-        for (_key, file) in file.read().await.iter() {
-            if file.org_id == org_id
-                && file.stream_name == stream_name
-                && file.stream_type == stream_type
-            {
-                if let Ok(data) = file.read().await {
-                    files.push((file.wal_name(), data));
-                }
-            }
-        }
-    }
-
-    let prefix = format!("files/{org_id}/{stream_type}/{stream_name}/");
-    for (file, data) in MEMORY_FILES.list(&prefix).await.iter() {
-        files.push((file.to_owned(), data.to_vec()));
-    }
-
-    Ok(files)
-}
-
 pub async fn flush_all_to_disk() {
     for data in MANAGER.data.iter() {
         for (_, file) in data.read().await.iter() {
             file.sync().await;
         }
-    }
-
-    for (file, data) in MEMORY_FILES.list("").await.iter() {
-        let file_path = format!("{}{}", CONFIG.common.data_wal_dir, file);
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .append(true)
-            .open(file_path)
-            .await
-            .unwrap();
-        f.write_all(data).await.unwrap();
     }
 }
 
@@ -168,7 +107,10 @@ impl Manager {
             "{}/{}/{}/{key}",
             stream.org_id, stream.stream_type, stream.stream_name
         );
-        let manager = self.data.get(thread_id).unwrap().read().await;
+        let Some(locker) = self.data.get(thread_id) else {
+            return None;
+        };
+        let manager = locker.read().await;
         let file = match manager.get(&full_key) {
             Some(file) => file.clone(),
             None => {
@@ -181,7 +123,7 @@ impl Manager {
         if file.size().await >= (CONFIG.limit.max_file_size_on_disk as i64)
             || file.expired() <= Utc::now().timestamp()
         {
-            let mut manager = self.data.get(thread_id).unwrap().write().await;
+            let mut manager = locker.write().await;
             manager.remove(&full_key);
             manager.shrink_to_fit();
             file.sync().await;
@@ -197,7 +139,6 @@ impl Manager {
         stream: StreamParams,
         partition_time_level: Option<PartitionTimeLevel>,
         key: &str,
-        use_cache: bool,
     ) -> Arc<RwFile> {
         let stream_type = stream.stream_type;
         let full_key = format!(
@@ -208,9 +149,7 @@ impl Manager {
         if let Some(f) = data.get(&full_key) {
             return f.clone();
         }
-
-        let file =
-            Arc::new(RwFile::new(thread_id, stream, partition_time_level, key, use_cache).await);
+        let file = Arc::new(RwFile::new(thread_id, stream, partition_time_level, key).await);
         if !stream_type.eq(&StreamType::EnrichmentTables) {
             data.insert(full_key, file.clone());
         };
@@ -223,12 +162,11 @@ impl Manager {
         stream: StreamParams,
         partition_time_level: Option<PartitionTimeLevel>,
         key: &str,
-        use_cache: bool,
     ) -> Arc<RwFile> {
         if let Some(file) = self.get(thread_id, stream.clone(), key).await {
             file
         } else {
-            self.create(thread_id, stream, partition_time_level, key, use_cache)
+            self.create(thread_id, stream, partition_time_level, key)
                 .await
         }
     }
@@ -250,56 +188,12 @@ impl Manager {
     }
 }
 
-impl Default for MemoryFiles {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MemoryFiles {
-    pub fn new() -> MemoryFiles {
-        Self {
-            data: Arc::new(RwLock::new(HashMap::default())),
-        }
-    }
-
-    pub async fn list(&self, prefix: &str) -> HashMap<String, Bytes> {
-        if prefix.is_empty() {
-            self.data.read().await.clone()
-        } else {
-            self.data
-                .read()
-                .await
-                .iter()
-                .filter_map(|(k, v)| {
-                    if k.starts_with(prefix) {
-                        Some((k.clone(), v.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        }
-    }
-
-    pub async fn insert(&self, file_name: String, data: Bytes) {
-        self.data.write().await.insert(file_name, data);
-    }
-
-    pub async fn remove(&self, file_name: &str) {
-        let mut data = self.data.write().await;
-        data.remove(file_name);
-        data.shrink_to_fit();
-    }
-}
-
 impl RwFile {
     async fn new(
         thread_id: usize,
         stream: StreamParams,
         partition_time_level: Option<PartitionTimeLevel>,
         key: &str,
-        use_cache: bool,
     ) -> RwFile {
         let mut dir_path = format!(
             "{}files/{}/{}/{}/",
@@ -317,22 +211,17 @@ impl RwFile {
             .await
             .unwrap();
 
-        let (file, cache) = if use_cache {
-            (None, Some(RwLock::new(BytesMut::with_capacity(524288)))) // 512KB
-        } else {
-            let f = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .append(true)
-                .open(&file_path)
-                .await
-                .unwrap_or_else(|e| panic!("open wal file [{file_path}] error: {e}"));
-            (Some(RwLock::new(f)), None)
-        };
+        let f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .await
+            .unwrap_or_else(|e| panic!("open wal file [{file_path}] error: {e}"));
+        let file = Some(RwLock::new(f));
 
         let time_now: DateTime<Utc> = Utc::now();
         let level_duration = partition_time_level.unwrap_or_default().duration();
-        let ttl = if level_duration > 0 {
+        let ttl = if !CONFIG.limit.ignore_file_retention_by_stream && level_duration > 0 {
             let time_end_day = Utc
                 .with_ymd_and_hms(
                     time_now.year(),
@@ -346,7 +235,8 @@ impl RwFile {
                 .timestamp();
             let expired = time_now.timestamp() + level_duration;
             if expired > time_end_day {
-                // if the file expired time is tomorrow, it should be deleted at 23:59:59 + 10min
+                // if the file expired time is tomorrow, it should be deleted at 23:59:59 +
+                // 10min
                 time_end_day + CONFIG.limit.max_file_retention_time as i64
             } else {
                 expired
@@ -356,9 +246,7 @@ impl RwFile {
         };
 
         RwFile {
-            use_cache,
             file,
-            cache,
             org_id: stream.org_id.to_string(),
             stream_name: stream.stream_name.to_string(),
             stream_type: stream.stream_type,
@@ -372,91 +260,50 @@ impl RwFile {
     pub async fn write(&self, data: &[u8]) {
         // metrics
         metrics::INGEST_WAL_USED_BYTES
-            .with_label_values(&[
-                &self.org_id,
-                &self.stream_name,
-                self.stream_type.to_string().as_str(),
-            ])
+            .with_label_values(&[&self.org_id, self.stream_type.to_string().as_str()])
             .add(data.len() as i64);
         metrics::INGEST_WAL_WRITE_BYTES
-            .with_label_values(&[
-                &self.org_id,
-                &self.stream_name,
-                self.stream_type.to_string().as_str(),
-            ])
+            .with_label_values(&[&self.org_id, self.stream_type.to_string().as_str()])
             .inc_by(data.len() as u64);
-        if self.use_cache {
-            self.cache
-                .as_ref()
-                .unwrap()
-                .write()
-                .await
-                .extend_from_slice(data);
-        } else {
-            self.file
-                .as_ref()
-                .unwrap()
-                .write()
-                .await
-                .write_all(data)
-                .await
-                .unwrap();
-        }
+
+        self.file
+            .as_ref()
+            .unwrap()
+            .write()
+            .await
+            .write_all(data)
+            .await
+            .unwrap();
     }
 
     #[inline]
     pub async fn read(&self) -> Result<Vec<u8>, std::io::Error> {
-        if self.use_cache {
-            Ok(self.cache.as_ref().unwrap().read().await.to_owned().into())
-        } else {
-            get_file_contents(&self.full_name()).await
-        }
+        get_file_contents(&self.full_name()).await
     }
 
     #[inline]
     pub async fn sync(&self) {
-        if self.use_cache {
-            let file_path = format!("{}{}", self.dir, self.name);
-            let file_path = file_path.strip_prefix(&CONFIG.common.data_wal_dir).unwrap();
-            MEMORY_FILES
-                .insert(
-                    file_path.to_string(),
-                    self.cache
-                        .as_ref()
-                        .unwrap()
-                        .read()
-                        .await
-                        .to_owned()
-                        .freeze(),
-                )
-                .await;
-        } else {
-            self.file
-                .as_ref()
-                .unwrap()
-                .write()
-                .await
-                .sync_all()
-                .await
-                .unwrap()
-        }
+        self.file
+            .as_ref()
+            .unwrap()
+            .write()
+            .await
+            .sync_all()
+            .await
+            .unwrap()
     }
 
     #[inline]
     pub async fn size(&self) -> i64 {
-        if self.use_cache {
-            self.cache.as_ref().unwrap().write().await.len() as i64
-        } else {
-            self.file
-                .as_ref()
-                .unwrap()
-                .read()
-                .await
-                .metadata()
-                .await
-                .unwrap()
-                .len() as i64
-        }
+        self.file
+            .as_ref()
+            .unwrap()
+            .read()
+            .await
+            .metadata()
+            .await
+            .unwrap()
+            .len() as i64
     }
 
     #[inline]
@@ -516,24 +363,12 @@ mod tests {
         let stream_type = StreamType::Logs;
         let stream = StreamParams::new(org_id, stream_name, stream_type);
         let key = "test_key";
-        let use_cache = false;
-        let file = get_or_create(thread_id, stream, None, key, use_cache).await;
+        let file = get_or_create(thread_id, stream, None, key).await;
         let data = "test_data".to_string().into_bytes();
         file.write(&data).await;
         assert_eq!(file.read().await.unwrap(), data);
         assert_eq!(file.size().await, data.len() as i64);
         assert!(file.name().contains(&format!("{}/{}", thread_id, key)));
-    }
-
-    #[tokio::test]
-    async fn test_wal_memory_files() {
-        let memory_files = MemoryFiles::new();
-        let file_name = "test_file".to_string();
-        let data = Bytes::from("test_data".to_string().into_bytes());
-        memory_files.insert(file_name.clone(), data.clone()).await;
-        assert_eq!(memory_files.list("").await.len(), 1);
-        memory_files.remove(&file_name).await;
-        assert_eq!(memory_files.list("").await.len(), 0);
     }
 
     #[tokio::test]
@@ -544,8 +379,7 @@ mod tests {
         let stream_type = StreamType::Logs;
         let stream = StreamParams::new(org_id, stream_name, stream_type);
         let key = "test_key";
-        let use_cache = false;
-        let file = RwFile::new(thread_id, stream, None, key, use_cache).await;
+        let file = RwFile::new(thread_id, stream, None, key).await;
         let data = "test_data".to_string().into_bytes();
         file.write(&data).await;
         assert_eq!(file.read().await.unwrap(), data);

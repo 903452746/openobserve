@@ -1,37 +1,33 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::common::{
-    infra::{
-        cluster,
-        config::{CONFIG, FILE_EXT_PARQUET},
-        ider,
-    },
-    meta::StreamType,
-};
+use config::{ider, meta::stream::StreamType, CONFIG, FILE_EXT_PARQUET};
+
+use crate::common::infra::cluster;
 
 pub mod broadcast;
-pub mod disk;
-pub mod memory;
+pub mod json;
+pub mod parquet;
 
 pub async fn run() -> Result<(), anyhow::Error> {
     if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) || CONFIG.common.ingester_sidecar_querier {
         return Ok(()); // not an ingester, no need to init job
     }
 
-    tokio::task::spawn(async move { disk::run().await });
-    tokio::task::spawn(async move { memory::run().await });
+    tokio::task::spawn(async move { json::run().await });
+    tokio::task::spawn(async move { parquet::run().await });
     tokio::task::spawn(async move { broadcast::run().await });
 
     Ok(())
@@ -43,7 +39,7 @@ pub fn generate_storage_file_name(
     stream_name: &str,
     wal_file_name: &str,
 ) -> String {
-    // eg: 0/2023/08/21/08/8b8a5451bbe1c44b/7099303408192061440f3XQ2p.json
+    // eg: 0/2023/08/21/08/8b8a5451bbe1c44b/ip=1234/7099303408192061440f3XQ2p.json
     let file_columns = wal_file_name.splitn(7, '/').collect::<Vec<&str>>();
     let stream_key = format!("{}/{}/{}", org_id, stream_type, stream_name);
     let file_date = format!(

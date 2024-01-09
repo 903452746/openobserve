@@ -1,20 +1,26 @@
 // Copyright 2023 Zinc Labs Inc.
-
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-
-//      http:www.apache.org/licenses/LICENSE-2.0
-
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import moment from "moment";
-import { formatDate, formatUnitValue, getUnitValue } from "./convertDataIntoUnitValue";
+import {
+  formatDate,
+  formatUnitValue,
+  getUnitValue,
+} from "./convertDataIntoUnitValue";
 import { utcToZonedTime } from "date-fns-tz";
+import { calculateGridPositions } from "./calculateGridForSubPlot";
 
 /**
  * Converts PromQL data into a format suitable for rendering a chart.
@@ -27,9 +33,10 @@ import { utcToZonedTime } from "date-fns-tz";
 export const convertPromQLData = (
   panelSchema: any,
   searchQueryData: any,
-  store: any
+  store: any,
+  chartPanelRef: any,
+  hoveredSeriesState: any
 ) => {
-  
   // if no data than return it
   if (
     !Array.isArray(searchQueryData) ||
@@ -40,13 +47,8 @@ export const convertPromQLData = (
     return { options: null };
   }
 
-  // It is used to keep track of the current series name in tooltip to bold the series name
-  let currentSeriesName = "";
-
-  // set the current series name (will be set at chartrenderer on mouseover)
-  const setCurrentSeriesValue = (newValue: any) => {
-    currentSeriesName = newValue ?? "";
-  };
+  // flag to check if the data is time seriesc
+  let isTimeSeriesFlag = true;
 
   const legendPosition = getLegendPosition(
     panelSchema?.config?.legends_position
@@ -63,22 +65,28 @@ export const convertPromQLData = (
       textStyle: {
         fontSize: 12,
       },
+      formatter: (params: any) => {
+        hoveredSeriesState?.value?.setHoveredSeriesName(params?.name);
+        return params?.name;
+      },
     },
     textStyle: {
       width: 150,
       overflow: "truncate",
       rich: {
         a: {
-            fontWeight: 'bold'
+          fontWeight: "bold",
         },
         b: {
-            fontStyle: 'normal'
-        }
-      }
+          fontStyle: "normal",
+        },
+      },
     },
     formatter: (name: any) => {
-      return name == currentSeriesName ? '{a|' + name + '}': '{b|' + name + '}'
-    }
+      return name == hoveredSeriesState?.value?.hoveredSeriesName
+        ? "{a|" + name + "}"
+        : "{b|" + name + "}";
+    },
   };
 
   // Additional logic to adjust the legend position
@@ -95,14 +103,19 @@ export const convertPromQLData = (
     backgroundColor: "transparent",
     legend: legendConfig,
     grid: {
-      containLabel: true,
-      left: "30",
-      right:
-        legendConfig.orient === "vertical" && panelSchema.config?.show_legends
-          ? 220
-          : "40",
+      containLabel: panelSchema.config?.axis_width == null ? true : false,
+      //based on config width set grid
+      left: panelSchema.config?.axis_width ?? 5,
+      right: 20,
       top: "15",
-      bottom: "30",
+      bottom:
+        legendConfig.orient === "horizontal" && panelSchema.config?.show_legends
+          ? panelSchema.config?.axis_width == null
+            ? 30
+            : 50
+          : panelSchema.config?.axis_width == null
+          ? 5
+          : "25",
     },
     tooltip: {
       show: true,
@@ -112,17 +125,25 @@ export const convertPromQLData = (
         fontSize: 12,
       },
       enterable: true,
-      backgroundColor: store.state.theme === "dark" ? "rgba(0,0,0,1)" : "rgba(255,255,255,1)",
+      backgroundColor:
+        store.state.theme === "dark" ? "rgba(0,0,0,1)" : "rgba(255,255,255,1)",
       extraCssText: "max-height: 200px; overflow: auto; max-width: 500px",
       formatter: function (name: any) {
+        // show tooltip for hovered panel only for other we only need axis so just return empty string
+        if (
+          hoveredSeriesState?.value &&
+          hoveredSeriesState?.value?.panelId != panelSchema.id
+        )
+          return "";
         if (name.length == 0) return "";
 
         const date = new Date(name[0].data[0]);
 
         // get the current series index from name
         const currentSeriesIndex = name.findIndex(
-          (it: any) => it.seriesName == currentSeriesName
-        )
+          (it: any) =>
+            it.seriesName == hoveredSeriesState?.value?.hoveredSeriesName
+        );
 
         // swap current hovered series index to top in tooltip
         const temp = name[0];
@@ -130,15 +151,15 @@ export const convertPromQLData = (
         name[currentSeriesIndex != -1 ? currentSeriesIndex : 0] = temp;
 
         let hoverText = name.map((it: any) => {
-
           // check if the series is the current series being hovered
           // if have than bold it
-          if(it?.seriesName == currentSeriesName)
+          if (it?.seriesName == hoveredSeriesState?.value?.hoveredSeriesName)
             return `<strong>${it.marker} ${it.seriesName} : ${formatUnitValue(
               getUnitValue(
                 it.data[1],
                 panelSchema.config?.unit,
-                panelSchema.config?.unit_custom
+                panelSchema.config?.unit_custom,
+                panelSchema.config?.decimals
               )
             )} </strong>`;
           // else normal text
@@ -147,7 +168,8 @@ export const convertPromQLData = (
               getUnitValue(
                 it.data[1],
                 panelSchema.config?.unit,
-                panelSchema.config?.unit_custom
+                panelSchema.config?.unit_custom,
+                panelSchema.config?.decimals
               )
             )}`;
         });
@@ -159,6 +181,7 @@ export const convertPromQLData = (
         type: "cross",
         label: {
           fontSize: 12,
+          precision: panelSchema.config?.decimals,
           show: true,
           formatter: function (name: any) {
             if (name.axisDimension == "y")
@@ -166,7 +189,8 @@ export const convertPromQLData = (
                 getUnitValue(
                   name.value,
                   panelSchema.config?.unit,
-                  panelSchema.config?.unit_custom
+                  panelSchema.config?.unit_custom,
+                  panelSchema.config?.decimals
                 )
               );
             const date = new Date(name.value);
@@ -177,6 +201,15 @@ export const convertPromQLData = (
     },
     xAxis: {
       type: "time",
+      axisLine: {
+        show: panelSchema.config?.axis_border_show || false,
+      },
+      splitLine: {
+        show: true,
+        lineStyle: {
+          opacity: 0.5,
+        },
+      },
     },
     yAxis: {
       type: "value",
@@ -186,31 +219,70 @@ export const convertPromQLData = (
             getUnitValue(
               name,
               panelSchema.config?.unit,
-              panelSchema.config?.unit_custom
+              panelSchema.config?.unit_custom,
+              panelSchema.config?.decimals
             )
           );
         },
       },
       axisLine: {
+        show: panelSchema.config?.axis_border_show || false,
+      },
+      splitLine: {
         show: true,
+        lineStyle: {
+          opacity: 0.5,
+        },
       },
     },
     toolbox: {
       orient: "vertical",
-      show: !["pie", "donut", "metric"].includes(panelSchema.type),
+      show: !["pie", "donut", "metric", "gauge"].includes(panelSchema.type),
+      showTitle: false,
+      tooltip: {
+        show: false,
+      },
+      itemSize: 0,
+      itemGap: 0,
+      // it is used to hide toolbox buttons
+      bottom: "100%",
       feature: {
         dataZoom: {
-          filterMode: 'none',
+          filterMode: "none",
           yAxisIndex: "none",
         },
       },
     },
     series: [],
   };
+  // to pass grid index in gauge chart
+  let gaugeIndex = 0;
 
+  // for gauge chart we need total no. of gauge to calculate grid positions
+  let totalLength = 0;
+  // for gauge chart, it contains grid array, single chart height and width, no. of charts per row and no. of columns
+  let gridDataForGauge: any = {};
+
+  if (panelSchema.type === "gauge") {
+    // calculate total length of all metrics
+    searchQueryData.forEach((metric: any) => {
+      if (metric.result && Array.isArray(metric.result)) {
+        totalLength += metric.result.length;
+      }
+    });
+
+    // create grid array based on chart panel width, height and total no. of gauge
+    gridDataForGauge = calculateGridPositions(
+      chartPanelRef.value.offsetWidth,
+      chartPanelRef.value.offsetHeight,
+      totalLength
+    );
+
+    //assign grid array to gauge chart options
+    options.grid = gridDataForGauge.gridArray;
+  }
 
   options.series = searchQueryData.map((it: any, index: number) => {
-
     switch (panelSchema.type) {
       case "bar":
       case "line":
@@ -231,7 +303,12 @@ export const convertPromQLData = (
                 // if utc then simply return the values by removing z from string
                 // else convert time from utc to zoned
                 // used slice to remove Z from isostring to pass as a utc
-                data: values.map((value: any) => [store.state.timezone != "UTC" ? utcToZonedTime(value[0] * 1000, store.state.timezone) : new Date(value[0] * 1000).toISOString().slice(0, -1), value[1]]),
+                data: values.map((value: any) => [
+                  store.state.timezone != "UTC"
+                    ? utcToZonedTime(value[0] * 1000, store.state.timezone)
+                    : new Date(value[0] * 1000).toISOString().slice(0, -1),
+                  value[1],
+                ]),
                 ...getPropsByChartTypeForSeries(panelSchema.type),
               };
             });
@@ -253,17 +330,149 @@ export const convertPromQLData = (
           }
         }
       }
+      case "gauge": {
+        // we doesnt required to hover timeseries for gauge chart
+        isTimeSeriesFlag = false;
+
+        const series = it?.result?.map((metric: any) => {
+          const values = metric.values.sort((a: any, b: any) => a[0] - b[0]);
+          gaugeIndex++;
+          return {
+            ...getPropsByChartTypeForSeries(panelSchema.type),
+            min: panelSchema?.queries[index]?.config?.min || 0,
+            max: panelSchema?.queries[index]?.config?.max || 100,
+
+            //which grid will be used
+            gridIndex: gaugeIndex - 1,
+            // radius, progress and axisline width will be calculated based on grid width and height
+            radius: `${
+              Math.min(
+                gridDataForGauge.gridWidth,
+                gridDataForGauge.gridHeight
+              ) /
+                2 -
+              5
+            }px`,
+            progress: {
+              show: true,
+              width: `${
+                Math.min(
+                  gridDataForGauge.gridWidth,
+                  gridDataForGauge.gridHeight
+                ) / 6
+              }`,
+            },
+            axisLine: {
+              lineStyle: {
+                width: `${
+                  Math.min(
+                    gridDataForGauge.gridWidth,
+                    gridDataForGauge.gridHeight
+                  ) / 6
+                }`,
+              },
+            },
+            title: {
+              fontSize: 10,
+              offsetCenter: [0, "70%"],
+              // width: upto chart width
+              width: `${gridDataForGauge.gridWidth}`,
+              overflow: "truncate",
+            },
+
+            // center of gauge
+            // x: left + width / 2,
+            // y: top + height / 2,
+            center: [
+              `${
+                parseFloat(options.grid[gaugeIndex - 1].left) +
+                parseFloat(options.grid[gaugeIndex - 1].width) / 2
+              }%`,
+              `${
+                parseFloat(options.grid[gaugeIndex - 1].top) +
+                parseFloat(options.grid[gaugeIndex - 1].height) / 2
+              }%`,
+            ],
+            data: [
+              {
+                name: getPromqlLegendName(
+                  metric.metric,
+                  panelSchema.queries[index].config.promql_legend
+                ),
+                // taking first value for gauge
+                value: values[0][1],
+                detail: {
+                  formatter: function (value: any) {
+                    const unitValue = getUnitValue(
+                      value,
+                      panelSchema.config?.unit,
+                      panelSchema.config?.unit_custom,
+                      panelSchema.config?.decimals
+                    );
+                    return unitValue.value + unitValue.unit;
+                  },
+                },
+              },
+            ],
+            detail: {
+              valueAnimation: true,
+              offsetCenter: [0, 0],
+              fontSize: 12,
+            },
+          };
+        });
+        options.dataset = { source: [[]] };
+        options.tooltip = {
+          show: true,
+          trigger: "item",
+          textStyle: {
+            color: store.state.theme === "dark" ? "#fff" : "#000",
+            fontSize: 12,
+          },
+          valueFormatter: (value: any) => {
+            // unit conversion
+            return formatUnitValue(
+              getUnitValue(
+                value,
+                panelSchema.config?.unit,
+                panelSchema.config?.unit_custom,
+                panelSchema.config?.decimals
+              )
+            );
+          },
+          enterable: true,
+          backgroundColor:
+            store.state.theme === "dark"
+              ? "rgba(0,0,0,1)"
+              : "rgba(255,255,255,1)",
+          extraCssText: "max-height: 200px; overflow: auto; max-width: 500px",
+        };
+        options.angleAxis = {
+          show: false,
+        };
+        options.radiusAxis = {
+          show: false,
+        };
+        options.polar = {};
+        options.xAxis = [];
+        options.yAxis = [];
+        return series;
+      }
       case "metric": {
+        // we doesnt required to hover timeseries for gauge chart
+        isTimeSeriesFlag = false;
+
         switch (it?.resultType) {
           case "matrix": {
-            const traces = it?.result?.map((metric: any) => {
+            const series = it?.result?.map((metric: any) => {
               const values = metric.values.sort(
                 (a: any, b: any) => a[0] - b[0]
               );
               const unitValue = getUnitValue(
                 values[values.length - 1][1],
                 panelSchema.config?.unit,
-                panelSchema.config?.unit_custom
+                panelSchema.config?.unit_custom,
+                panelSchema.config?.decimals
               );
               return {
                 ...getPropsByChartTypeForSeries(panelSchema.type),
@@ -272,7 +481,9 @@ export const convertPromQLData = (
                     type: "text",
                     style: {
                       text:
-                        parseFloat(unitValue.value).toFixed(2) + unitValue.unit,
+                        (parseFloat(unitValue?.value)?.toFixed(
+                          panelSchema.config.decimals ?? 2
+                        ) ?? 0) + unitValue.unit,
                       fontSize: Math.min(params.coordSys.cx / 2, 90), //coordSys is relative. so that we can use it to calculate the dynamic size
                       fontWeight: 500,
                       align: "center",
@@ -298,7 +509,7 @@ export const convertPromQLData = (
             options.polar = {};
             options.xAxis = [];
             options.yAxis = [];
-            return traces;
+            return series;
           }
           case "vector": {
             const traces = it?.result?.map((metric: any) => {
@@ -322,9 +533,84 @@ export const convertPromQLData = (
 
   options.series = options.series.flat();
 
-  // extras will be used to return other data to chart renderer
-  // e.g. setCurrentSeriesValue to set the current series index which is hovered
-  return { options, extras: { setCurrentSeriesValue }};
+  const calculateWidthText = (text: string): number => {
+    if (!text) return 0;
+
+    const span = document.createElement("span");
+    document.body.appendChild(span);
+
+    span.style.font = "sans-serif";
+    span.style.fontSize = "12px";
+    span.style.height = "auto";
+    span.style.width = "auto";
+    span.style.top = "0px";
+    span.style.position = "absolute";
+    span.style.whiteSpace = "no-wrap";
+    span.innerHTML = text;
+
+    const width = Math.ceil(span.clientWidth);
+    span.remove();
+    return width;
+  };
+
+  //from this maxValue want to set the width of the chart based on max value is greater than 30% than give default legend width other wise based on max value get legend width
+  //only check for vertical side only
+  if (
+    legendConfig.orient == "vertical" &&
+    panelSchema.config?.show_legends &&
+    panelSchema.type != "gauge" &&
+    panelSchema.type != "metric"
+  ) {
+    const maxValue = options.series
+      .map((it: any) => it.name)
+      .reduce((max: any, it: any) => (max.length < it.length ? it : max), "");
+
+    let legendWidth;
+
+    if (
+      panelSchema.config.legend_width &&
+      !isNaN(parseFloat(panelSchema.config.legend_width.value))
+      // ["px", "%"].includes(panelSchema.config.legend_width.unit)
+    ) {
+      if (panelSchema.config.legend_width.unit === "%") {
+        // If in percentage, calculate percentage of the chartPanelRef width
+        const percentage = panelSchema.config.legend_width.value / 100;
+        legendWidth = chartPanelRef.value?.offsetWidth * percentage;
+      } else {
+        // If in pixels, use the provided value
+        legendWidth = panelSchema.config.legend_width.value;
+      }
+    } else {
+      // If legend_width is not provided or has invalid format, calculate it based on other criteria
+      legendWidth =
+        Math.min(
+          chartPanelRef.value?.offsetWidth / 3,
+          calculateWidthText(maxValue) + 60
+        ) ?? 20;
+    }
+
+    options.grid.right = legendWidth;
+    options.legend.textStyle.width = legendWidth - 55;
+  }
+
+  //check if is there any data else filter out axis or series data
+  if (!options?.series?.length && !options?.xAxis?.length) {
+    return {
+      options: {
+        series: [],
+        xAxis: [],
+      },
+    };
+  }
+
+  // allowed to zoom, only if timeseries
+  options.toolbox.show = options.toolbox.show && isTimeSeriesFlag;
+
+  // promql query will be always timeseries except gauge and metric text chart.
+  return {
+    options,
+    extras: { panelId: panelSchema?.id, isTimeSeries: isTimeSeriesFlag },
+  };
 };
 
 /**
@@ -374,7 +660,6 @@ const getLegendPosition = (legendPosition: string) => {
       return "horizontal";
   }
 };
-
 
 /**
  * Returns the props object based on the given chart type.
@@ -440,6 +725,24 @@ const getPropsByChartTypeForSeries = (type: string) => {
         showSymbol: false,
         emphasis: {
           focus: "series",
+        },
+      };
+    case "gauge":
+      return {
+        type: "gauge",
+        startAngle: 205,
+        endAngle: -25,
+        pointer: {
+          show: false,
+        },
+        axisTick: {
+          show: false,
+        },
+        splitLine: {
+          show: false,
+        },
+        axisLabel: {
+          show: false,
         },
       };
     case "metric":

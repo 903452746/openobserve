@@ -1,23 +1,27 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use utoipa::ToSchema;
 
-use crate::common::utils::{base64, json};
-use crate::service::search::datafusion::storage::StorageType;
+use crate::{
+    common::utils::{base64, json},
+    service::search::datafusion::storage::StorageType,
+};
 
 #[derive(Clone, Debug)]
 pub struct Session {
@@ -113,8 +117,8 @@ impl Default for Query {
             start_time: 0,
             end_time: 0,
             sort_by: None,
-            sql_mode: "context".to_string(),
-            query_type: "logs".to_string(),
+            sql_mode: "".to_string(),
+            query_type: "".to_string(),
             track_total_hits: false,
             query_context: None,
             uses_zo_fn: false,
@@ -157,6 +161,8 @@ pub struct Response {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub took_detail: Option<ResponseTook>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
     #[schema(value_type = Vec<Object>)]
     pub hits: Vec<json::Value>,
     #[serde(default)]
@@ -173,6 +179,9 @@ pub struct Response {
     #[serde(default)]
     #[serde(skip_serializing_if = "String::is_empty")]
     pub response_type: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, ToSchema)]
@@ -193,9 +202,11 @@ impl Response {
             size,
             file_count: 0,
             scan_size: 0,
+            columns: Vec::new(),
             hits: Vec::new(),
             aggs: HashMap::new(),
             response_type: "".to_string(),
+            session_id: "".to_string(),
         }
     }
 
@@ -237,10 +248,14 @@ impl Response {
     pub fn set_scan_size(&mut self, val: usize) {
         self.scan_size = val;
     }
+
+    pub fn set_session_id(&mut self, session_id: String) {
+        self.session_id = session_id;
+    }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]

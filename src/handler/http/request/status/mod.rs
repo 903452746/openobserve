@@ -1,30 +1,46 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::io::Error;
 
 use actix_web::{get, HttpResponse};
 use ahash::AHashMap as HashMap;
+use config::{CONFIG, HAS_FUNCTIONS, INSTANCE_ID, SQL_FULL_TEXT_SEARCH_FIELDS};
 use datafusion::arrow::datatypes::{Field, Schema};
 use serde::Serialize;
-use std::io::Error;
 use utoipa::ToSchema;
-
-use crate::common::{
-    infra::{cache, cluster, config::*, file_list},
-    meta::functions::ZoFunction,
-    utils::json,
+#[cfg(feature = "enterprise")]
+use {
+    crate::common::utils::jwt::{process_token, verify_decode_token},
+    crate::handler::http::auth::validator::PKCE_STATE_ORG,
+    actix_web::{http::header, web, HttpRequest},
+    o2_enterprise::enterprise::{
+        common::infra::config::O2_CONFIG,
+        dex::service::auth::{exchange_code, get_dex_login, get_jwks, refresh_token},
+    },
+    std::io::ErrorKind,
 };
-use crate::service::{db, search::datafusion::DEFAULT_FUNCTIONS};
+
+use crate::{
+    common::{
+        infra::{cache, cluster, config::*, file_list},
+        meta::functions::ZoFunction,
+        utils::json,
+    },
+    service::{db, search::datafusion::DEFAULT_FUNCTIONS},
+};
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthzResponse {
@@ -46,9 +62,11 @@ struct ConfigResponse<'a> {
     timestamp_column: String,
     syslog_enabled: bool,
     data_retention_days: i64,
+    restricted_routes_on_empty_data: bool,
+    dex_enabled: bool,
 }
 
-/** Healthz */
+/// Healthz
 #[utoipa::path(
     path = "/healthz",
     tag = "Meta",
@@ -65,6 +83,11 @@ pub async fn healthz() -> Result<HttpResponse, Error> {
 
 #[get("")]
 pub async fn zo_config() -> Result<HttpResponse, Error> {
+    #[cfg(feature = "enterprise")]
+    let dex_enabled = O2_CONFIG.dex.dex_enabled;
+    #[cfg(not(feature = "enterprise"))]
+    let dex_enabled = false;
+
     Ok(HttpResponse::Ok().json(ConfigResponse {
         version: VERSION.to_string(),
         instance: INSTANCE_ID.get("instance_id").unwrap().to_string(),
@@ -82,6 +105,8 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
         timestamp_column: CONFIG.common.column_timestamp.clone(),
         syslog_enabled: *SYSLOG_ENABLED.read(),
         data_retention_days: CONFIG.compact.data_retention_days,
+        restricted_routes_on_empty_data: CONFIG.common.restricted_routes_on_empty_data,
+        dex_enabled,
     }))
 }
 
@@ -160,4 +185,82 @@ fn get_stream_schema_status() -> (usize, usize, usize) {
         }
     }
     (stream_num, stream_schema_num, mem_size)
+}
+
+#[cfg(feature = "enterprise")]
+#[get("/callback")]
+pub async fn callback(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
+    let code = match query.get("code") {
+        Some(code) => code,
+        None => {
+            return Err(Error::new(ErrorKind::Other, "no code in request"));
+        }
+    };
+
+    match query.get("state") {
+        Some(code) => match crate::service::kv::get(PKCE_STATE_ORG, code).await {
+            Ok(_) => {
+                let _ = crate::service::kv::delete(PKCE_STATE_ORG, code).await;
+            }
+            Err(_) => {
+                return Err(Error::new(ErrorKind::Other, "invalid state in request"));
+            }
+        },
+
+        None => {
+            return Err(Error::new(ErrorKind::Other, "no state in request"));
+        }
+    };
+
+    match exchange_code(code).await {
+        Ok(login_data) => {
+            let token = login_data.access_token;
+            let keys = get_jwks().await;
+            let token_ver =
+                verify_decode_token(&token, &keys, &O2_CONFIG.dex.client_id, true).await;
+
+            match token_ver {
+                Ok(res) => process_token(res).await,
+                Err(e) => return Ok(HttpResponse::Unauthorized().json(e.to_string())),
+            }
+            Ok(HttpResponse::Found()
+                .append_header((header::LOCATION, login_data.url))
+                .finish())
+        }
+        Err(e) => Ok(HttpResponse::Unauthorized().json(e.to_string())),
+    }
+}
+
+#[cfg(feature = "enterprise")]
+#[get("/dex_login")]
+pub async fn dex_login() -> Result<HttpResponse, Error> {
+    use o2_enterprise::enterprise::dex::meta::auth::PreLoginData;
+
+    let login_data: PreLoginData = get_dex_login();
+    let state = login_data.state;
+    let _ = crate::service::kv::set(PKCE_STATE_ORG, &state, state.to_owned().into()).await;
+
+    Ok(HttpResponse::Ok().json(login_data.url))
+}
+
+#[cfg(feature = "enterprise")]
+#[get("/dex_refresh")]
+async fn refresh_token_with_dex(req: actix_web::HttpRequest) -> HttpResponse {
+    let token = if req.headers().contains_key(header::AUTHORIZATION) {
+        req.headers()
+            .get(header::AUTHORIZATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    } else {
+        return HttpResponse::Unauthorized().finish();
+    };
+
+    // Exchange the refresh token for a new access token
+    match refresh_token(&token).await {
+        Ok(token_response) => HttpResponse::Ok().json(token_response),
+        Err(_) => HttpResponse::Unauthorized().finish(),
+    }
 }

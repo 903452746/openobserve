@@ -1,30 +1,40 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::io::{BufRead, BufReader};
 
 use ahash::AHashMap as HashMap;
 use bytes::Buf;
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use config::CONFIG;
 use futures::future::try_join_all;
-use std::io::{BufRead, BufReader};
 
-use crate::common::infra::{config::CONFIG, file_list as infra_file_list, storage};
+use crate::common::infra::{file_list as infra_file_list, storage};
 
-pub async fn delete(org_id: &str, time_min: i64, time_max: i64) -> Result<(), anyhow::Error> {
-    let files = query_deleted(org_id, time_min, time_max).await?;
+pub async fn delete(
+    org_id: &str,
+    time_min: i64,
+    time_max: i64,
+    batch_size: i64,
+) -> Result<i64, anyhow::Error> {
+    let files = query_deleted(org_id, time_min, time_max, batch_size).await?;
     if files.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+    let files_num = files.values().flatten().count() as i64;
+
     // delete files from storage
     if let Err(e) = storage::del(
         &files
@@ -66,18 +76,19 @@ pub async fn delete(org_id: &str, time_min: i64, time_max: i64) -> Result<(), an
         return Err(e.into());
     }
 
-    Ok(())
+    Ok(files_num)
 }
 
 async fn query_deleted(
     org_id: &str,
     time_min: i64,
     time_max: i64,
+    limit: i64,
 ) -> Result<HashMap<String, Vec<String>>, anyhow::Error> {
     if CONFIG.common.meta_store_external {
-        query_deleted_from_table(org_id, time_min, time_max).await
+        query_deleted_from_table(org_id, time_min, time_max, limit).await
     } else {
-        query_deleted_from_s3(org_id, time_min, time_max).await
+        query_deleted_from_s3(org_id, time_min, time_max, limit).await
     }
 }
 
@@ -85,8 +96,9 @@ async fn query_deleted_from_table(
     org_id: &str,
     _time_min: i64,
     time_max: i64,
+    limit: i64,
 ) -> Result<HashMap<String, Vec<String>>, anyhow::Error> {
-    let files = infra_file_list::query_deleted(org_id, time_max).await?;
+    let files = infra_file_list::query_deleted(org_id, time_max, limit).await?;
     let mut hash_files = HashMap::default();
     if !files.is_empty() {
         hash_files.insert("".to_string(), files);
@@ -98,6 +110,7 @@ async fn query_deleted_from_s3(
     org_id: &str,
     time_min: i64,
     time_max: i64,
+    _limit: i64,
 ) -> Result<HashMap<String, Vec<String>>, anyhow::Error> {
     let mut cur_time = if time_min != 0 {
         time_min
@@ -137,7 +150,9 @@ async fn query_deleted_from_s3(
     Ok(files)
 }
 
-async fn load_prefix_from_s3(prefix: &str) -> Result<HashMap<String, Vec<String>>, anyhow::Error> {
+pub async fn load_prefix_from_s3(
+    prefix: &str,
+) -> Result<HashMap<String, Vec<String>>, anyhow::Error> {
     let prefix = format!("file_list_deleted/{prefix}/");
     let files = storage::list(&prefix).await?;
     let files_num = files.len();

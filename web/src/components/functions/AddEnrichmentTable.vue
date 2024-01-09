@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -33,7 +34,7 @@
             :label="t('function.name')"
             color="input-border"
             bg-color="input-bg"
-            class="col-12 q-py-md showLabelOnTop"
+            class="col-12 q-py-md showLabelOnTop text-grey-8 text-bold"
             stack-label
             outlined
             filled
@@ -54,16 +55,25 @@
             stack-label
             outlined
             dense
+            :rules="[(val: any) => !!val || 'CSV File is required!']"
           >
             <template v-slot:prepend>
               <q-icon name="attachment" />
             </template>
           </q-file>
+          <div v-if="isUpdating">
+            <q-toggle
+              class="col-12 q-py-md text-grey-8 text-bold"
+              v-model="formData.append"
+              :label="t('function.appendData')"
+            />
+          </div>
         </div>
 
         <pre class="q-py-md showLabelOnTop text-bold text-h7">{{
           compilationErr
         }}</pre>
+
         <div class="flex justify-center q-mt-lg">
           <q-btn
             v-close-popup="true"
@@ -100,6 +110,7 @@ const defaultValue: any = () => {
   return {
     name: "",
     file: "",
+    append: false,
   };
 };
 
@@ -147,7 +158,8 @@ export default defineComponent({
         .create_enrichment_table(
           store.state.selectedOrganization.identifier,
           formData.value.name,
-          reqformData
+          reqformData,
+          formData.value.append
         )
         .then((res) => {
           formData.value = { ...defaultValue() };
@@ -201,6 +213,7 @@ export default defineComponent({
     if (this.isUpdating) {
       this.disableColor = "grey-5";
       this.formData = this.modelValue;
+      if (this.formData.append == undefined) this.formData.append = false;
     }
   },
 });
@@ -218,6 +231,7 @@ export default defineComponent({
 .no-case .q-field__native span {
   text-transform: none !important;
 }
+
 .lookup-table-file-uploader {
   .q-field__label {
     left: -30px;

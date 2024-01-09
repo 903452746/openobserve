@@ -1,25 +1,28 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use config::CONFIG;
 use tokio::time;
 
-use crate::common::infra::{
-    cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-    config::CONFIG,
-    dist_lock, file_list as infra_file_list,
+use crate::{
+    common::infra::{
+        cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
+        dist_lock, file_list as infra_file_list,
+    },
+    service::db,
 };
-use crate::service::db;
 
 pub async fn update_stats_from_file_list() -> Result<(), anyhow::Error> {
     // waiting for file list remote inited
@@ -69,7 +72,8 @@ pub async fn update_stats_from_file_list() -> Result<(), anyhow::Error> {
 async fn update_stats_lock_node() -> Result<i64, anyhow::Error> {
     let lock_key = "compact/stream_stats/offset".to_string();
     let locker = dist_lock::lock(&lock_key, CONFIG.etcd.command_timeout).await?;
-    // check the working node for the organization again, maybe other node locked it first
+    // check the working node for the organization again, maybe other node locked it
+    // first
     let (offset, node) = db::compact::stats::get_offset().await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
         dist_lock::unlock(&locker).await?;

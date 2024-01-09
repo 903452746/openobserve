@@ -1,22 +1,25 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use config::meta::stream::{FileKey, FileMeta};
 use uuid::Uuid;
 
-use crate::common::meta;
-use crate::common::utils::json;
-use crate::service::promql;
+use crate::{
+    common::{meta, utils::json},
+    service::promql,
+};
 
 pub mod auth;
 pub mod request;
@@ -67,8 +70,8 @@ impl From<meta::search::Request> for cluster_rpc::SearchRequest {
     }
 }
 
-impl From<&meta::common::FileMeta> for cluster_rpc::FileMeta {
-    fn from(req: &meta::common::FileMeta) -> Self {
+impl From<&FileMeta> for cluster_rpc::FileMeta {
+    fn from(req: &FileMeta) -> Self {
         cluster_rpc::FileMeta {
             min_ts: req.min_ts,
             max_ts: req.max_ts,
@@ -79,9 +82,9 @@ impl From<&meta::common::FileMeta> for cluster_rpc::FileMeta {
     }
 }
 
-impl From<&cluster_rpc::FileMeta> for meta::common::FileMeta {
+impl From<&cluster_rpc::FileMeta> for FileMeta {
     fn from(req: &cluster_rpc::FileMeta) -> Self {
-        meta::common::FileMeta {
+        FileMeta {
             min_ts: req.min_ts,
             max_ts: req.max_ts,
             records: req.records,
@@ -91,8 +94,8 @@ impl From<&cluster_rpc::FileMeta> for meta::common::FileMeta {
     }
 }
 
-impl From<&meta::common::FileKey> for cluster_rpc::FileKey {
-    fn from(req: &meta::common::FileKey) -> Self {
+impl From<&FileKey> for cluster_rpc::FileKey {
+    fn from(req: &FileKey) -> Self {
         cluster_rpc::FileKey {
             key: req.key.clone(),
             meta: Some(cluster_rpc::FileMeta::from(&req.meta)),
@@ -101,11 +104,11 @@ impl From<&meta::common::FileKey> for cluster_rpc::FileKey {
     }
 }
 
-impl From<&cluster_rpc::FileKey> for meta::common::FileKey {
+impl From<&cluster_rpc::FileKey> for FileKey {
     fn from(req: &cluster_rpc::FileKey) -> Self {
-        meta::common::FileKey {
+        FileKey {
             key: req.key.clone(),
-            meta: meta::common::FileMeta::from(req.meta.as_ref().unwrap()),
+            meta: FileMeta::from(req.meta.as_ref().unwrap()),
             deleted: req.deleted,
         }
     }
@@ -202,14 +205,16 @@ impl From<Vec<json::Value>> for cluster_rpc::UsageData {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::collections::HashMap;
+
+    use config::meta::stream::FileMeta;
 
     use super::*;
 
     #[actix_web::test]
     async fn test_get_file_meta() {
-        let file_meta = meta::common::FileMeta {
+        let file_meta = FileMeta {
             min_ts: 1667978841110,
             max_ts: 1667978845354,
             records: 300,
@@ -218,7 +223,7 @@ mod test {
         };
 
         let rpc_meta = cluster_rpc::FileMeta::from(&file_meta);
-        let resp = meta::common::FileMeta::from(&rpc_meta);
+        let resp = FileMeta::from(&rpc_meta);
         assert_eq!(file_meta, resp);
     }
 
@@ -228,7 +233,7 @@ mod test {
             query: meta::search::Query {
                 sql: "SELECT * FROM test".to_string(),
                 sql_mode: "default".to_string(),
-                query_type: "logs".to_string(),
+                query_type: "".to_string(),
                 from: 0,
                 size: 100,
                 start_time: 0,

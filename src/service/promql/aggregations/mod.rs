@@ -1,26 +1,32 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::sync::Arc;
 
 use ahash::AHashMap as HashMap;
 use datafusion::error::{DataFusionError, Result};
 use itertools::Itertools;
 use promql_parser::parser::{Expr as PromExpr, LabelModifier};
-use std::sync::Arc;
 
-use super::Engine;
-use crate::common::meta::prom::NAME_LABEL;
-use crate::service::promql::value::{Label, Labels, LabelsExt, Signature, Value};
+use crate::{
+    common::meta::prom::NAME_LABEL,
+    service::promql::{
+        value::{Label, Labels, LabelsExt, Signature, Value},
+        Engine,
+    },
+};
 
 mod avg;
 mod bottomk;
@@ -115,10 +121,12 @@ fn eval_arithmetic_processor(
     value: f64,
 ) {
     let sum_hash = sum_labels.signature();
-    let entry = score_values.entry(sum_hash).or_insert(ArithmeticItem {
-        labels: sum_labels.clone(),
-        ..Default::default()
-    });
+    let entry = score_values
+        .entry(sum_hash)
+        .or_insert_with(|| ArithmeticItem {
+            labels: sum_labels.clone(),
+            ..Default::default()
+        });
     entry.value = f_handler(entry.value, value);
     entry.num += 1;
 }
@@ -128,10 +136,12 @@ fn eval_count_values_processor(
     sum_labels: &Labels,
 ) {
     let sum_hash = sum_labels.signature();
-    let entry = score_values.entry(sum_hash).or_insert(CountValuesItem {
-        labels: sum_labels.clone(),
-        ..Default::default()
-    });
+    let entry = score_values
+        .entry(sum_hash)
+        .or_insert_with(|| CountValuesItem {
+            labels: sum_labels.clone(),
+            ..Default::default()
+        });
     entry.count += 1;
 }
 
@@ -141,10 +151,12 @@ fn eval_std_dev_var_processor(
     value: f64,
 ) {
     let sum_hash = sum_labels.signature();
-    let entry = score_values.entry(sum_hash).or_insert(StatisticItems {
-        labels: sum_labels.clone(),
-        ..Default::default()
-    });
+    let entry = score_values
+        .entry(sum_hash)
+        .or_insert_with(|| StatisticItems {
+            labels: sum_labels.clone(),
+            ..Default::default()
+        });
     entry.values.push(value);
     entry.current_count += 1;
     entry.current_sum += value;
@@ -163,7 +175,7 @@ pub(crate) fn eval_arithmetic(
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "[{f_name}] function only accept vector values"
-            )))
+            )));
         }
     };
 
@@ -223,7 +235,7 @@ pub async fn eval_top(
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "[{fn_name}] param must be NumberLiteral"
-            )))
+            )));
         }
     };
 
@@ -233,7 +245,7 @@ pub async fn eval_top(
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "[{fn_name}] function only accept vector values"
-            )))
+            )));
         }
     };
 
@@ -316,7 +328,7 @@ pub(crate) fn eval_std_dev_var(
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "[{f_name}] function only accepts vector values"
-            )))
+            )));
         }
     };
 
@@ -358,7 +370,7 @@ pub(crate) fn eval_count_values(
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "[{f_name}] function only accept vector values"
-            )))
+            )));
         }
     };
 

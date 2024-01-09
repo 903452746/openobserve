@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -340,11 +341,22 @@ const setupSession = async () => {
   //   lastEventTime = currentTime;
   // });
 
-  let playerWidth = playerContainerRef.value?.clientWidth || 0;
-  let playerHeight =
-    (session.value[0].data.height / session.value[0].data.width) * playerWidth;
+  let sessionWidth: number = 0;
+  let sessionHeight: number = 0;
 
-  if (!session.value[0].data.height) {
+  session.value.every((segment: any) => {
+    if (segment.data.height && segment.data.width) {
+      sessionWidth = segment.data.width;
+      sessionHeight = segment.data.height;
+      return false;
+    }
+    return true;
+  });
+
+  let playerWidth = playerContainerRef.value?.clientWidth || 0;
+  let playerHeight = (sessionHeight / sessionWidth) * playerWidth;
+
+  if (!sessionHeight) {
     playerHeight = playerWidth * 0.5625;
   }
 
@@ -353,9 +365,7 @@ const setupSession = async () => {
     playerHeight > playerContainerRef.value?.clientHeight - 90
   ) {
     playerHeight = playerContainerRef.value?.clientHeight - 90 || 0;
-    playerWidth =
-      (session.value[0].data.width / session.value[0].data.height) *
-      playerHeight;
+    playerWidth = (sessionWidth / sessionHeight) * playerHeight;
   }
 
   if (playerRef.value) {

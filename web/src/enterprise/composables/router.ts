@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
-
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-
-//      http:www.apache.org/licenses/LICENSE-2.0
-
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import Login from "@/views/Login.vue";
 import LoginCallback from "@/enterprise/components/login/Login.vue";
@@ -20,34 +21,54 @@ import {
   useLocalCurrentUser,
   getLoginURL,
   getLogoutURL,
+  invlidateLoginData,
 } from "@/utils/zincutils";
 
+import authService from "@/services/auth";
+import config from "@/aws-exports";
 import Organizations from "@/enterprise/components/organizations/Organization.vue";
-
 import Billing from "@/enterprise/components/billings/Billing.vue";
 import Plans from "@/enterprise/components/billings/plans.vue";
 import InvoiceHistory from "@/enterprise/components/billings/invoiceHistory.vue";
 import Usage from "@/enterprise/components/billings/usage.vue";
-import { routeGuardPendingSubscriptions } from "@/utils/zincutils";
-const Settings = () => import("@/components/settings/index.vue");
+import { routeGuard } from "@/utils/zincutils";
+
 
 const useEnvRoutes = () => {
   const parentRoutes = [
     {
       path: "/login",
       component: Login,
-      beforeEnter(to: any, from: any, next: any) {
-        window.location.href = getLoginURL();
+      beforeEnter: async (to: any, from: any, next: any) => {
+        if (config.isEnterprise == "true") {
+          try {
+            const url = await authService.get_dex_login();
+            if (url) {
+              window.location.href = url;
+            } else {
+              next();
+            }
+          } catch (error) {
+            console.error("Error during redirection:", error);
+            next(false);
+          }
+        } else {
+          window.location.href = getLoginURL();
+        }
+
       },
     },
     {
       path: "/logout",
-      beforeEnter(to: any, from: any, next: any) {
+      beforeEnter: async (to: any, from: any, next: any) => {
         useLocalToken("", true);
         useLocalCurrentUser("", true);
         useLocalUserInfo("", true);
-
-        window.location.href = getLogoutURL();
+        if (config.isEnterprise == "true") {
+          invlidateLoginData();
+        } else {
+          window.location.href = getLogoutURL();
+        }
       },
     },
     {
@@ -66,7 +87,7 @@ const useEnvRoutes = () => {
         keepAlive: true,
       },
       beforeEnter(to: any, from: any, next: any) {
-        routeGuardPendingSubscriptions(to, from, next);
+        routeGuard(to, from, next);
       },
     },
     {
@@ -91,24 +112,6 @@ const useEnvRoutes = () => {
           path: "invoice_history",
           name: "invoice_history",
           component: InvoiceHistory,
-        },
-      ],
-    },
-    {
-      path: "settings",
-      name: "settings",
-      component: Settings,
-      meta: {
-        keepAlive: true,
-      },
-      beforeEnter(to: any, from: any, next: any) {
-        routeGuardPendingSubscriptions(to, from, next);
-      },
-      children: [
-        {
-          path: "apikeys",
-          name: "apiKeys",
-          component: () => import("@/enterprise/components/settings/ApiKeys.vue"),
         },
       ],
     },

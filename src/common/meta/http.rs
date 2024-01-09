@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use actix_web::{http::StatusCode, HttpResponse as ActixHttpResponse};
 use serde::{Deserialize, Serialize};
@@ -66,11 +67,40 @@ impl HttpResponse {
         }
     }
 
-    /// Send a bad request response in json format and associate the
+    /// Send a normal response in json format and associate the
+    /// provided message as `message` field.
+    pub fn ok(msg: impl ToString) -> ActixHttpResponse {
+        ActixHttpResponse::Ok().json(Self::message(StatusCode::OK.into(), msg.to_string()))
+    }
+
+    /// Send a BadRequest response in json format and associate the
     /// provided error as `error` field.
     pub fn bad_request(error: impl ToString) -> ActixHttpResponse {
         ActixHttpResponse::BadRequest().json(Self::error(
             StatusCode::BAD_REQUEST.into(),
+            error.to_string(),
+        ))
+    }
+
+    /// Send a Forbidden response in json format and associate the
+    /// provided error as `error` field.
+    pub fn forbidden(error: impl ToString) -> ActixHttpResponse {
+        ActixHttpResponse::Forbidden()
+            .json(Self::error(StatusCode::FORBIDDEN.into(), error.to_string()))
+    }
+
+    /// Send a NotFound response in json format and associate the
+    /// provided error as `error` field.
+    pub fn not_found(error: impl ToString) -> ActixHttpResponse {
+        ActixHttpResponse::NotFound()
+            .json(Self::error(StatusCode::NOT_FOUND.into(), error.to_string()))
+    }
+
+    /// Send a InternalServerError response in json format and associate the
+    /// provided error as `error` field.
+    pub fn internal_error(error: impl ToString) -> ActixHttpResponse {
+        ActixHttpResponse::InternalServerError().json(Self::error(
+            StatusCode::INTERNAL_SERVER_ERROR.into(),
             error.to_string(),
         ))
     }
@@ -83,7 +113,7 @@ impl HttpResponse {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use actix_web::http;
 
     use super::*;

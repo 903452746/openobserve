@@ -1,31 +1,38 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use actix_web::{http, post, web, HttpRequest, HttpResponse};
 use std::io::Error;
 
-use crate::common::infra::config::CONFIG;
-use crate::common::meta::http::HttpResponse as MetaHttpResponse;
-use crate::common::meta::ingestion::{IngestionRequest, KinesisFHIngestionResponse};
-use crate::handler::http::request::{CONTENT_TYPE_JSON, CONTENT_TYPE_PROTO};
-use crate::service::logs::otlp_http::{logs_json_handler, logs_proto_handler};
+use actix_web::{http, post, web, HttpRequest, HttpResponse};
+use config::CONFIG;
+
 use crate::{
-    common::meta::ingestion::{GCPIngestionRequest, KinesisFHRequest},
-    service::logs,
+    common::meta::{
+        http::HttpResponse as MetaHttpResponse,
+        ingestion::{
+            GCPIngestionRequest, IngestionRequest, KinesisFHIngestionResponse, KinesisFHRequest,
+        },
+    },
+    handler::http::request::{CONTENT_TYPE_JSON, CONTENT_TYPE_PROTO},
+    service::{
+        logs,
+        logs::otlp_http::{logs_json_handler, logs_proto_handler},
+    },
 };
 
-/** _bulk ES compatible ingestion API */
+/// _bulk ES compatible ingestion API
 #[utoipa::path(
     context_path = "/api",
     tag = "Logs",
@@ -38,8 +45,8 @@ use crate::{
     ),
     request_body(content = String, description = "Ingest data (ndjson)", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = BulkResponse, example = json!({"took":2,"errors":true,"items":[{"index":{"_index":"olympics","_id":1,"status":200,"error":{"type":"Too old data, only last 5 hours data can be ingested. Data discarded.","reason":"Too old data, only last 5 hours data can be ingested. Data discarded.","index_uuid":"1","shard":"1","index":"olympics"},"original_record":{"athlete":"CHASAPIS, Spiridon","city":"BER","country":"USA","discipline":"Swimming","event":"100M Freestyle For Sailors","gender":"Men","medal":"Silver","onemore":1,"season":"summer","sport":"Aquatics","year":1986}}}]})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = BulkResponse, example = json!({"took":2,"errors":true,"items":[{"index":{"_index":"olympics","_id":1,"status":200,"error":{"type":"Too old data, only last 5 hours data can be ingested. Data discarded.","reason":"Too old data, only last 5 hours data can be ingested. Data discarded.","index_uuid":"1","shard":"1","index":"olympics"},"original_record":{"athlete":"CHASAPIS, Spiridon","city":"BER","country":"USA","discipline":"Swimming","event":"100M Freestyle For Sailors","gender":"Men","medal":"Silver","onemore":1,"season":"summer","sport":"Aquatics","year":1986}}}]})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/_bulk")]
@@ -61,7 +68,7 @@ pub async fn bulk(
     })
 }
 
-/** _multi ingestion API */
+/// _multi ingestion API
 #[utoipa::path(
     context_path = "/api",
     tag = "Logs",
@@ -75,8 +82,8 @@ pub async fn bulk(
     ),
     request_body(content = String, description = "Ingest data (multiple line json)", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/{stream_name}/_multi")]
@@ -95,7 +102,10 @@ pub async fn multi(
         )
         .await
         {
-            Ok(v) => MetaHttpResponse::json(v),
+            Ok(v) => match v.code {
+                503 => HttpResponse::ServiceUnavailable().json(v),
+                _ => MetaHttpResponse::json(v),
+            },
             Err(e) => {
                 log::error!("Error processing request: {:?}", e);
                 HttpResponse::BadRequest().json(MetaHttpResponse::error(
@@ -107,7 +117,7 @@ pub async fn multi(
     )
 }
 
-/** _json ingestion API */
+/// _json ingestion API
 #[utoipa::path(
     context_path = "/api",
     tag = "Logs",
@@ -121,8 +131,8 @@ pub async fn multi(
     ),
     request_body(content = String, description = "Ingest data (json array)", content_type = "application/json", example = json!([{"Year": 1896, "City": "Athens", "Sport": "Aquatics", "Discipline": "Swimming", "Athlete": "Alfred", "Country": "HUN"},{"Year": 1896, "City": "Athens", "Sport": "Aquatics", "Discipline": "Swimming", "Athlete": "HERSCHMANN", "Country":"CHN"}])),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200,"status": [{"name": "olympics","successful": 3,"failed": 0}]})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/{stream_name}/_json")]
@@ -141,7 +151,10 @@ pub async fn json(
         )
         .await
         {
-            Ok(v) => MetaHttpResponse::json(v),
+            Ok(v) => match v.code {
+                503 => HttpResponse::ServiceUnavailable().json(v),
+                _ => MetaHttpResponse::json(v),
+            },
             Err(e) => {
                 log::error!("Error processing request: {:?}", e);
                 HttpResponse::BadRequest().json(MetaHttpResponse::error(
@@ -153,7 +166,7 @@ pub async fn json(
     )
 }
 
-/** _kinesis_firehose ingestion API*/
+/// _kinesis_firehose ingestion API
 #[utoipa::path(
     context_path = "/api",
     tag = "Logs",
@@ -167,8 +180,8 @@ pub async fn json(
     ),
     request_body(content = KinesisFHRequest, description = "Ingest data (json array)", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = KinesisFHIngestionResponse, example = json!({ "requestId": "ed4acda5-034f-9f42-bba1-f29aea6d7d8f","timestamp": 1578090903599_i64})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse, example = json!({ "requestId": "ed4acda5-034f-9f42-bba1-f29aea6d7d8f", "timestamp": 1578090903599_i64, "errorMessage": "error processing request"})),
+        (status = 200, description = "Success", content_type = "application/json", body = KinesisFHIngestionResponse, example = json!({ "requestId": "ed4acda5-034f-9f42-bba1-f29aea6d7d8f","timestamp": 1578090903599_i64})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse, example = json!({ "requestId": "ed4acda5-034f-9f42-bba1-f29aea6d7d8f", "timestamp": 1578090903599_i64, "errorMessage": "error processing request"})),
     )
 )]
 #[post("/{org_id}/{stream_name}/_kinesis_firehose")]
@@ -236,15 +249,15 @@ pub async fn handle_gcp_request(
     )
 }
 
-/** LogsIngest */
+/// LogsIngest
 #[utoipa::path(
     context_path = "/api",
     tag = "Logs",
     operation_id = "PostLogs",
     request_body(content = String, description = "ExportLogsServiceRequest", content_type = "application/x-protobuf"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/v1/logs")]
@@ -261,10 +274,10 @@ pub async fn otlp_logs_write(
         .get(&CONFIG.grpc.stream_header_key)
         .map(|header| header.to_str().unwrap());
     if content_type.eq(CONTENT_TYPE_PROTO) {
-        log::info!("otlp::logs_proto_handler");
+        // log::info!("otlp::logs_proto_handler");
         logs_proto_handler(&org_id, **thread_id, body, in_stream_name).await
     } else if content_type.starts_with(CONTENT_TYPE_JSON) {
-        log::info!("otlp::logs_json_handler");
+        // log::info!("otlp::logs_json_handler");
         logs_json_handler(&org_id, **thread_id, body, in_stream_name).await
     } else {
         Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(

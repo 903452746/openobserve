@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <!-- eslint-disable vue/attribute-hyphenation -->
@@ -53,10 +54,13 @@
                   <index-list
                     v-if="searchObj.meta.showFields"
                     data-test="logs-search-index-list"
-                    :key="searchObj.data.stream.streamLists"
+                    :key="
+                      searchObj.data.stream.selectedStream.value || 'default'
+                    "
                     class="full-height"
                   />
                   <q-btn
+                    data-test="logs-search-field-list-collapse-btn"
                     :icon="
                       searchObj.meta.showFields
                         ? 'chevron_left'
@@ -95,7 +99,9 @@
                     </span>
                   </div>
                 </div>
-                <div v-else-if="!areStreamsPresent">
+                <div
+                  v-else-if="!areStreamsPresent && searchObj.loading == false"
+                >
                   <h5 data-test="logs-search-error-message" class="text-center">
                     <q-icon
                       name="warning"
@@ -174,10 +180,9 @@
                     "
                   >
                     <search-result
-                      :key="searchObj.data.histogram.xData.length || -1"
                       ref="searchResultRef"
                       :expandedLogs="expandedLogs"
-                      @update:datetime="searchData"
+                      @update:datetime="setHistogramDate"
                       @update:scroll="getMoreData"
                       @expandlog="toggleExpandLog"
                     />
@@ -220,7 +225,7 @@ import { b64DecodeUnicode } from "@/utils/zincutils";
 import segment from "@/services/segment_analytics";
 import config from "@/aws-exports";
 import { verifyOrganizationStatus } from "@/utils/zincutils";
-import { on } from "events";
+import MainLayoutCloudMixin from "@/enterprise/mixins/mainLayout.mixin";
 
 export default defineComponent({
   name: "PageSearch",
@@ -229,7 +234,11 @@ export default defineComponent({
     IndexList,
     SearchResult,
   },
+  mixins: [MainLayoutCloudMixin],
   methods: {
+    setHistogramDate(date: any) {
+      this.searchBarRef.dateTimeRef.setCustomDate("absolute", date);
+    },
     searchData() {
       if (this.searchObj.loading == false) {
         this.searchObj.loading = true;
@@ -346,13 +355,13 @@ export default defineComponent({
     });
 
     onActivated(async () => {
-      if (!searchObj.loading) updateStreams();
       if (
         searchObj.organizationIdetifier !=
         store.state.selectedOrganization.identifier
       ) {
         loadLogsData();
-      }
+      } else if (!searchObj.loading) updateStreams();
+
       refreshHistogramChart();
     });
 
@@ -361,14 +370,21 @@ export default defineComponent({
         store.state.selectedOrganization.identifier;
       restoreUrlQueryParams();
       loadLogsData();
+      if (config.isCloud == "true") {
+        MainLayoutCloudMixin.setup().getOrganizationThreshold(store);
+      }
     });
 
     const runQueryFn = async () => {
       // searchObj.data.resultGrid.currentPage = 0;
       // searchObj.runQuery = false;
       // expandedLogs.value = {};
-      await getQueryData();
-      refreshHistogramChart();
+      try {
+        await getQueryData();
+        refreshHistogramChart();
+      } catch (e) {
+        console.log(e);
+      }
     };
 
     const refreshTimezone = () => {
@@ -400,6 +416,11 @@ export default defineComponent({
           let selectFields = "";
           let whereClause = "";
           let currentQuery = searchObj.data.query;
+
+          //check if user try to applied saved views in which sql mode is enabled.
+          if (currentQuery.indexOf("SELECT") >= 0) {
+            return;
+          }
           currentQuery = currentQuery.split("|");
           if (currentQuery.length > 1) {
             selectFields = "," + currentQuery[0].trim();
@@ -461,7 +482,7 @@ export default defineComponent({
       parser,
       searchObj,
       searchBarRef,
-      splitterModel: ref(14),
+      splitterModel: ref(10),
       // loadPageData,
       getQueryData,
       searchResultRef,
@@ -519,6 +540,12 @@ export default defineComponent({
     },
     refreshHistogram() {
       return this.searchObj.meta.histogramDirtyFlag;
+    },
+    redrawHistogram() {
+      return (
+        this.searchObj.data.histogram.hasOwnProperty("xData") &&
+        this.searchObj.data.histogram.xData.length
+      );
     },
   },
   watch: {
@@ -585,15 +612,23 @@ export default defineComponent({
       }, 50);
     },
     runQuery() {
+      if (this.store.state.savedViewFlag == true) return;
       if (this.searchObj.runQuery == true) {
         this.runQueryFn();
       }
     },
     fullSQLMode(newVal) {
       this.setQuery(newVal);
+      this.searchResultRef.reDrawChart();
     },
     refreshHistogram() {
-      this.searchObj.meta.histogramDirtyFlag = false;
+      if (this.searchObj.meta.histogramDirtyFlag == true) {
+        this.searchObj.meta.histogramDirtyFlag = false;
+        this.handleRunQuery();
+        this.refreshHistogramChart();
+      }
+    },
+    redrawHistogram() {
       this.refreshHistogramChart();
     },
   },

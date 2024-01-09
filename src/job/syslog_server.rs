@@ -1,34 +1,37 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::{
+    io::Write,
+    net::{SocketAddr, TcpStream},
+};
+
+use config::CONFIG;
 use once_cell::sync::Lazy;
-use std::io::Write;
-use std::net::{SocketAddr, TcpStream};
-use tokio::sync::RwLock;
 use tokio::{
     net::{TcpListener, UdpSocket},
-    sync::broadcast,
+    sync::{broadcast, RwLock},
 };
 
-use crate::handler::tcp_udp::STOP_SRV;
-use crate::service::db::syslog::toggle_syslog_setting;
 use crate::{
-    common::infra::config::{CONFIG, SYSLOG_ENABLED},
-    handler::tcp_udp::{tcp_server, udp_server},
+    common::infra::config::SYSLOG_ENABLED,
+    handler::tcp_udp::{tcp_server, udp_server, STOP_SRV},
+    service::db::syslog::toggle_syslog_setting,
 };
 
-//TCP UDP Server
+// TCP UDP Server
 pub static BROADCASTER: Lazy<RwLock<broadcast::Sender<bool>>> = Lazy::new(|| {
     let (tx, _) = broadcast::channel(2);
     RwLock::new(tx)

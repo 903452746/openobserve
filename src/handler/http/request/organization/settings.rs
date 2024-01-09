@@ -1,33 +1,35 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::io::Error as StdErr;
+
+use actix_web::{get, post, web, HttpResponse};
 
 use crate::{
     common::{
         infra::errors::{DbError, Error},
         meta::{
-            http::HttpResponse as MetaHttpResponse, organization::OrganizationSetting,
-            organization::OrganizationSettingResponse,
+            http::HttpResponse as MetaHttpResponse,
+            organization::{OrganizationSetting, OrganizationSettingResponse},
         },
         utils::json,
     },
     service::db::organization::{get_org_setting, set_org_setting},
 };
 
-use actix_web::{get, post, web, HttpResponse};
-use std::io::Error as StdErr;
-
-/** Organization specific settings */
+/// Organization specific settings
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -40,8 +42,8 @@ use std::io::Error as StdErr;
     ),
     request_body(content = OrganizationSetting, description = "Organization settings", content_type = "application/json"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse),
-        (status = 400, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
+        (status = 400, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/settings")]
@@ -62,7 +64,7 @@ async fn create(
     }
 }
 
-/** Retrieve organization specific settings*/
+/// Retrieve organization specific settings
 #[utoipa::path(
     context_path = "/api",
     tag = "Organizations",
@@ -74,8 +76,8 @@ async fn create(
         ("org_id" = String, Path, description = "Organization name"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse),
-        (status = 400, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse),
+        (status = 400, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/settings")]

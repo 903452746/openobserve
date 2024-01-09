@@ -1,42 +1,45 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{collections::HashMap, net::SocketAddr};
 
 use actix_web::{http, HttpResponse};
-use ahash::AHashMap;
 use chrono::{Duration, Utc};
+use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
 use datafusion::arrow::datatypes::Schema;
-use std::net::SocketAddr;
 use syslog_loose::{Message, ProcId, Protocol};
 
 use super::StreamMeta;
-use crate::common::{
-    infra::{
-        cluster,
-        config::{CONFIG, DISTINCT_FIELDS, SYSLOG_ROUTES},
-        metrics,
+use crate::{
+    common::{
+        infra::{cluster, config::SYSLOG_ROUTES},
+        meta::{
+            alerts::Alert,
+            http::HttpResponse as MetaHttpResponse,
+            ingestion::{IngestionResponse, StreamStatus},
+            stream::{SchemaRecords, StreamParams},
+            syslog::SyslogRoute,
+        },
+        utils::{flatten, json, time::parse_timestamp_micro_from_value},
     },
-    meta::{
-        alert::{Alert, Trigger},
-        http::HttpResponse as MetaHttpResponse,
-        ingestion::{IngestionResponse, StreamStatus},
-        stream::StreamParams,
-        syslog::SyslogRoute,
-        StreamType,
+    service::{
+        db, distinct_values, get_formatted_stream_name,
+        ingestion::{evaluate_trigger, write_file, TriggerAlertData},
+        schema::get_upto_discard_error,
     },
-    utils::{flatten, json, time::parse_timestamp_micro_from_value},
 };
-use crate::service::{db, distinct_values, get_formatted_stream_name, ingestion::write_file};
 
 pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow::Error> {
     let start = std::time::Instant::now();
@@ -60,7 +63,7 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
     let org_id = &route.org_id;
 
     let mut runtime = crate::service::ingestion::init_functions_runtime();
-    let mut stream_schema_map: AHashMap<String, Schema> = AHashMap::new();
+    let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let mut stream_params = StreamParams::new(org_id, in_stream_name, StreamType::Logs);
     let stream_name = &get_formatted_stream_name(&mut stream_params, &mut stream_schema_map).await;
     if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
@@ -82,11 +85,11 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
         );
     }
 
-    let mut stream_alerts_map: AHashMap<String, Vec<Alert>> = AHashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut stream_status = StreamStatus::new(stream_name);
     let mut distinct_values = Vec::with_capacity(16);
 
-    let mut trigger: Option<Trigger> = None;
+    let mut trigger: TriggerAlertData = None;
 
     let partition_det =
         crate::service::ingestion::get_stream_partition_keys(stream_name, &stream_schema_map).await;
@@ -94,8 +97,13 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
     let partition_time_level = partition_det.partition_time_level;
 
     // Start get stream alerts
-    let key = format!("{}/{}/{}", &org_id, StreamType::Logs, &stream_name);
-    crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+    crate::service::ingestion::get_stream_alerts(
+        org_id,
+        StreamType::Logs,
+        stream_name,
+        &mut stream_alerts_map,
+    )
+    .await;
     // End get stream alert
 
     // Start Register Transforms for stream
@@ -106,16 +114,16 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
     );
     // End Register Transforms for stream
 
-    let mut buf: AHashMap<String, Vec<String>> = AHashMap::new();
+    let mut buf: HashMap<String, SchemaRecords> = HashMap::new();
 
     let parsed_msg = syslog_loose::parse_message(msg);
     let mut value = message_to_value(parsed_msg);
-    value = flatten::flatten(&value).unwrap();
+    value = flatten::flatten(value).unwrap();
 
     if !local_trans.is_empty() {
         value = crate::service::ingestion::apply_stream_transform(
             &local_trans,
-            &value,
+            value,
             &stream_vrl_map,
             stream_name,
             &mut runtime,
@@ -138,10 +146,10 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
         None => Utc::now().timestamp_micros(),
     };
     // check ingestion time
-    let earlest_time = Utc::now() + Duration::hours(0 - CONFIG.limit.ingest_allowed_upto);
+    let earlest_time = Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto);
     if timestamp < earlest_time.timestamp_micros() {
         stream_status.status.failed += 1; // to old data, just discard
-        stream_status.status.error = super::get_upto_discard_error();
+        stream_status.status.error = get_upto_discard_error().to_string();
     }
 
     local_val.insert(
@@ -149,7 +157,7 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
         json::Value::Number(timestamp.into()),
     );
 
-    let local_trigger = super::add_valid_record(
+    let local_trigger = match super::add_valid_record(
         &StreamMeta {
             org_id: org_id.to_string(),
             stream_name: stream_name.to_string(),
@@ -161,11 +169,19 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
         &mut stream_status.status,
         &mut buf,
         local_val,
+        trigger.is_none(),
     )
-    .await;
-
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            stream_status.status.failed += 1;
+            stream_status.status.error = e.to_string();
+            None
+        }
+    };
     if local_trigger.is_some() {
-        trigger = Some(local_trigger.unwrap());
+        trigger = local_trigger;
     }
 
     // get distinct_value item
@@ -184,11 +200,15 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
         }
     }
 
-    let mut stream_file_name = "".to_string();
-    write_file(&buf, thread_id, &stream_params, &mut stream_file_name, None).await;
+    // write data to wal
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
+    write_file(&writer, stream_name, buf).await;
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
+    }
 
     // only one trigger per request, as it updates etcd
-    super::evaluate_trigger(trigger, &stream_alerts_map).await;
+    evaluate_trigger(trigger).await;
 
     // send distinct_values
     if !distinct_values.is_empty() {
@@ -293,7 +313,7 @@ fn message_to_value(message: Message<&str>) -> json::Value {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;

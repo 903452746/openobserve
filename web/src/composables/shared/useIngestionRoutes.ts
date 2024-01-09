@@ -1,19 +1,20 @@
 // Copyright 2023 Zinc Labs Inc.
-
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-
-//      http:www.apache.org/licenses/LICENSE-2.0
-
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import config from "@/aws-exports";
-import { routeGuardPendingSubscriptions } from "@/utils/zincutils";
+import { routeGuard } from "@/utils/zincutils";
 import SysLog from "@/components/ingestion/logs/SysLog.vue";
 import SyslogNg from "@/components/ingestion/logs/SyslogNg.vue";
 import Ingestion from "@/views/Ingestion.vue";
@@ -47,7 +48,7 @@ const useIngestionRoutes = () => {
       name: "ingestion",
       component: Ingestion,
       beforeEnter(to: any, from: any, next: any) {
-        routeGuardPendingSubscriptions(to, from, next);
+        routeGuard(to, from, next);
       },
       children: [
         {
@@ -55,43 +56,64 @@ const useIngestionRoutes = () => {
           name: "custom",
           component: Custom,
           beforeEnter(to: any, from: any, next: any) {
-            routeGuardPendingSubscriptions(to, from, next);
+            routeGuard(to, from, next);
           },
           children: [
             {
               path: "logs",
               name: "ingestLogs",
               component: IngestLogs,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
               children: [
                 {
                   path: "curl",
                   name: "curl",
                   component: Curl,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "fluentbit",
                   name: "fluentbit",
                   component: FluentBit,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "fluentd",
                   name: "fluentd",
                   component: Fluentd,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "vector",
                   name: "vector",
                   component: Vector,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "filebeat",
                   name: "filebeat",
                   component: FileBeat,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "otel",
                   name: "ingestLogsFromOtel",
                   component: OtelConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
               ],
             },
@@ -99,21 +121,33 @@ const useIngestionRoutes = () => {
               path: "metrics",
               name: "ingestMetrics",
               component: IngestMetrics,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
               children: [
                 {
                   path: "prometheus",
                   name: "prometheus",
                   component: PrometheusConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "otelcollector",
                   name: "otelCollector",
                   component: OtelCollector,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "telegraf",
                   name: "telegraf",
                   component: TelegrafConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
               ],
             },
@@ -121,16 +155,25 @@ const useIngestionRoutes = () => {
               path: "traces",
               name: "ingestTraces",
               component: IngestTraces,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
               children: [
                 {
                   path: "opentelemetry",
                   name: "tracesOTLP",
                   component: OpenTelemetry,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
                 {
                   path: "otel",
                   name: "ingestTracesFromOtel",
                   component: OtelConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
                 },
               ],
             },
@@ -141,33 +184,48 @@ const useIngestionRoutes = () => {
           name: "recommended",
           component: Recommended,
           beforeEnter(to: any, from: any, next: any) {
-            routeGuardPendingSubscriptions(to, from, next);
+            routeGuard(to, from, next);
           },
           children: [
             {
               path: "kubernetes",
               name: "ingestFromKubernetes",
               component: KubernetesConfig,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
             },
             {
               path: "windows",
               name: "ingestFromWindows",
               component: WindowsConfig,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
             },
             {
               path: "linux",
               name: "ingestFromLinux",
               component: LinuxConfig,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
             },
             {
               path: "traces",
               name: "ingestFromTraces",
               component: OpenTelemetry,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
             },
             {
               path: "frontend-monitoring",
               name: "frontendMonitoring",
               component: RUMWeb,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
             },
           ],
         },
@@ -179,24 +237,36 @@ const useIngestionRoutes = () => {
     path: "syslog",
     name: "syslog",
     component: SysLog,
+    beforeEnter(to: any, from: any, next: any) {
+      routeGuard(to, from, next);
+    },
   };
 
   const sysLogNg = {
     path: "syslogng",
     name: "syslogNg",
     component: SyslogNg,
+    beforeEnter(to: any, from: any, next: any) {
+      routeGuard(to, from, next);
+    },
   };
 
   const kinesisFirehose = {
     path: "kinesisfirehose",
     name: "kinesisfirehose",
     component: KinesisFirehose,
+    beforeEnter(to: any, from: any, next: any) {
+      routeGuard(to, from, next);
+    },
   };
 
   const gcpPubSub = {
     path: "gcp",
     name: "gcpLogs",
     component: GcpPubSub,
+    beforeEnter(to: any, from: any, next: any) {
+      routeGuard(to, from, next);
+    },
   };
 
   if (config.isCloud === "false" || !config.isCloud) {

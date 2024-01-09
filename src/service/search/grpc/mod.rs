@@ -1,50 +1,57 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use ::datafusion::{
-    arrow::{ipc, record_batch::RecordBatch},
-    common::SchemaError,
-    error::DataFusionError,
-};
-use ahash::AHashMap as HashMap;
+mod errors;
+
 use std::sync::Arc;
+
+use ::datafusion::arrow::{ipc, record_batch::RecordBatch};
+use ahash::AHashMap as HashMap;
+use config::{
+    meta::stream::{FileKey, StreamType},
+    CONFIG,
+};
+use futures::future::try_join_all;
 use tracing::{info_span, Instrument};
 
 use super::datafusion;
-use crate::common::{
-    infra::{
-        cluster,
-        config::CONFIG,
-        errors::{Error, ErrorCodes},
+use crate::{
+    common::{
+        infra::{
+            cluster,
+            errors::{Error, ErrorCodes},
+        },
+        meta::stream::ScanStats,
     },
-    meta::{common::FileKey, stream::ScanStats, StreamType},
+    handler::grpc::cluster_rpc,
+    service::db,
 };
-use crate::handler::grpc::cluster_rpc;
-use crate::service::db;
 
 mod storage;
 mod wal;
 
 pub type SearchResult = Result<(HashMap<String, Vec<RecordBatch>>, ScanStats), Error>;
 
-#[tracing::instrument(name = "service:search:grpc:search", skip_all, fields(org_id = req.org_id))]
+#[tracing::instrument(name = "service:search:grpc:search", skip_all, fields(session_id = req.job.as_ref().unwrap().session_id, org_id = req.org_id))]
 pub async fn search(
     req: &cluster_rpc::SearchRequest,
 ) -> Result<cluster_rpc::SearchResponse, Error> {
     let start = std::time::Instant::now();
     let sql = Arc::new(super::sql::Sql::new(req).await?);
     let stream_type = StreamType::from(req.stream_type.as_str());
+
     let session_id = Arc::new(req.job.as_ref().unwrap().session_id.to_string());
     let timeout = if req.timeout > 0 {
         req.timeout as u64
@@ -61,84 +68,93 @@ pub async fn search(
         ))));
     }
 
-    let mut results = HashMap::new();
-    let mut scan_stats = ScanStats::new();
-
-    // search in WAL
+    // search in WAL parquet
     let session_id1 = session_id.clone();
     let sql1 = sql.clone();
-    let wal_span = info_span!("service:search:grpc:in_wal", org_id = sql.org_id,stream_name = sql.stream_name, stream_type = ?stream_type);
+    let wal_parquet_span = info_span!(
+        "service:search:grpc:in_wal_parquet",
+        session_id = session_id1.as_ref().clone(),
+        org_id = sql.org_id,
+        stream_name = sql.stream_name,
+        stream_type = stream_type.to_string(),
+    );
     let task1 = tokio::task::spawn(
         async move {
             if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
-                wal::search(&session_id1, sql1, stream_type, timeout).await
+                wal::search_parquet(&session_id1, sql1, stream_type, timeout).await
             } else {
                 Ok((HashMap::new(), ScanStats::default()))
             }
         }
-        .instrument(wal_span),
+        .instrument(wal_parquet_span),
+    );
+
+    // search in WAL memory
+    let session_id2 = session_id.clone();
+    let sql2 = sql.clone();
+    let wal_mem_span = info_span!(
+        "service:search:grpc:in_wal_memory",
+        session_id = session_id2.as_ref().clone(),
+        org_id = sql.org_id,
+        stream_name = sql.stream_name,
+        stream_type = stream_type.to_string(),
+    );
+    let task2 = tokio::task::spawn(
+        async move {
+            if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
+                wal::search_memtable(&session_id2, sql2, stream_type, timeout).await
+            } else {
+                Ok((HashMap::new(), ScanStats::default()))
+            }
+        }
+        .instrument(wal_mem_span),
     );
 
     // search in object storage
     let req_stype = req.stype;
-    let session_id2 = session_id.clone();
-    let sql2 = sql.clone();
+    let session_id3 = session_id.clone();
+    let sql3 = sql.clone();
     let file_list: Vec<FileKey> = req.file_list.iter().map(FileKey::from).collect();
-    let storage_span = info_span!("service:search:grpc:in_storage", org_id = sql.org_id,stream_name = sql.stream_name, stream_type = ?stream_type);
-    let task2 = tokio::task::spawn(
+    let storage_span = info_span!(
+        "service:search:grpc:in_storage",
+        session_id = session_id3.as_ref().clone(),
+        org_id = sql.org_id,
+        stream_name = sql.stream_name,
+        stream_type = stream_type.to_string(),
+    );
+    let task3 = tokio::task::spawn(
         async move {
             if req_stype == cluster_rpc::SearchType::WalOnly as i32 {
                 Ok((HashMap::new(), ScanStats::default()))
             } else {
-                storage::search(&session_id2, sql2, &file_list, stream_type, timeout).await
+                storage::search(&session_id3, sql3, &file_list, stream_type, timeout).await
             }
         }
         .instrument(storage_span),
     );
 
-    // merge data from local WAL
-    let (batches1, scan_stats1) = match task1.await {
-        Ok(result) => result?,
-        Err(err) => {
-            return Err(Error::ErrorCode(ErrorCodes::ServerInternalError(
-                err.to_string(),
-            )))
-        }
-    };
-
-    if !batches1.is_empty() {
-        for (key, batch) in batches1 {
+    // merge result
+    let mut results = HashMap::new();
+    let mut scan_stats = ScanStats::new();
+    let tasks = try_join_all(vec![task1, task2, task3])
+        .await
+        .map_err(|e| Error::ErrorCode(ErrorCodes::ServerInternalError(e.to_string())))?;
+    for task in tasks {
+        let (batches, stats) =
+            task.map_err(|e| Error::ErrorCode(ErrorCodes::ServerInternalError(e.to_string())))?;
+        scan_stats.add(&stats);
+        for (key, batch) in batches {
             if !batch.is_empty() {
                 let value = results.entry(key).or_insert_with(Vec::new);
-                value.push(batch);
+                value.extend(batch);
             }
         }
     }
-    scan_stats.add(&scan_stats1);
-
-    // merge data from object storage search
-    let (batches2, scan_stats2) = match task2.await {
-        Ok(result) => result?,
-        Err(err) => {
-            return Err(Error::ErrorCode(ErrorCodes::ServerInternalError(
-                err.to_string(),
-            )))
-        }
-    };
-
-    if !batches2.is_empty() {
-        for (key, batch) in batches2 {
-            if !batch.is_empty() {
-                let value = results.entry(key).or_insert_with(Vec::new);
-                value.push(batch);
-            }
-        }
-    }
-    scan_stats.add(&scan_stats2);
 
     // merge all batches
     let (offset, limit) = (0, sql.meta.offset + sql.meta.limit);
-    for (name, batches) in results.iter_mut() {
+    let mut merge_results = HashMap::new();
+    for (name, batches) in results {
         let merge_sql = if name == "query" {
             sql.origin_sql.clone()
         } else {
@@ -148,16 +164,17 @@ pub async fn search(
                 .0
                 .clone()
         };
-        *batches =
-            match super::datafusion::exec::merge(&sql.org_id, offset, limit, &merge_sql, batches)
+        let batches =
+            match super::datafusion::exec::merge(&sql.org_id, offset, limit, &merge_sql, &batches)
                 .await
             {
                 Ok(res) => res,
                 Err(err) => {
-                    log::error!("datafusion merge error: {}", err);
-                    return Err(handle_datafusion_error(err));
+                    log::error!("[session_id {session_id}] datafusion merge error: {}", err);
+                    return Err(err.into());
                 }
             };
+        merge_results.insert(name.to_string(), batches);
     }
 
     // clear session data
@@ -165,9 +182,10 @@ pub async fn search(
 
     // final result
     let mut hits_buf = Vec::new();
-    let result_query = results.get("query").cloned().unwrap_or_default();
-    if !result_query.is_empty() && !result_query[0].is_empty() {
-        let schema = result_query[0][0].schema();
+    let mut hits_total = 0;
+    let result_query = merge_results.get("query").cloned().unwrap_or_default();
+    if !result_query.is_empty() && !result_query.is_empty() {
+        let schema = result_query[0].schema();
         let ipc_options = ipc::writer::IpcWriteOptions::default();
         let ipc_options = ipc_options
             .try_with_compression(Some(ipc::CompressionType::ZSTD))
@@ -175,8 +193,9 @@ pub async fn search(
         let mut writer =
             ipc::writer::FileWriter::try_new_with_options(hits_buf, &schema, ipc_options).unwrap();
         for batch in result_query {
-            for item in batch {
-                writer.write(&item).unwrap();
+            if batch.num_rows() > 0 {
+                hits_total += batch.num_rows();
+                writer.write(&batch).unwrap();
             }
         }
         writer.finish().unwrap();
@@ -185,12 +204,12 @@ pub async fn search(
 
     // finally aggs result
     let mut aggs_buf = Vec::new();
-    for (key, batches) in results {
+    for (key, batches) in merge_results {
         if key == "query" || batches.is_empty() {
             continue;
         }
         let mut buf = Vec::new();
-        let schema = batches[0][0].schema();
+        let schema = batches[0].schema();
         let ipc_options = ipc::writer::IpcWriteOptions::default();
         let ipc_options = ipc_options
             .try_with_compression(Some(ipc::CompressionType::ZSTD))
@@ -198,9 +217,7 @@ pub async fn search(
         let mut writer =
             ipc::writer::FileWriter::try_new_with_options(buf, &schema, ipc_options).unwrap();
         for batch in batches {
-            for item in batch {
-                writer.write(&item).unwrap();
-            }
+            writer.write(&batch).unwrap();
         }
         writer.finish().unwrap();
         buf = writer.into_inner().unwrap();
@@ -216,7 +233,7 @@ pub async fn search(
         took: start.elapsed().as_millis() as i32,
         from: sql.meta.offset as i32,
         size: sql.meta.limit as i32,
-        total: 0,
+        total: hits_total as i64,
         hits: hits_buf,
         aggs: aggs_buf,
         scan_stats: Some(cluster_rpc::ScanStats::from(&scan_stats)),
@@ -225,56 +242,33 @@ pub async fn search(
     Ok(result)
 }
 
-pub fn handle_datafusion_error(err: DataFusionError) -> Error {
-    if let DataFusionError::SchemaError(SchemaError::FieldNotFound {
-        field,
-        valid_fields: _,
-    }) = err
-    {
-        return Error::ErrorCode(ErrorCodes::SearchFieldNotFound(field.name));
-    }
-
-    let err = err.to_string();
-    if err.contains("Schema error: No field named") {
-        let pos = err.find("Schema error: No field named").unwrap();
-        return match get_key_from_error(&err, pos) {
-            Some(key) => Error::ErrorCode(ErrorCodes::SearchFieldNotFound(key)),
-            None => Error::ErrorCode(ErrorCodes::SearchSQLExecuteError(err)),
-        };
-    }
-    if err.contains("parquet not found") {
-        return Error::ErrorCode(ErrorCodes::SearchParquetFileNotFound);
-    }
-    if err.contains("Invalid function ") {
-        let pos = err.find("Invalid function ").unwrap();
-        return match get_key_from_error(&err, pos) {
-            Some(key) => Error::ErrorCode(ErrorCodes::SearchFunctionNotDefined(key)),
-            None => Error::ErrorCode(ErrorCodes::SearchSQLExecuteError(err)),
-        };
-    }
-    if err.contains("Incompatible data types") {
-        let pos = err.find("for field").unwrap();
-        let pos_start = err[pos..].find(' ').unwrap();
-        let pos_end = err[pos + pos_start + 1..].find('.').unwrap();
-        let field = err[pos + pos_start + 1..pos + pos_start + 1 + pos_end].to_string();
-        return Error::ErrorCode(ErrorCodes::SearchFieldHasNoCompatibleDataType(field));
-    }
-    Error::ErrorCode(ErrorCodes::SearchSQLExecuteError(err))
-}
-
-fn get_key_from_error(err: &str, pos: usize) -> Option<String> {
-    for punctuation in ['\'', '"'] {
-        let pos_start = err[pos..].find(punctuation);
-        if pos_start.is_none() {
-            continue;
+fn check_memory_circuit_breaker(session_id: &str, scan_stats: &ScanStats) -> Result<(), Error> {
+    let scan_size = if scan_stats.compressed_size > 0 {
+        scan_stats.compressed_size
+    } else {
+        scan_stats.original_size
+    };
+    if let Some(cur_memory) = memory_stats::memory_stats() {
+        // left memory < datafusion * breaker_ratio and scan_size >=  left memory
+        let left_mem = CONFIG.limit.mem_total - cur_memory.physical_mem;
+        if (left_mem
+            < (CONFIG.memory_cache.datafusion_max_size
+                * CONFIG.common.memory_circuit_breaker_ratio
+                / 100))
+            && (scan_size >= left_mem as i64)
+        {
+            let err = format!(
+                "fire memory_circuit_breaker, try to alloc {} bytes, now current memory usage is {} bytes, left memory {} bytes, left memory more than limit of [{} bytes] or scan_size more than left memory , please submit a new query with a short time range",
+                scan_size,
+                cur_memory.physical_mem,
+                left_mem,
+                CONFIG.memory_cache.datafusion_max_size
+                    * CONFIG.common.memory_circuit_breaker_ratio
+                    / 100
+            );
+            log::warn!("[{session_id}] {}", err);
+            return Err(Error::Message(err.to_string()));
         }
-        let pos_start = pos_start.unwrap();
-        let pos_end = err[pos + pos_start + 1..].find(punctuation);
-        if pos_end.is_none() {
-            continue;
-        }
-        let pos_end = pos_end.unwrap();
-        return Some(err[pos + pos_start + 1..pos + pos_start + 1 + pos_end].to_string());
     }
-    None
+    Ok(())
 }

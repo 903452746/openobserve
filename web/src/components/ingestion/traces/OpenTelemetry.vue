@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -18,51 +19,24 @@
     <div class="title q-pl-md q-pt-md" data-test="vector-title-text">
       <b>OTLP HTTP</b>
     </div>
-    <div class="tabContent q-ma-md">
-      <div class="tabContent__head">
-        <div class="copy_action">
-          <q-btn
-            data-test="traces-copy-btn"
-            flat
-            round
-            color="grey"
-            icon="content_copy"
-            @click="$emit('copy-to-clipboard-fn', copyHTTPTracesContent)"
-          />
-        </div>
-      </div>
-      <pre ref="copyHTTPTracesContent" data-test="traces-http-content-text">
-HTTP Endpoint: {{ endpoint.url }}/api/{{ currOrgIdentifier }}/v1/traces
-Authorization: Basic {{ accessKey }}</pre
-      >
+    <div class="q-ma-md">
+      <CopyContent
+        class="q-mt-sm"
+        :content="copyHTTPTracesContentURL"
+        :displayContent="'HTTP Endpoint: ' + copyHTTPTracesContentURL"
+      />
+      <CopyContent
+        class="q-mt-sm"
+        :content="copyHTTPTracesContentPasscode"
+        :displayContent="'Authorization: ' + copyHTTPTracesContentPasscode"
+      />
     </div>
 
     <div class="title q-pl-md q-pt-md" data-test="vector-title-text">
-      <b>OTLP gRPC</b> <br /><b>Note:</b> Not supported in clustered
-      installation of OpenObserve yet.
+      <b>OTLP gRPC</b>
     </div>
-    <div class="tabContent q-ma-md">
-      <div class="tabContent__head">
-        <div class="copy_action">
-          <q-btn
-            data-test="traces-copy-btn"
-            flat
-            round
-            color="grey"
-            icon="content_copy"
-            @click="$emit('copy-to-clipboard-fn', copyGRPCTracesContent)"
-          />
-        </div>
-      </div>
-      <pre ref="copyGRPCTracesContent" data-test="traces-grpc-content-text">
-endpoint: {{ endpoint.host }}
-headers: 
-  Authorization: "Basic {{ accessKey }}"
-  organization: {{ currOrgIdentifier }}
-  stream-name: default
-tls:
-  insecure: {{ endpoint.protocol == "https" ? false : true }}</pre
-      >
+    <div class="q-ma-md">
+      <CopyContent class="q-mt-sm" :content="copyGRPCTracesContent" />
     </div>
   </div>
 </template>
@@ -71,9 +45,9 @@ tls:
 import { defineComponent, ref, type Ref } from "vue";
 import config from "../../../aws-exports";
 import { useStore } from "vuex";
-import { getImageURL, b64EncodeUnicode } from "../../../utils/zincutils";
-import type { Endpoint } from "@/ts/interfaces";
-import { computed } from "vue";
+import { getImageURL } from "../../../utils/zincutils";
+import CopyContent from "@/components/CopyContent.vue";
+
 export default defineComponent({
   name: "traces-otlp",
   props: {
@@ -84,6 +58,7 @@ export default defineComponent({
       type: String,
     },
   },
+  components: { CopyContent },
   setup(props) {
     const store = useStore();
     const endpoint: any = ref({
@@ -101,20 +76,23 @@ export default defineComponent({
       protocol: url.protocol.replace(":", ""),
       tls: url.protocol === "https:" ? "On" : "Off",
     };
-    const accessKey = computed(() => {
-      return b64EncodeUnicode(
-        `${props.currUserEmail}:${store.state.organizationData.organizationPasscode}`
-      );
-    });
-    const copyHTTPTracesContent = ref(null);
-    const copyGRPCTracesContent = ref(null);
+
+    const copyHTTPTracesContentURL = `${endpoint.value.url}/api/${store.state.selectedOrganization.identifier}/v1/traces`;
+    const copyHTTPTracesContentPasscode = `Basic [BASIC_PASSCODE]`;
+    const copyGRPCTracesContent = `endpoint: ${endpoint.value.host}
+headers: 
+  Authorization: "Basic [BASIC_PASSCODE]"
+  organization: ${store.state.selectedOrganization.identifier}
+  stream-name: default
+tls:
+  insecure: ${endpoint.value.protocol == "https" ? false : true}`;
     return {
       store,
       config,
       endpoint,
-      copyHTTPTracesContent,
+      copyHTTPTracesContentURL,
+      copyHTTPTracesContentPasscode,
       copyGRPCTracesContent,
-      accessKey,
       getImageURL,
     };
   },

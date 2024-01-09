@@ -1,16 +1,17 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use crate::common::{
 };
 
 pub async fn set(org_id: &str, name: &str, js_func: &Transform) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/function/{org_id}/{name}");
     match db
         .put(
@@ -45,13 +46,13 @@ pub async fn set(org_id: &str, name: &str, js_func: &Transform) -> Result<(), an
 }
 
 pub async fn get(org_id: &str, name: &str) -> Result<Transform, anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let val = db.get(&format!("/function/{org_id}/{name}")).await?;
     Ok(json::from_slice(&val).unwrap())
 }
 
 pub async fn delete(org_id: &str, name: &str) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = format!("/function/{org_id}/{name}");
     match db.delete(&key, false, infra_db::NEED_WATCH).await {
         Ok(_) => {}
@@ -64,7 +65,7 @@ pub async fn delete(org_id: &str, name: &str) -> Result<(), anyhow::Error> {
 }
 
 pub async fn list(org_id: &str) -> Result<Vec<Transform>, anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
 
     Ok(db
         .list(&format!("/function/{org_id}/"))
@@ -76,8 +77,8 @@ pub async fn list(org_id: &str) -> Result<Vec<Transform>, anyhow::Error> {
 
 pub async fn watch() -> Result<(), anyhow::Error> {
     let key = "/function/";
-    let db = &infra_db::CLUSTER_COORDINATOR;
-    let mut events = db.watch(key).await?;
+    let cluster_coordinator = infra_db::get_coordinator().await;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching function");
     loop {
@@ -100,7 +101,7 @@ pub async fn watch() -> Result<(), anyhow::Error> {
                                 "{}/{}/{}",
                                 org_id, stream_fn.stream_type, stream_fn.stream
                             ))
-                            .or_insert(StreamFunctionsList { list: vec![] });
+                            .or_insert_with(|| StreamFunctionsList { list: vec![] });
                         if group.list.contains(&stream_fn) {
                             let stream_name =
                                 group.list.iter().position(|x| x.eq(&stream_fn)).unwrap();
@@ -124,7 +125,7 @@ pub async fn watch() -> Result<(), anyhow::Error> {
 }
 
 pub async fn cache() -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/function/";
     let ret = db.list(key).await?;
     for (item_key, item_value) in ret {
@@ -138,7 +139,7 @@ pub async fn cache() -> Result<(), anyhow::Error> {
                         "{}/{}/{}",
                         org_id, stream_fn.stream_type, stream_fn.stream
                     ))
-                    .or_insert(StreamFunctionsList { list: vec![] });
+                    .or_insert_with(|| StreamFunctionsList { list: vec![] });
                 group.list.push(stream_fn);
             }
             let mut func = json_val.clone();
@@ -153,7 +154,7 @@ pub async fn cache() -> Result<(), anyhow::Error> {
 }
 
 pub async fn reset() -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/function/";
     db.delete(key, true, infra_db::NO_NEED_WATCH).await?;
     let key = "/transform/";

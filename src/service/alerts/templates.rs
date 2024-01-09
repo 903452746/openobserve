@@ -1,92 +1,66 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use actix_web::{http, HttpResponse};
-use std::io::Error;
+use actix_web::http;
 
-use crate::common::infra::config::ALERTS_DESTINATIONS;
-use crate::common::meta::{alert::DestinationTemplate, http::HttpResponse as MetaHttpResponse};
-use crate::service::db;
+use crate::{
+    common::{infra::config::ALERTS_DESTINATIONS, meta::alerts::templates::Template},
+    service::db,
+};
 
-#[tracing::instrument(skip_all)]
-pub async fn save_template(
-    org_id: String,
-    name: String,
-    mut template: DestinationTemplate,
-) -> Result<HttpResponse, Error> {
-    template.name = Some(name.clone());
-    db::alerts::templates::set(org_id.as_str(), name.as_str(), template.clone())
+pub async fn save(org_id: &str, name: &str, mut template: Template) -> Result<(), anyhow::Error> {
+    if template.body.is_null() || template.body.as_str().unwrap_or_default().is_empty() {
+        return Err(anyhow::anyhow!("Alert template body empty"));
+    }
+    template.name = name.to_string();
+    if template.name.is_empty() {
+        return Err(anyhow::anyhow!("Alert template name is required"));
+    }
+    db::alerts::templates::set(org_id, name, template.clone()).await
+}
+
+pub async fn get(org_id: &str, name: &str) -> Result<Template, anyhow::Error> {
+    db::alerts::templates::get(org_id, name)
         .await
-        .unwrap();
-
-    Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
-        http::StatusCode::OK.into(),
-        "Alert template saved".to_string(),
-    )))
+        .map_err(|_| anyhow::anyhow!("Alert template not found"))
 }
 
-#[tracing::instrument]
-pub async fn list_templates(org_id: String) -> Result<HttpResponse, Error> {
-    let list = db::alerts::templates::list(org_id.as_str()).await.unwrap();
-    Ok(HttpResponse::Ok().json(list))
+pub async fn list(org_id: &str) -> Result<Vec<Template>, anyhow::Error> {
+    db::alerts::templates::list(org_id).await
 }
 
-#[tracing::instrument]
-pub async fn delete_template(org_id: String, name: String) -> Result<HttpResponse, Error> {
+pub async fn delete(org_id: &str, name: &str) -> Result<(), (http::StatusCode, anyhow::Error)> {
     for dest in ALERTS_DESTINATIONS.iter() {
-        if dest.key().starts_with(&org_id) && dest.value().template.eq(&name) {
-            return Ok(HttpResponse::Forbidden().json(MetaHttpResponse::error(
-                http::StatusCode::FORBIDDEN.into(),
-                format!(
-                    "Template is in use for destination {}",
-                    &dest.value().clone().name.unwrap()
+        if dest.key().starts_with(org_id) && dest.value().template.eq(&name) {
+            return Err((
+                http::StatusCode::FORBIDDEN,
+                anyhow::anyhow!(
+                    "Alert template is in use for destination {}",
+                    &dest.value().name.clone()
                 ),
-            )));
+            ));
         }
     }
 
-    if db::alerts::templates::get(org_id.as_str(), name.as_str())
+    if db::alerts::templates::get(org_id, name).await.is_err() {
+        return Err((
+            http::StatusCode::NOT_FOUND,
+            anyhow::anyhow!("Alert template not found {}", name),
+        ));
+    }
+    db::alerts::templates::delete(org_id, name)
         .await
-        .is_err()
-    {
-        return Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-            http::StatusCode::NOT_FOUND.into(),
-            "Alert template not found".to_string(),
-        )));
-    }
-    match db::alerts::templates::delete(org_id.as_str(), name.as_str()).await {
-        Ok(_) => Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
-            http::StatusCode::OK.into(),
-            "Alert template deleted".to_string(),
-        ))),
-        Err(e) => Ok(
-            HttpResponse::InternalServerError().json(MetaHttpResponse::error(
-                http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-                e.to_string(),
-            )),
-        ),
-    }
-}
-
-#[tracing::instrument]
-pub async fn get_template(org_id: String, name: String) -> Result<HttpResponse, Error> {
-    let result = db::alerts::templates::get(org_id.as_str(), name.as_str()).await;
-    match result {
-        Ok(alert) => Ok(HttpResponse::Ok().json(alert)),
-        Err(_) => Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-            http::StatusCode::NOT_FOUND.into(),
-            "Alert template not found".to_string(),
-        ))),
-    }
+        .map_err(|e| (http::StatusCode::INTERNAL_SERVER_ERROR, e))
 }

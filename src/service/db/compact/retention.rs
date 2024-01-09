@@ -1,24 +1,24 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use once_cell::sync::Lazy;
 use std::sync::Arc;
 
-use crate::common::{
-    infra::{config::RwHashSet, db as infra_db},
-    meta::StreamType,
-};
+use config::{meta::stream::StreamType, RwHashSet};
+use once_cell::sync::Lazy;
+
+use crate::common::infra::db as infra_db;
 
 static CACHE: Lazy<RwHashSet<String>> = Lazy::new(Default::default);
 
@@ -44,7 +44,7 @@ pub async fn delete_stream(
     stream_type: StreamType,
     date_range: Option<(&str, &str)>,
 ) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = mk_key(org_id, stream_type, stream_name, date_range);
 
     // write in cache
@@ -66,7 +66,7 @@ pub async fn process_stream(
     date_range: Option<(&str, &str)>,
     node: &str,
 ) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = mk_key(org_id, stream_type, stream_name, date_range);
     let db_key = format!("/compact/delete/{key}");
     Ok(db
@@ -81,7 +81,7 @@ pub async fn get_stream(
     stream_type: StreamType,
     date_range: Option<(&str, &str)>,
 ) -> String {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = mk_key(org_id, stream_type, stream_name, date_range);
     let db_key = format!("/compact/delete/{key}");
     match db.get(&db_key).await {
@@ -106,7 +106,7 @@ pub async fn delete_stream_done(
     stream_type: StreamType,
     date_range: Option<(&str, &str)>,
 ) -> Result<(), anyhow::Error> {
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = mk_key(org_id, stream_type, stream_name, date_range);
     db.delete_if_exists(
         &format!("/compact/delete/{key}"),
@@ -124,7 +124,7 @@ pub async fn delete_stream_done(
 
 pub async fn list() -> Result<Vec<String>, anyhow::Error> {
     let mut items = Vec::new();
-    let db = &infra_db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/compact/delete/";
     let ret = db.list(key).await?;
     for (item_key, _) in ret {
@@ -136,8 +136,8 @@ pub async fn list() -> Result<Vec<String>, anyhow::Error> {
 
 pub async fn watch() -> Result<(), anyhow::Error> {
     let key = "/compact/delete/";
-    let db = &infra_db::CLUSTER_COORDINATOR;
-    let mut events = db.watch(key).await?;
+    let cluster_coordinator = infra_db::get_coordinator().await;
+    let mut events = cluster_coordinator.watch(key).await?;
     let events = Arc::get_mut(&mut events).unwrap();
     log::info!("Start watching stream deleting");
     loop {
@@ -164,7 +164,7 @@ pub async fn watch() -> Result<(), anyhow::Error> {
 }
 
 pub async fn cache() -> Result<(), anyhow::Error> {
-    let db = &crate::common::infra::db::DEFAULT;
+    let db = infra_db::get_db().await;
     let key = "/compact/delete/";
     let ret = db.list(key).await?;
     for (item_key, _) in ret {

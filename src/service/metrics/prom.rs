@@ -1,57 +1,55 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{collections::HashMap, sync::Arc};
 
 use actix_web::web;
-use ahash::AHashMap;
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
+use config::{meta::stream::StreamType, metrics, utils::schema_ext::SchemaExt, FxIndexMap, CONFIG};
 use datafusion::arrow::datatypes::Schema;
 use promql_parser::{label::MatchOp, parser};
 use prost::Message;
-use std::collections::HashMap;
 
-use crate::service::{
-    db,
-    ingestion::{chk_schema_by_record, write_file},
-    schema::{set_schema_metadata, stream_schema_exists},
-    search as search_service,
-    stream::unwrap_partition_time_level,
-    usage::report_request_usage_stats,
-};
 use crate::{
     common::{
         infra::{
             cache::stats,
             cluster::{self, LOCAL_NODE_UUID},
-            config::{FxIndexMap, CONFIG, METRIC_CLUSTER_LEADER, METRIC_CLUSTER_MAP},
+            config::{METRIC_CLUSTER_LEADER, METRIC_CLUSTER_MAP},
             errors::{Error, Result},
-            metrics,
         },
         meta::{
-            alert,
+            alerts::{self, Alert},
             functions::StreamTransform,
             prom::*,
             search,
-            stream::{PartitioningDetails, StreamParams},
+            stream::{PartitioningDetails, SchemaRecords},
             usage::UsageType,
-            StreamType,
         },
         utils::{json, time::parse_i64_to_timestamp_micros},
     },
-    service::format_stream_name,
+    service::{
+        db, format_stream_name,
+        ingestion::{evaluate_trigger, write_file, TriggerAlertData},
+        metrics::format_label_name,
+        schema::{check_for_schema, set_schema_metadata, stream_schema_exists},
+        search as search_service,
+        stream::unwrap_partition_time_level,
+        usage::report_request_usage_stats,
+    },
 };
-
-use super::format_label_name;
 
 pub(crate) mod prometheus {
     include!(concat!(env!("OUT_DIR"), "/prometheus.rs"));
@@ -71,20 +69,26 @@ pub async fn remote_write(
         return Err(anyhow::anyhow!("Quota exceeded for this organization"));
     }
 
-    let mut min_ts =
-        (Utc::now() + Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
+    // check memtable
+    if let Err(e) = ingester::check_memtable_size() {
+        return Err(anyhow::Error::msg(e.to_string()));
+    }
+
+    // let min_ts = (Utc::now() -
+    // Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
     let dedup_enabled = CONFIG.common.metrics_dedup_enabled;
     let election_interval = CONFIG.limit.metrics_leader_election_interval * 1000000;
     let mut last_received: i64 = 0;
     let mut has_entry = false;
     let mut accept_record: bool;
     let mut cluster_name = String::new();
-    let mut metric_data_map: AHashMap<String, AHashMap<String, Vec<String>>> = AHashMap::new();
-    let mut metric_schema_map: AHashMap<String, Schema> = AHashMap::new();
-    let mut stream_alerts_map: AHashMap<String, Vec<alert::Alert>> = AHashMap::new();
-    let mut stream_trigger_map: AHashMap<String, alert::Trigger> = AHashMap::new();
-    let mut stream_transform_map: AHashMap<String, Vec<StreamTransform>> = AHashMap::new();
-    let mut stream_partitioning_map: AHashMap<String, PartitioningDetails> = AHashMap::new();
+    let mut metric_data_map: HashMap<String, HashMap<String, SchemaRecords>> = HashMap::new();
+    let mut metric_schema_map: HashMap<String, Schema> = HashMap::new();
+    let mut schema_evoluted: HashMap<String, bool> = HashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<alerts::Alert>> = HashMap::new();
+    let mut stream_trigger_map: HashMap<String, TriggerAlertData> = HashMap::new();
+    let mut stream_transform_map: HashMap<String, Vec<StreamTransform>> = HashMap::new();
+    let mut stream_partitioning_map: HashMap<String, PartitioningDetails> = HashMap::new();
 
     let decoded = snap::raw::Decoder::new()
         .decompress_vec(&body)
@@ -93,6 +97,7 @@ pub async fn remote_write(
         .map_err(|e| anyhow::anyhow!("Invalid protobuf: {}", e.to_string()))?;
 
     // parse metadata
+    let req_metadata_len = request.metadata.len();
     for item in request.metadata {
         let metric_name = format_stream_name(&item.metric_family_name.clone());
         let metadata = Metadata {
@@ -101,18 +106,57 @@ pub async fn remote_write(
             help: item.help.clone(),
             unit: item.unit.clone(),
         };
-        let mut extra_metadata: AHashMap<String, String> = AHashMap::new();
+        let mut extra_metadata: HashMap<String, String> = HashMap::new();
         extra_metadata.insert(
             METADATA_LABEL.to_string(),
             json::to_string(&metadata).unwrap(),
         );
-        set_schema_metadata(org_id, &metric_name, StreamType::Metrics, extra_metadata)
+        set_schema_metadata(org_id, &metric_name, StreamType::Metrics, &extra_metadata)
             .await
             .unwrap();
     }
 
+    // TODO: delete for debug
+    let mut streams = std::collections::HashSet::new();
+    for series in request.timeseries.iter() {
+        let metric_name = match series.labels.iter().find(|label| label.name == NAME_LABEL) {
+            Some(v) => v.value.clone(),
+            None => continue,
+        };
+        streams.insert(metric_name);
+    }
+    log::info!(
+        "/prometheus/api/v1/write: metadatas: {}, streams: {}, samples: {}",
+        req_metadata_len,
+        streams.len(),
+        request
+            .timeseries
+            .iter()
+            .map(|ts| ts.samples.len())
+            .sum::<usize>(),
+    );
+
     // maybe empty, we can return immediately
     if request.timeseries.is_empty() {
+        let time = start.elapsed().as_secs_f64();
+        metrics::HTTP_RESPONSE_TIME
+            .with_label_values(&[
+                "/prometheus/api/v1/write",
+                "200",
+                org_id,
+                "",
+                &StreamType::Metrics.to_string(),
+            ])
+            .observe(time);
+        metrics::HTTP_INCOMING_REQUESTS
+            .with_label_values(&[
+                "/prometheus/api/v1/write",
+                "200",
+                org_id,
+                "",
+                &StreamType::Metrics.to_string(),
+            ])
+            .inc();
         return Ok(());
     }
 
@@ -170,9 +214,6 @@ pub async fn remote_write(
             };
 
             let timestamp = parse_i64_to_timestamp_micros(sample.timestamp);
-            if timestamp < min_ts {
-                min_ts = timestamp;
-            }
 
             if first_line && dedup_enabled && !cluster_name.is_empty() {
                 let lock = METRIC_CLUSTER_LEADER.read().await;
@@ -204,7 +245,26 @@ pub async fn remote_write(
                 accept_record = true
             }
             if !accept_record {
-                //do not accept any entries for request
+                // do not accept any entries for request
+                let time = start.elapsed().as_secs_f64();
+                metrics::HTTP_RESPONSE_TIME
+                    .with_label_values(&[
+                        "/prometheus/api/v1/write",
+                        "200",
+                        org_id,
+                        "",
+                        &StreamType::Metrics.to_string(),
+                    ])
+                    .observe(time);
+                metrics::HTTP_INCOMING_REQUESTS
+                    .with_label_values(&[
+                        "/prometheus/api/v1/write",
+                        "200",
+                        org_id,
+                        "",
+                        &StreamType::Metrics.to_string(),
+                    ])
+                    .inc();
                 return Ok(());
             }
 
@@ -234,8 +294,13 @@ pub async fn remote_write(
             );
 
             // Start get stream alerts
-            let key = format!("{}/{}/{}", &org_id, StreamType::Metrics, metric_name);
-            crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+            crate::service::ingestion::get_stream_alerts(
+                org_id,
+                StreamType::Metrics,
+                &metric_name,
+                &mut stream_alerts_map,
+            )
+            .await;
             // End get stream alert
 
             let mut runtime = crate::service::ingestion::init_functions_runtime();
@@ -254,10 +319,9 @@ pub async fn remote_write(
             let mut value: json::Value = json::to_value(&metric).unwrap();
 
             // Start row based transform
-
             value = crate::service::ingestion::apply_stream_transform(
                 &local_trans,
-                &value,
+                value,
                 &stream_vrl_map,
                 &metric_name,
                 &mut runtime,
@@ -274,15 +338,31 @@ pub async fn remote_write(
                 json::Value::Number(timestamp.into()),
             );
             let value_str = crate::common::utils::json::to_string(&val_map).unwrap();
-            chk_schema_by_record(
-                &mut metric_schema_map,
-                org_id,
-                StreamType::Metrics,
-                &metric_name,
-                timestamp,
-                &value_str,
-            )
-            .await;
+
+            // check for schema evolution
+            if schema_evoluted.get(&metric_name).is_none() {
+                let record_val = json::Value::Object(val_map.to_owned());
+                if check_for_schema(
+                    org_id,
+                    &metric_name,
+                    StreamType::Metrics,
+                    &mut metric_schema_map,
+                    &record_val,
+                    timestamp,
+                )
+                .await
+                .is_ok()
+                {
+                    schema_evoluted.insert(metric_name.to_owned(), true);
+                }
+            }
+
+            let schema = metric_schema_map
+                .get(&metric_name)
+                .unwrap()
+                .clone()
+                .with_metadata(HashMap::new());
+            let schema_key = schema.hash_key();
 
             // get hour key
             let hour_key = crate::service::ingestion::get_wal_time_key(
@@ -290,13 +370,22 @@ pub async fn remote_write(
                 &partition_keys,
                 partition_time_level,
                 val_map,
-                None,
+                Some(&schema_key),
             );
-            let hour_buf = buf.entry(hour_key).or_default();
-            hour_buf.push(value_str);
+            let hour_buf = buf.entry(hour_key).or_insert_with(|| SchemaRecords {
+                schema_key,
+                schema: Arc::new(schema),
+                records: vec![],
+                records_size: 0,
+            });
+            hour_buf
+                .records
+                .push(Arc::new(json::Value::Object(val_map.to_owned())));
+            hour_buf.records_size += value_str.len();
 
             // real time alert
-            if !stream_alerts_map.is_empty() {
+            let need_trigger = !stream_trigger_map.contains_key(&metric_name);
+            if need_trigger && !stream_alerts_map.is_empty() {
                 // Start check for alert trigger
                 let key = format!(
                     "{}/{}/{}",
@@ -305,46 +394,28 @@ pub async fn remote_write(
                     metric_name.clone()
                 );
                 if let Some(alerts) = stream_alerts_map.get(&key) {
+                    let mut trigger_alerts: Vec<(Alert, Vec<json::Map<String, json::Value>>)> =
+                        Vec::new();
                     for alert in alerts {
-                        if alert.is_real_time {
-                            let set_trigger = alert::Evaluate::evaluate(
-                                &alert.condition,
-                                value.as_object().unwrap().clone(),
-                            );
-                            if set_trigger {
-                                stream_trigger_map.insert(
-                                    metric_name.clone(),
-                                    alert::Trigger {
-                                        timestamp,
-                                        is_valid: true,
-                                        alert_name: alert.name.clone(),
-                                        stream: metric_name.clone(),
-                                        org: org_id.to_string(),
-                                        stream_type: StreamType::Metrics,
-                                        last_sent_at: 0,
-                                        count: 0,
-                                        is_ingest_time: true,
-                                        parent_alert_deleted: false,
-                                    },
-                                );
-                            }
+                        if let Ok(Some(v)) = alert.evaluate(Some(val_map)).await {
+                            trigger_alerts.push((alert.clone(), v));
                         }
                     }
+                    stream_trigger_map.insert(metric_name.clone(), Some(trigger_alerts));
                 }
                 // End check for alert trigger
             }
         }
     }
 
+    // write data to wal
     let time = start.elapsed().as_secs_f64();
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Metrics.to_string()).await;
     for (stream_name, stream_data) in metric_data_map {
         // stream_data could be empty if metric value is nan, check it
         if stream_data.is_empty() {
             continue;
         }
-
-        // write to file
-        let mut stream_file_name = "".to_string();
 
         // check if we are allowed to ingest
         if db::compact::retention::is_deleting_stream(
@@ -357,20 +428,8 @@ pub async fn remote_write(
             continue;
         }
 
-        let time_level = if let Some(details) = stream_partitioning_map.get(&stream_name) {
-            details.partition_time_level
-        } else {
-            Some(CONFIG.limit.metrics_file_retention.as_str().into())
-        };
-
-        let mut req_stats = write_file(
-            &stream_data,
-            thread_id,
-            &StreamParams::new(org_id, &stream_name, StreamType::Metrics),
-            &mut stream_file_name,
-            time_level,
-        )
-        .await;
+        // write to file
+        let mut req_stats = write_file(&writer, &stream_name, stream_data).await;
 
         let fns_length: usize = stream_transform_map.values().map(|v| v.len()).sum();
         req_stats.response_time += time;
@@ -384,27 +443,13 @@ pub async fn remote_write(
         )
         .await;
     }
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
+    }
 
     // only one trigger per request, as it updates etcd
-    for (_, entry) in &stream_trigger_map {
-        let mut alerts = stream_alerts_map
-            .get(&format!(
-                "{}/{}/{}",
-                entry.org,
-                StreamType::Metrics,
-                entry.stream
-            ))
-            .unwrap()
-            .clone();
-
-        alerts.retain(|alert| alert.name.eq(&entry.alert_name));
-        if !alerts.is_empty() {
-            crate::service::ingestion::send_ingest_notification(
-                entry.clone(),
-                alerts.first().unwrap().clone(),
-            )
-            .await;
-        }
+    for (_, entry) in stream_trigger_map {
+        evaluate_trigger(entry).await;
     }
 
     metrics::HTTP_RESPONSE_TIME
@@ -497,7 +542,8 @@ pub(crate) async fn get_metadata(org_id: &str, req: RequestMetadata) -> Result<R
 }
 
 // HACK: the implementation returns at most one metadata object per metric.
-// This differs from Prometheus, which [supports] multiple metadata objects per metric.
+// This differs from Prometheus, which [supports] multiple metadata objects per
+// metric.
 //
 // [supports]: https://prometheus.io/docs/prometheus/latest/querying/api/#querying-metric-metadata
 fn get_metadata_object(schema: &Schema) -> Option<MetadataObject> {
@@ -587,7 +633,7 @@ pub(crate) async fn get_series(
         encoding: search::RequestEncoding::Empty,
         timeout: 0,
     };
-    let series = match search_service::search(org_id, StreamType::Metrics, &req).await {
+    let series = match search_service::search("", org_id, StreamType::Metrics, &req).await {
         Err(err) => {
             log::error!("search series error: {err}");
             return Err(err);
@@ -729,7 +775,7 @@ pub(crate) async fn get_label_values(
         encoding: search::RequestEncoding::Empty,
         timeout: 0,
     };
-    let mut label_values = match search_service::search(org_id, stream_type, &req).await {
+    let mut label_values = match search_service::search("", org_id, stream_type, &req).await {
         Ok(resp) => resp
             .hits
             .iter()
@@ -792,9 +838,10 @@ async fn prom_ha_handler(
         if replica_label.eq(&leader.name) {
             _accept_record = true;
             leader.last_received = curr_ts;
-            // log::info!(  "Updating last received data for {} to {}", &leader.name, Utc.timestamp_nanos(last_received * 1000));
+            // log::info!(  "Updating last received data for {} to {}",
+            // &leader.name, Utc.timestamp_nanos(last_received * 1000));
         } else if curr_ts - last_received > election_interval {
-            //elect new leader as didnt receive data for last 30 secs
+            // elect new leader as didnt receive data for last 30 secs
             log::info!(
                 "Electing {} new leader for {} as last received data from {} at {} ",
                 replica_label,

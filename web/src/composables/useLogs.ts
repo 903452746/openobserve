@@ -1,20 +1,21 @@
 // Copyright 2023 Zinc Labs Inc.
-
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-
-//      http:www.apache.org/licenses/LICENSE-2.0
-
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { date, useQuasar } from "quasar";
 import { useI18n } from "vue-i18n";
-import { reactive, ref, type Ref } from "vue";
+import { reactive, ref, type Ref, toRaw } from "vue";
 import { useStore } from "vuex";
 import { useRouter } from "vue-router";
 import { cloneDeep } from "lodash-es";
@@ -28,6 +29,7 @@ import {
   timestampToTimezoneDate,
   histogramDateTimezone,
   useLocalWrapContent,
+  useLocalTimezone,
 } from "@/utils/zincutils";
 import { getConsumableRelativeTime } from "@/utils/date";
 import { byString } from "@/utils/json";
@@ -44,16 +46,17 @@ import useStreams from "@/composables/useStreams";
 
 import searchService from "@/services/search";
 import type { LogsQueryPayload } from "@/ts/interfaces/query";
+import savedviewsService from "@/services/saved_views";
 
 const defaultObject = {
   organizationIdetifier: "",
   runQuery: false,
-  loading: false,
+  loading: true,
   config: {
     splitterModel: 20,
     lastSplitterPosition: 0,
     splitterLimit: [0, 40],
-    fnSplitterModel: 99.5,
+    fnSplitterModel: 60,
     fnLastSplitterPosition: 0,
     fnSplitterLimit: [40, 100],
     refreshTimes: [
@@ -85,7 +88,7 @@ const defaultObject = {
     showQuery: true,
     showHistogram: true,
     showDetailTab: false,
-    toggleFunction: false,
+    toggleFunction: true,
     toggleSourceWrap: useLocalWrapContent()
       ? JSON.parse(useLocalWrapContent())
       : false,
@@ -138,6 +141,8 @@ const defaultObject = {
       endTime: 0,
       relativeTimePeriod: "15m",
       type: "relative",
+      selectedDate: <any>{},
+      selectedTime: <any>{},
     },
     searchAround: {
       indexTimestamp: 0,
@@ -147,6 +152,7 @@ const defaultObject = {
     tempFunctionName: "",
     tempFunctionContent: "",
     tempFunctionLoading: false,
+    savedViews: <any>[],
   },
 };
 
@@ -162,7 +168,6 @@ const useLogs = () => {
   const router = useRouter();
   const parser = new Parser();
   const fieldValues = ref();
-  let refreshIntervalID: any = 0;
   const initialQueryPayload: Ref<LogsQueryPayload | null> = ref(null);
 
   const resetSearchObj = () => {
@@ -269,13 +274,14 @@ const useLogs = () => {
     searchObj.data.searchAround.size = 0;
   }
 
-  function loadStreamLists() {
+  async function loadStreamLists() {
     try {
       if (searchObj.data.streamResults.list.length > 0) {
         let lastUpdatedStreamTime = 0;
 
         let selectedStream = { label: "", value: "" };
 
+        searchObj.data.stream.streamLists = [];
         searchObj.data.streamResults.list.forEach((item: any) => {
           const itemObj: {
             label: string;
@@ -315,14 +321,14 @@ const useLogs = () => {
       const streamType = searchObj.data.stream.streamType || "logs";
       const streamData = await getStreams(streamType, true);
       searchObj.data.streamResults = streamData;
-      loadStreamLists();
+      await loadStreamLists();
       return;
     } catch (e: any) {
       console.log("Error while getting stream list");
     }
   };
 
-  const updateUrlQueryParams = () => {
+  const generateURLQuery = (isShareLink: boolean = false) => {
     const date = searchObj.data.datetime;
 
     const query: any = {};
@@ -332,7 +338,12 @@ const useLogs = () => {
     }
 
     if (date.type == "relative") {
-      query["period"] = date.relativeTimePeriod;
+      if (isShareLink) {
+        query["from"] = date.startTime;
+        query["to"] = date.endTime;
+      } else {
+        query["period"] = date.relativeTimePeriod;
+      }
     } else {
       query["from"] = date.startTime;
       query["to"] = date.endTime;
@@ -345,7 +356,22 @@ const useLogs = () => {
       query["query"] = b64EncodeUnicode(searchObj.data.query);
     }
 
+    if (
+      searchObj.meta.toggleFunction &&
+      searchObj.data.tempFunctionContent != ""
+    ) {
+      query["functionContent"] = b64EncodeUnicode(
+        searchObj.data.tempFunctionContent
+      );
+    }
+
     query["org_identifier"] = store.state.selectedOrganization.identifier;
+    // query["timezone"] = store.state.timezone;
+    return query;
+  };
+
+  const updateUrlQueryParams = () => {
+    const query = generateURLQuery(false);
 
     router.push({ query });
   };
@@ -469,9 +495,9 @@ const useLogs = () => {
         }
 
         whereClause = whereClause
-            .split("\n")
-            .filter((line: string) => !line.trim().startsWith("--"))
-            .join("\n");
+          .split("\n")
+          .filter((line: string) => !line.trim().startsWith("--"))
+          .join("\n");
         if (whereClause.trim() != "") {
           whereClause = whereClause
             .replace(/=(?=(?:[^"']*"[^"']*"')*[^"']*$)/g, " =")
@@ -524,6 +550,7 @@ const useLogs = () => {
         searchObj.meta.showHistogram === false
       ) {
         delete req.aggs;
+        req.query.track_total_hits = true;
 
         if (searchObj.meta.showHistogram === false) {
           // delete searchObj.data.histogram;
@@ -592,21 +619,25 @@ const useLogs = () => {
 
           if (isPagination) dismiss = showNotification();
 
-          if (!isPagination) initialQueryPayload.value = cloneDeep(queryReq);
-          else {
-            if (
-              searchObj.meta.refreshInterval == 0 &&
-              router.currentRoute.value.name == "logs" &&
-              searchObj.data.queryResults.hasOwnProperty("hits")
-            ) {
-              queryReq.query.start_time =
-                initialQueryPayload.value?.query?.start_time;
-              queryReq.query.end_time =
-                initialQueryPayload.value?.query?.end_time;
+          if (searchObj.data.datetime.type === "relative") {
+            if (!isPagination) initialQueryPayload.value = cloneDeep(queryReq);
+            else {
+              if (
+                searchObj.meta.refreshInterval == 0 &&
+                router.currentRoute.value.name == "logs" &&
+                searchObj.data.queryResults.hasOwnProperty("hits")
+              ) {
+                queryReq.query.start_time =
+                  initialQueryPayload.value?.query?.start_time;
+                queryReq.query.end_time =
+                  initialQueryPayload.value?.query?.end_time;
+              }
             }
           }
 
           searchObj.data.errorCode = 0;
+          const histogramQueryReq = JSON.parse(JSON.stringify(queryReq));
+          delete queryReq.aggs;
           searchService
             .search({
               org_identifier: searchObj.organizationIdetifier,
@@ -667,6 +698,9 @@ const useLogs = () => {
               //update grid columns
               updateGridColumns();
               searchObj.loading = false;
+              if (histogramQueryReq.hasOwnProperty("aggs")) {
+                getHistogramQueryData(histogramQueryReq);
+              }
               resolve(true);
             })
             .catch((err) => {
@@ -676,11 +710,14 @@ const useLogs = () => {
               } else {
                 searchObj.data.errorMsg = err.message;
               }
-              const customMessage = logsErrorMessage(err.response.data.code);
-              searchObj.data.errorCode = err.response.data.code;
+
+              const customMessage = logsErrorMessage(err?.response?.data.code);
+              searchObj.data.errorCode = err?.response?.data.code;
+
               if (customMessage != "") {
                 searchObj.data.errorMsg = t(customMessage);
               }
+
               reject(false);
             });
         } else {
@@ -692,6 +729,54 @@ const useLogs = () => {
         dismiss();
         searchObj.loading = false;
         showErrorNotification("Error while fetching data");
+        reject(false);
+      }
+    });
+  };
+
+  const getHistogramQueryData = (queryReq: any) => {
+    return new Promise((resolve, reject) => {
+      const dismiss = () => {};
+      try {
+        queryReq.query.size = 0;
+        queryReq.query.track_total_hits = true;
+        searchService
+          .search({
+            org_identifier: searchObj.organizationIdetifier,
+            query: queryReq,
+            page_type: searchObj.data.stream.streamType,
+          })
+          .then((res) => {
+            dismiss();
+            searchObj.data.queryResults.aggs = res.data.aggs;
+            searchObj.data.queryResults.total = res.data.total;
+            generateHistogramData();
+            searchObj.data.histogram.chartParams.title = getHistogramTitle();
+
+            searchObj.loading = false;
+            resolve(true);
+          })
+          .catch((err) => {
+            searchObj.loading = false;
+            if (err.response != undefined) {
+              searchObj.data.errorMsg = err.response.data.error;
+            } else {
+              searchObj.data.errorMsg = err.message;
+            }
+
+            const customMessage = logsErrorMessage(err?.response?.data.code);
+            searchObj.data.errorCode = err?.response?.data.code;
+
+            if (customMessage != "") {
+              searchObj.data.errorMsg = t(customMessage);
+            }
+
+            reject(false);
+          });
+      } catch (e: any) {
+        dismiss();
+        searchObj.loading = false;
+        showErrorNotification("Error while fetching histogram data");
         reject(false);
       }
     });
@@ -729,15 +814,20 @@ const useLogs = () => {
     try {
       searchObj.data.stream.selectedStreamFields = [];
       if (searchObj.data.streamResults.list.length > 0) {
-        const queryResult: { name: string; type: string }[] = [];
+        const queryResult: {
+          name: string;
+          type: string;
+        }[] = [];
         const tempFieldsName: string[] = [];
         const ignoreFields = [store.state.zoConfig.timestamp_column];
         let ftsKeys: Set<any>;
+        let schemaFields: Set<any>;
 
         searchObj.data.streamResults.list.forEach((stream: any) => {
           if (searchObj.data.stream.selectedStream.value == stream.name) {
             queryResult.push(...stream.schema);
             ftsKeys = new Set([...stream.settings.full_text_search_keys]);
+            schemaFields = new Set([...stream.schema.map((e: any) => e.name)]);
           }
         });
 
@@ -746,11 +836,29 @@ const useLogs = () => {
         });
 
         if (searchObj.data.queryResults.hits.length > 0) {
-          const firstRecord = searchObj.data.queryResults.hits[0];
+          // Find the index of the record with max attributes
+          const maxAttributesIndex = searchObj.data.queryResults.hits.reduce(
+            (
+              maxIndex: string | number,
+              obj: {},
+              currentIndex: any,
+              array: { [x: string]: {} }
+            ) => {
+              const numAttributes = Object.keys(obj).length;
+              const maxNumAttributes = Object.keys(array[maxIndex]).length;
+              return numAttributes > maxNumAttributes ? currentIndex : maxIndex;
+            },
+            0
+          );
+          const recordwithMaxAttribute =
+            searchObj.data.queryResults.hits[maxAttributesIndex];
 
-          Object.keys(firstRecord).forEach((key) => {
+          Object.keys(recordwithMaxAttribute).forEach((key) => {
             if (!tempFieldsName.includes(key)) {
-              queryResult.push({ name: key, type: "Utf8" });
+              queryResult.push({
+                name: key,
+                type: "Utf8",
+              });
             }
           });
         }
@@ -764,6 +872,7 @@ const useLogs = () => {
             searchObj.data.stream.selectedStreamFields.push({
               name: row.name,
               ftsKey: ftsKeys.has(row.name),
+              isSchemaField: schemaFields.has(row.name),
             });
           }
           // }
@@ -801,13 +910,13 @@ const useLogs = () => {
           timestampToTimezoneDate(
             row[store.state.zoConfig.timestamp_column] / 1000,
             store.state.timezone,
-            "MMM dd, yyyy HH:mm:ss.SSS Z"
+            "yyyy-MM-dd HH:mm:ss.SSS"
           ),
         prop: (row: any) =>
           timestampToTimezoneDate(
             row[store.state.zoConfig.timestamp_column] / 1000,
             store.state.timezone,
-            "MMM dd, yyyy HH:mm:ss.SSS Z"
+            "yyyy-MM-dd HH:mm:ss.SSS"
           ),
         label: t("search.timestamp") + ` (${store.state.timezone})`,
         align: "left",
@@ -1027,14 +1136,15 @@ const useLogs = () => {
       searchObj.meta.refreshInterval > 0 &&
       router.currentRoute.value.name == "logs"
     ) {
-      clearInterval(refreshIntervalID);
-      refreshIntervalID = setInterval(async () => {
+      clearInterval(store.state.refreshIntervalID);
+      const refreshIntervalID = setInterval(async () => {
         // searchObj.loading = true;
         await getQueryData(true);
         generateHistogramData();
         updateGridColumns();
         searchObj.meta.histogramDirtyFlag = true;
       }, searchObj.meta.refreshInterval * 1000);
+      store.dispatch("setRefreshIntervalID", refreshIntervalID);
       $q.notify({
         message: `Live mode is enabled. Only top ${searchObj.meta.resultGrid.rowsPerPage} results are shown.`,
         color: "positive",
@@ -1042,16 +1152,16 @@ const useLogs = () => {
         timeout: 1000,
       });
     } else {
-      clearInterval(refreshIntervalID);
+      clearInterval(store.state.refreshIntervalID);
     }
   };
 
   const loadLogsData = async () => {
     try {
-      searchObj.loading = true;
       resetFunctions();
-      await getFunctions();
       await getStreamList();
+      await getSavedViews();
+      await getFunctions();
       await getQueryData();
       refreshData();
     } catch (e: any) {
@@ -1101,6 +1211,14 @@ const useLogs = () => {
     }
     if (queryParams.refresh) {
       searchObj.meta.refreshInterval = queryParams.refresh;
+    }
+    useLocalTimezone(queryParams.timezone);
+
+    if (queryParams.functionContent) {
+      searchObj.data.tempFunctionContent =
+        b64DecodeUnicode(queryParams.functionContent) || "";
+      searchObj.meta.functionEditorPlaceholderFlag = false;
+      searchObj.meta.toggleFunction = true;
     }
 
     router.push({
@@ -1188,8 +1306,35 @@ const useLogs = () => {
     searchObj.meta.flagWrapContent = flag;
   };
 
+  const getSavedViews = async () => {
+    try {
+      savedviewsService
+        .get(store.state.selectedOrganization.identifier)
+        .then((res) => {
+          searchObj.data.savedViews = res.data.views;
+        })
+        .catch((err) => {
+          console.log(err);
+        });
+    } catch (e: any) {
+      console.log("Error while getting saved views", e);
+    }
+  };
+
+  const onStreamChange = () => {
+    const query = searchObj.meta.sqlMode
+      ? `SELECT * FROM "${searchObj.data.stream.selectedStream.value}"`
+      : "";
+
+    searchObj.data.editorValue = query;
+    searchObj.data.query = query;
+
+    handleQueryData();
+  };
+
   return {
     searchObj,
+    getStreams,
     resetSearchObj,
     updatedLocalLogFilterField,
     getFunctions,
@@ -1208,6 +1353,9 @@ const useLogs = () => {
     generateHistogramData,
     extractFTSFields,
     evaluateWrapContentFlag,
+    getSavedViews,
+    onStreamChange,
+    generateURLQuery,
   };
 };
 

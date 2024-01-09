@@ -1,20 +1,22 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use ahash::AHashMap;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::common::utils::json;
 
@@ -31,14 +33,14 @@ pub struct Span {
     pub duration: u64,
     #[serde(flatten)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub reference: AHashMap<String, String>,
+    pub reference: HashMap<String, String>,
     pub service_name: String,
     #[serde(flatten)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub attributes: AHashMap<String, json::Value>,
+    pub attributes: HashMap<String, json::Value>,
     #[serde(flatten)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub service: AHashMap<String, json::Value>,
+    pub service: HashMap<String, json::Value>,
     pub events: String,
 }
 
@@ -57,20 +59,43 @@ pub struct Event {
     pub _timestamp: u64,
     #[serde(flatten)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub attributes: AHashMap<String, json::Value>,
-}
-/* #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SpanReference {
-    pub parent_trace_id: String,
-    pub parent_span_id: String,
-    pub ref_type: SpanRefType,
+    pub attributes: HashMap<String, json::Value>,
 }
 
-//Service which has generated the trace id - span id ...in distributed tracing there can be multiple services using same trace id
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Service {
-    pub name: String,
-    #[serde(flatten)]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub attributes: AHashMap<String, Value>,
-} */
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct ExportTraceServiceResponse {
+    // The details of a partially successful export request.
+    //
+    // If the request is only partially accepted
+    // (i.e. when the server accepts only parts of the data and rejects the rest)
+    // the server MUST initialize the `partial_success` field and MUST
+    // set the `rejected_<signal>` with the number of items it rejected.
+    //
+    // Servers MAY also make use of the `partial_success` field to convey
+    // warnings/suggestions to senders even when the request was fully accepted.
+    // In such cases, the `rejected_<signal>` MUST have a value of `0` and
+    // the `error_message` MUST be non-empty.
+    //
+    // A `partial_success` message with an empty value (rejected_<signal> = 0 and
+    // `error_message` = "") is equivalent to it not being set/present. Senders
+    // SHOULD interpret it the same way as in the full success case.
+    pub partial_success: Option<ExportTracePartialSuccess>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct ExportTracePartialSuccess {
+    // The number of rejected spans.
+    //
+    // A `rejected_<signal>` field holding a `0` value indicates that the
+    // request was fully accepted.
+    pub rejected_spans: i64,
+
+    // A developer-facing human-readable message in English. It should be used
+    // either to explain why the server rejected parts of the data during a partial
+    // success or to convey warnings/suggestions during a full success. The message
+    // should offer guidance on how users can address such issues.
+    //
+    // error_message is an optional field. An error_message with an empty value
+    // is equivalent to it not being set.
+    pub error_message: String,
+}

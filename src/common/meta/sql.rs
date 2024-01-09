@@ -1,27 +1,30 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use chrono::DateTime;
+use config::CONFIG;
 use regex::Regex;
 use serde::Serialize;
-use sqlparser::ast::{
-    BinaryOperator, Expr as SqlExpr, Function, FunctionArg, FunctionArgExpr, Offset as SqlOffset,
-    OrderByExpr, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+use sqlparser::{
+    ast::{
+        BinaryOperator, Expr as SqlExpr, Function, FunctionArg, FunctionArgExpr, GroupByExpr,
+        Offset as SqlOffset, OrderByExpr, Select, SelectItem, SetExpr, Statement, TableFactor,
+        TableWithJoins, Value,
+    },
+    parser::Parser,
 };
-use sqlparser::parser::Parser;
-
-use crate::common::infra::config::CONFIG;
 
 /// parsed sql
 #[derive(Clone, Debug, Serialize)]
@@ -112,7 +115,7 @@ impl TryFrom<&Statement> for Sql {
                     _ => {
                         return Err(anyhow::anyhow!(
                             "We only support Select Query at the moment"
-                        ))
+                        ));
                     }
                 };
 
@@ -123,9 +126,13 @@ impl TryFrom<&Statement> for Sql {
                     order_by.push(Order(expr).try_into()?);
                 }
 
+                // TODO: support Group by all
+                // https://docs.snowflake.com/en/sql-reference/constructs/group-by#label-group-by-all-columns
                 let mut group_by = Vec::new();
-                for expr in groups {
-                    group_by.push(Group(expr).try_into()?);
+                if let GroupByExpr::Expressions(exprs) = groups {
+                    for expr in exprs {
+                        group_by.push(Group(expr).try_into()?);
+                    }
                 }
 
                 let offset = offset.map_or(0, |v| Offset(v).into());
@@ -384,7 +391,9 @@ fn parse_timestamp(s: &SqlValue) -> Result<Option<i64>, anyhow::Error> {
                 } else if s.starts_with("to_timestamp(") {
                     s = s.strip_prefix("to_timestamp(").unwrap();
                 } else {
-                    return Err(anyhow::anyhow!("Only support timestamp functions [to_timestamp|to_timestamp_millis|to_timestamp_micros|to_timestamp_seconds]"));
+                    return Err(anyhow::anyhow!(
+                        "Only support timestamp functions [to_timestamp|to_timestamp_millis|to_timestamp_micros|to_timestamp_seconds]"
+                    ));
                 }
                 s = s.strip_suffix(')').unwrap();
                 s = s.trim_matches(|v| v == '\'' || v == '"');
@@ -605,30 +614,30 @@ fn parse_expr_function(
     let field_name = field_name.trim_matches(|c: char| c == '\'' || c == '"');
     if parse_expr_check_field_name(field_name, field) {
         match f.args.get(1).unwrap() {
-            FunctionArg::Named { name: _name, arg } => {
-                match arg {
-                    FunctionArgExpr::Expr(expr) => {
-                        let val = get_value_from_expr(expr);
-                        if val.is_none() {
-                            return Err(anyhow::anyhow!("SqlExpr::Function<Named>: We only support Identifier at the moment"));
-                        }
-                        fields.push((field.to_string(), val.unwrap(), nop, next_op));
+            FunctionArg::Named { name: _name, arg } => match arg {
+                FunctionArgExpr::Expr(expr) => {
+                    let val = get_value_from_expr(expr);
+                    if val.is_none() {
+                        return Err(anyhow::anyhow!(
+                            "SqlExpr::Function<Named>: We only support Identifier at the moment"
+                        ));
                     }
-                    _ => return Err(anyhow::anyhow!("We only support String at the moment")),
+                    fields.push((field.to_string(), val.unwrap(), nop, next_op));
                 }
-            }
-            FunctionArg::Unnamed(arg) => {
-                match arg {
-                    FunctionArgExpr::Expr(expr) => {
-                        let val = get_value_from_expr(expr);
-                        if val.is_none() {
-                            return Err(anyhow::anyhow!("SqlExpr::Function<Unnamed>: We only support Identifier at the moment"));
-                        }
-                        fields.push((field.to_string(), val.unwrap(), nop, next_op));
+                _ => return Err(anyhow::anyhow!("We only support String at the moment")),
+            },
+            FunctionArg::Unnamed(arg) => match arg {
+                FunctionArgExpr::Expr(expr) => {
+                    let val = get_value_from_expr(expr);
+                    if val.is_none() {
+                        return Err(anyhow::anyhow!(
+                            "SqlExpr::Function<Unnamed>: We only support Identifier at the moment"
+                        ));
                     }
-                    _ => return Err(anyhow::anyhow!("We only support String at the moment")),
+                    fields.push((field.to_string(), val.unwrap(), nop, next_op));
                 }
-            }
+                _ => return Err(anyhow::anyhow!("We only support String at the moment")),
+            },
         }
     }
 
@@ -657,7 +666,9 @@ fn parse_expr_fun_time_range(
                     FunctionArgExpr::Expr(expr) => {
                         let val = get_value_from_expr(expr);
                         if val.is_none() {
-                            return Err(anyhow::anyhow!("SqlExpr::Function<Named>: We only support Identifier at the moment"));
+                            return Err(anyhow::anyhow!(
+                                "SqlExpr::Function<Named>: We only support Identifier at the moment"
+                            ));
                         }
                         val.unwrap()
                     }
@@ -667,7 +678,9 @@ fn parse_expr_fun_time_range(
                     FunctionArgExpr::Expr(expr) => {
                         let val = get_value_from_expr(expr);
                         if val.is_none() {
-                            return Err(anyhow::anyhow!("SqlExpr::Function<Unnamed>: We only support Identifier at the moment"));
+                            return Err(anyhow::anyhow!(
+                                "SqlExpr::Function<Unnamed>: We only support Identifier at the moment"
+                            ));
                         }
                         val.unwrap()
                     }

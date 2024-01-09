@@ -31,6 +31,7 @@
     "copyToClipboard": "Copier dans le presse-papiers",
     "includeSearchTerm": "Inclure le terme de recherche",
     "addFieldToTable": "Ajouter un champ à la table",
+    "removeFieldFromTable": "Supprimer un champ de la table",
     "excludeSearchTerm": "Exclure le terme de recherche",
     "noOfRecords": "Nombre d'enregistrements :",
     "attributes": "Attributs",
@@ -69,7 +70,12 @@
     "runQuery": "Exécuter une requête",
     "syntaxGuideLabel": "Guide de syntaxe",
     "logs": "Logs",
-    "enrichmentTables": "Tableaux d'enrichissement"
+    "enrichmentTables": "Tableaux d'enrichissement",
+    "savedViewsLabel": "Vues enregistrées",
+    "savedViewsNotFound": "La vue enregistrée n'a pas été trouvée !",
+    "savedViewAction": "Créer/mettre à jour une vue enregistrée",
+    "savedViewDropdownLabel": "Vues enregistrées",
+    "savedViewName": "Afficher le nom"
   },
   "menu": {
     "home": "Accueil",
@@ -332,11 +338,13 @@
     "updateEnrichmentTable": "Mettre à jour le tableau d'enrichissement",
     "searchEnrichmentTable": "Tableau d'enrichissement des recherches",
     "uploadCSVFile": "Charger un fichier CSV",
-    "selectFunction": "Sélectionnez une fonction"
+    "selectFunction": "Sélectionnez une fonction",
+    "appendData": "Ajouter des données à la table d'enrichissement existante"
   },
   "confirmDialog": {
     "cancel": "Annuler",
-    "ok": "Ok"
+    "ok": "Ok",
+    "loading": "Chargement en cours..."
   },
   "ingestion": {
     "header": "Ingestion",
@@ -528,32 +536,6 @@
     "longitude": "Longitude",
     "weight": "Poids"
   },
-  "alerts": {
-    "header": "Alertes",
-    "add": "Ajouter une alerte",
-    "edit": "Modifier",
-    "search": "Alerte de recherche",
-    "name": "Nom",
-    "function": "Détails de l'alerte",
-    "save": "Sauver",
-    "sql": "Requête",
-    "realTime": "En temps réel",
-    "scheduled": "Programmé",
-    "duration": "Durée pendant laquelle l'alerte est évaluée",
-    "condition": "État",
-    "interval": "Fréquence à laquelle l'alerte est évaluée",
-    "delayNotificationUntil": "Retarder la notification jusqu'à, après une notification",
-    "destination": "Destination",
-    "stream_name": "Nom du stream",
-    "actions": "Des actions",
-    "cancel": "Annuler",
-    "slack": "Slack",
-    "prom_am": "Gestionnaire d'alertes",
-    "addTitle": "Ajouter une alerte",
-    "updateTitle": "Mettre à jour l'alerte",
-    "delete": "Supprimer",
-    "stream_type": "Type de flux"
-  },
   "home": {
     "streams": "Ruisseaux",
     "totalDataIngested": "Total des données ingérées",
@@ -613,6 +595,32 @@
     "SearchParquetFileNotFound": "Erreur : le fichier de recherche sur le parquet est introuvable.",
     "SearchFieldHasNoCompatibleDataType": "Erreur : le fichier de recherche ne contient aucun type de données compatible.",
     "SearchSQLExecuteError": "Erreur : erreur d'exécution de Search SQL."
+  },
+  "alerts": {
+    "header": "Alertes",
+    "add": "Ajouter une alerte",
+    "edit": "Modifier",
+    "search": "Alerte de recherche",
+    "name": "Nom",
+    "function": "Détails de l'alerte",
+    "save": "Sauver",
+    "sql": "Requête",
+    "realTime": "En temps réel",
+    "scheduled": "Programmé",
+    "duration": "Durée pendant laquelle l'alerte est évaluée",
+    "condition": "État",
+    "interval": "Fréquence à laquelle l'alerte est évaluée",
+    "delayNotificationUntil": "Retarder la notification jusqu'à, après une notification",
+    "destination": "Destination",
+    "stream_name": "Nom du stream",
+    "actions": "Des actions",
+    "cancel": "Annuler",
+    "slack": "Slack",
+    "prom_am": "Gestionnaire d'alertes",
+    "addTitle": "Ajouter une alerte",
+    "updateTitle": "Mettre à jour l'alerte",
+    "delete": "Supprimer",
+    "stream_type": "Type de flux"
   },
   "alert_templates": {
     "header": "Modèles",

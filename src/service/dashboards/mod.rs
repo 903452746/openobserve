@@ -1,28 +1,33 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use actix_web::{http, web, HttpResponse};
 use std::io;
 
-use crate::common::{
-    meta::{
-        dashboards::{Dashboards, Folder, DEFAULT_FOLDER},
-        http::HttpResponse as MetaHttpResponse,
+use actix_web::{http, web, HttpResponse};
+use config::ider;
+
+use crate::{
+    common::{
+        meta::{
+            dashboards::{Dashboards, Folder, DEFAULT_FOLDER},
+            http::HttpResponse as MetaHttpResponse,
+        },
+        utils::json,
     },
-    utils::json,
+    service::db::dashboards,
 };
-use crate::service::db::dashboards;
 
 pub mod folders;
 
@@ -37,7 +42,7 @@ pub async fn create_dashboard(
 
     match dashboards::folders::get(org_id, folder_id).await {
         Ok(_) => {
-            let dashboard_id = crate::common::infra::ider::generate();
+            let dashboard_id = ider::generate();
             save_dashboard(org_id, &dashboard_id, folder_id, body).await
         }
         Err(_) => {
@@ -48,7 +53,7 @@ pub async fn create_dashboard(
                     description: DEFAULT_FOLDER.to_string(),
                 };
                 folders::save_folder(org_id, folder, true).await?;
-                let dashboard_id = crate::common::infra::ider::generate();
+                let dashboard_id = ider::generate();
                 save_dashboard(org_id, &dashboard_id, folder_id, body).await
             } else {
                 Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
@@ -162,7 +167,7 @@ pub async fn move_dashboard(
             return Ok(Response::InternalServerError(error).into());
         }
 
-        //delete the dashboard from the source folder
+        // delete the dashboard from the source folder
         let _ = dashboards::delete(org_id, dashboard_id, from_folder).await;
         Ok(Response::OkMessage("Dashboard moved successfully".to_string()).into())
     } else {

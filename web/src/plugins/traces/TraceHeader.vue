@@ -1,35 +1,44 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
   <div
-    :style="{ height: '30px', border: '1px solid #ececec' }"
-    class="flex justify-start items-center header-bg "
+    :style="{
+      height: '30px',
+      border:
+        store.state.theme === 'dark'
+          ? '1px solid #3c3c3c'
+          : '1px solid #ececec',
+    }"
+    style="top: 0; z-index: 999; position: sticky"
+    class="flex justify-start items-center header-bg bg-grey-2"
+    :class="store.state.theme === 'dark' ? 'bg-grey-9' : 'bg-grey-2'"
   >
     <div
-      class="flex justify-start items-center no-wrap row q-px-sm "
+      class="flex justify-start items-center no-wrap row q-px-sm"
       :style="{
-        width: splitterWidth + '%',
+        width: splitterWidth + 'px',
       }"
     >
       Operation Name
     </div>
     <div
-      class="flex justify-start items-center no-wrap row  relative-position"
+      class="flex justify-start items-center no-wrap row relative-position"
       :style="{
-        width: 100 - splitterWidth + '%',
+        width: `calc(100% - ${splitterWidth}px)`,
       }"
     >
       <div class="col-3 text-caption q-pl-xs">
@@ -46,15 +55,17 @@
         <div>{{ baseTracePosition.tics[4].label }}</div>
       </div>
       <div
-        v-for="tick in baseTracePosition['tics']"
+        v-for="(tick, index) in baseTracePosition['tics']"
         class="trace-tic"
-        :key="tick.value"
+        :key="tick.value + index"
         :style="{
           position: 'absolute',
           left: tick.left,
-          top: '0px',
+          top: '-3px',
           width: '1px',
-          backgroundColor: '#ececec',
+          backgroundColor: store.state.theme === 'dark' ? '#3c3c3c' : '#cacaca',
+          zIndex: index === 0 ? '5' : '1',
+          height: '26px',
         }"
       ></div>
     </div>
@@ -63,6 +74,7 @@
 
 <script lang="ts">
 import { defineComponent } from "vue";
+import { useStore } from "vuex";
 
 export default defineComponent({
   name: "TraceNavbar",
@@ -81,7 +93,10 @@ export default defineComponent({
     },
   },
   setup() {
-    return {};
+    const store = useStore();
+    return {
+      store,
+    };
   },
 });
 </script>
@@ -104,6 +119,6 @@ $traceChartHeight: 250px;
 }
 
 .header-bg {
-  background-color: color-mix(in srgb, currentColor 5%, transparent)
+  background-color: color-mix(in srgb, currentColor 5%, transparent);
 }
 </style>

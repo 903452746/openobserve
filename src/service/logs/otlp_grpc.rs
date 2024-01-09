@@ -1,21 +1,24 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::collections::HashMap;
 
 use actix_web::{http, web, HttpResponse};
-use ahash::AHashMap;
 use bytes::BytesMut;
 use chrono::{Duration, Utc};
+use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
 use datafusion::arrow::datatypes::Schema;
 use opentelemetry::trace::{SpanId, TraceId};
 use opentelemetry_proto::tonic::collector::logs::v1::{
@@ -24,27 +27,28 @@ use opentelemetry_proto::tonic::collector::logs::v1::{
 use prost::Message;
 
 use super::StreamMeta;
-use crate::common::{
-    infra::{
-        cluster,
-        config::{CONFIG, DISTINCT_FIELDS},
-        metrics,
+use crate::{
+    common::{
+        infra::cluster,
+        meta::{
+            alerts::Alert,
+            http::HttpResponse as MetaHttpResponse,
+            ingestion::{IngestionResponse, StreamStatus},
+            stream::{SchemaRecords, StreamParams},
+            usage::UsageType,
+        },
+        utils::{flatten, json, time::parse_timestamp_micro_from_value},
     },
-    meta::{
-        alert::{Alert, Trigger},
-        http::HttpResponse as MetaHttpResponse,
-        ingestion::{IngestionResponse, StreamStatus},
-        stream::StreamParams,
-        usage::UsageType,
-        StreamType,
+    service::{
+        db, distinct_values, get_formatted_stream_name,
+        ingestion::{
+            evaluate_trigger,
+            grpc::{get_val, get_val_with_type_retained},
+            write_file, TriggerAlertData,
+        },
+        schema::{get_upto_discard_error, stream_schema_exists},
+        usage::report_request_usage_stats,
     },
-    utils::{flatten, json, time::parse_timestamp_micro_from_value},
-};
-use crate::service::{
-    db, distinct_values, get_formatted_stream_name,
-    ingestion::{grpc::get_val, grpc::get_val_with_type_retained, write_file},
-    schema::stream_schema_exists,
-    usage::report_request_usage_stats,
 };
 
 pub async fn usage_ingest(
@@ -54,7 +58,7 @@ pub async fn usage_ingest(
     thread_id: usize,
 ) -> Result<IngestionResponse, anyhow::Error> {
     let start = std::time::Instant::now();
-    let mut stream_schema_map: AHashMap<String, Schema> = AHashMap::new();
+    let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let mut distinct_values = Vec::with_capacity(16);
     let stream_name = &get_formatted_stream_name(
         &mut StreamParams::new(org_id, in_stream_name, StreamType::Logs),
@@ -74,13 +78,13 @@ pub async fn usage_ingest(
         return Err(anyhow::anyhow!("stream [{stream_name}] is being deleted"));
     }
 
-    let mut min_ts =
-        (Utc::now() + Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
+    let min_ts =
+        (Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
 
-    let mut stream_alerts_map: AHashMap<String, Vec<Alert>> = AHashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut stream_status = StreamStatus::new(stream_name);
 
-    let mut trigger: Option<Trigger> = None;
+    let mut trigger: TriggerAlertData = None;
 
     let partition_det =
         crate::service::ingestion::get_stream_partition_keys(stream_name, &stream_schema_map).await;
@@ -88,14 +92,19 @@ pub async fn usage_ingest(
     let partition_time_level = partition_det.partition_time_level;
 
     // Start get stream alerts
-    let key = format!("{}/{}/{}", &org_id, StreamType::Logs, &stream_name);
-    crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+    crate::service::ingestion::get_stream_alerts(
+        org_id,
+        StreamType::Logs,
+        stream_name,
+        &mut stream_alerts_map,
+    )
+    .await;
     // End get stream alert
 
-    let mut buf: AHashMap<String, Vec<String>> = AHashMap::new();
+    let mut buf: HashMap<String, SchemaRecords> = HashMap::new();
     let reader: Vec<json::Value> = json::from_slice(&body)?;
-    for item in reader.iter() {
-        //JSON Flattening
+    for item in reader.into_iter() {
+        // JSON Flattening
         let mut value = flatten::flatten(item)?;
 
         // get json object
@@ -114,21 +123,17 @@ pub async fn usage_ingest(
             None => Utc::now().timestamp_micros(),
         };
         // check ingestion time
-        let earlest_time = Utc::now() + Duration::hours(0 - CONFIG.limit.ingest_allowed_upto);
-        if timestamp < earlest_time.timestamp_micros() {
-            stream_status.status.failed += 1; // to old data, just discard
-            stream_status.status.error = super::get_upto_discard_error();
-            continue;
-        }
         if timestamp < min_ts {
-            min_ts = timestamp;
+            stream_status.status.failed += 1; // to old data, just discard
+            stream_status.status.error = get_upto_discard_error().to_string();
+            continue;
         }
         local_val.insert(
             CONFIG.common.column_timestamp.clone(),
             json::Value::Number(timestamp.into()),
         );
 
-        let local_trigger = super::add_valid_record(
+        let local_trigger = match super::add_valid_record(
             &StreamMeta {
                 org_id: org_id.to_string(),
                 stream_name: stream_name.to_string(),
@@ -140,11 +145,19 @@ pub async fn usage_ingest(
             &mut stream_status.status,
             &mut buf,
             local_val,
+            trigger.is_none(),
         )
-        .await;
-
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                stream_status.status.failed += 1;
+                stream_status.status.error = e.to_string();
+                continue;
+            }
+        };
         if local_trigger.is_some() {
-            trigger = Some(local_trigger.unwrap());
+            trigger = local_trigger;
         }
 
         // get distinct_value item
@@ -164,26 +177,15 @@ pub async fn usage_ingest(
         }
     }
 
-    // write to file
-    let mut stream_file_name = "".to_string();
-    let _ = write_file(
-        &buf,
-        thread_id,
-        &StreamParams::new(org_id, stream_name, StreamType::Logs),
-        &mut stream_file_name,
-        None,
-    )
-    .await;
-
-    if stream_file_name.is_empty() {
-        return Ok(IngestionResponse::new(
-            http::StatusCode::OK.into(),
-            vec![stream_status],
-        ));
+    // write data to wal
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
+    let _req_stats = write_file(&writer, stream_name, buf).await;
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
     }
 
     // only one trigger per request, as it updates etcd
-    super::evaluate_trigger(trigger, &stream_alerts_map).await;
+    evaluate_trigger(trigger).await;
 
     // send distinct_values
     if !distinct_values.is_empty() {
@@ -240,8 +242,19 @@ pub async fn handle_grpc_request(
             "Quota exceeded for this organization".to_string(),
         )));
     }
+
+    // check memtable
+    if let Err(e) = ingester::check_memtable_size() {
+        return Ok(
+            HttpResponse::ServiceUnavailable().json(MetaHttpResponse::error(
+                http::StatusCode::SERVICE_UNAVAILABLE.into(),
+                e.to_string(),
+            )),
+        );
+    }
+
     let start = std::time::Instant::now();
-    let mut stream_schema_map: AHashMap<String, Schema> = AHashMap::new();
+    let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let stream_name = match in_stream_name {
         Some(name) => {
             get_formatted_stream_name(
@@ -261,7 +274,7 @@ pub async fn handle_grpc_request(
     let stream_name = &stream_name;
 
     let mut runtime = crate::service::ingestion::init_functions_runtime();
-    let mut stream_alerts_map: AHashMap<String, Vec<Alert>> = AHashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut stream_status = StreamStatus::new(stream_name);
     let mut distinct_values = Vec::with_capacity(16);
 
@@ -271,8 +284,13 @@ pub async fn handle_grpc_request(
     let partition_time_level = partition_det.partition_time_level;
 
     // Start get stream alerts
-    let key = format!("{}/{}/{}", &org_id, StreamType::Logs, stream_name);
-    crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+    crate::service::ingestion::get_stream_alerts(
+        org_id,
+        StreamType::Logs,
+        stream_name,
+        &mut stream_alerts_map,
+    )
+    .await;
     // End get stream alert
 
     // Start Register Transforms for stream
@@ -283,9 +301,9 @@ pub async fn handle_grpc_request(
     );
     // End Register Transforms for stream
 
-    let mut trigger: Option<Trigger> = None;
+    let mut trigger: TriggerAlertData = None;
 
-    let mut data_buf: AHashMap<String, Vec<String>> = AHashMap::new();
+    let mut data_buf: HashMap<String, SchemaRecords> = HashMap::new();
 
     for resource_log in &request.resource_logs {
         for instrumentation_logs in &resource_log.scope_logs {
@@ -318,8 +336,7 @@ pub async fn handle_grpc_request(
                 }
 
                 // check ingestion time
-                let earlest_time =
-                    Utc::now() + Duration::hours(0 - CONFIG.limit.ingest_allowed_upto);
+                let earlest_time = Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto);
 
                 let ts = if log_record.time_unix_nano != 0 {
                     log_record.time_unix_nano / 1000
@@ -329,13 +346,13 @@ pub async fn handle_grpc_request(
 
                 if ts < earlest_time.timestamp_micros().try_into().unwrap() {
                     stream_status.status.failed += 1; // to old data, just discard
-                    stream_status.status.error = super::get_upto_discard_error();
+                    stream_status.status.error = get_upto_discard_error().to_string();
                     continue;
                 }
 
                 rec[CONFIG.common.column_timestamp.clone()] = ts.into();
                 rec["severity"] = log_record.severity_text.to_owned().into();
-                //rec["name"] = log_record.name.to_owned().into();
+                // rec["name"] = log_record.name.to_owned().into();
                 rec["body"] = get_val(&log_record.body.as_ref());
                 for item in &log_record.attributes {
                     rec[item.key.as_str()] = get_val_with_type_retained(&item.value.as_ref());
@@ -369,13 +386,13 @@ pub async fn handle_grpc_request(
                     }
                 };
 
-                //flattening
-                rec = flatten::flatten(&rec)?;
+                // flattening
+                rec = flatten::flatten(rec)?;
 
                 if !local_trans.is_empty() {
                     rec = crate::service::ingestion::apply_stream_transform(
                         &local_trans,
-                        &rec,
+                        rec,
                         &stream_vrl_map,
                         stream_name,
                         &mut runtime,
@@ -384,7 +401,7 @@ pub async fn handle_grpc_request(
                 // get json object
                 let local_val = rec.as_object_mut().unwrap();
 
-                let local_trigger = super::add_valid_record(
+                let local_trigger = match super::add_valid_record(
                     &StreamMeta {
                         org_id: org_id.to_string(),
                         stream_name: stream_name.to_string(),
@@ -396,11 +413,19 @@ pub async fn handle_grpc_request(
                     &mut stream_status.status,
                     &mut data_buf,
                     local_val,
+                    trigger.is_none(),
                 )
-                .await;
-
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        stream_status.status.failed += 1;
+                        stream_status.status.error = e.to_string();
+                        continue;
+                    }
+                };
                 if local_trigger.is_some() {
-                    trigger = Some(local_trigger.unwrap());
+                    trigger = local_trigger;
                 }
 
                 // get distinct_value item
@@ -422,19 +447,15 @@ pub async fn handle_grpc_request(
         }
     }
 
-    // write to file
-    let mut stream_file_name = "".to_string();
-    let mut req_stats = write_file(
-        &data_buf,
-        thread_id,
-        &StreamParams::new(org_id, stream_name, StreamType::Logs),
-        &mut stream_file_name,
-        None,
-    )
-    .await;
+    // write data to wal
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
+    let mut req_stats = write_file(&writer, stream_name, data_buf).await;
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
+    }
 
     // only one trigger per request, as it updates etcd
-    super::evaluate_trigger(trigger, &stream_alerts_map).await;
+    evaluate_trigger(trigger).await;
 
     // send distinct_values
     if !distinct_values.is_empty() {
@@ -444,7 +465,7 @@ pub async fn handle_grpc_request(
     }
 
     let ep = if is_grpc {
-        "grpc/export/logs"
+        "/grpc/export/logs"
     } else {
         "/api/org/v1/logs"
     };
@@ -470,7 +491,7 @@ pub async fn handle_grpc_request(
         .inc();
 
     req_stats.response_time = start.elapsed().as_secs_f64();
-    //metric + data usage
+    // metric + data usage
     report_request_usage_stats(
         req_stats,
         org_id,
@@ -493,13 +514,16 @@ pub async fn handle_grpc_request(
 }
 
 #[cfg(test)]
-pub mod test {
+mod tests {
 
-    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-    use opentelemetry_proto::tonic::common::v1::any_value::Value::{IntValue, StringValue};
-    use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue};
-    use opentelemetry_proto::tonic::logs::v1::{ResourceLogs, ScopeLogs};
-    use opentelemetry_proto::tonic::{common::v1::AnyValue, logs::v1::LogRecord};
+    use opentelemetry_proto::tonic::{
+        collector::logs::v1::ExportLogsServiceRequest,
+        common::v1::{
+            any_value::Value::{IntValue, StringValue},
+            AnyValue, InstrumentationScope, KeyValue,
+        },
+        logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+    };
 
     use crate::service::logs::otlp_grpc::handle_grpc_request;
 
@@ -512,7 +536,7 @@ pub mod test {
             time_unix_nano: 1581452773000000789,
             severity_number: 9,
             severity_text: "Info".to_string(),
-            //name: "logA".to_string(),
+            // name: "logA".to_string(),
             body: Some(AnyValue {
                 value: Some(StringValue("This is a log message".to_string())),
             }),

@@ -1,34 +1,21 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use datafusion::arrow::datatypes::Schema;
-use parquet::{
-    arrow::ArrowWriter,
-    basic::{Compression, Encoding},
-    file::{metadata::KeyValue, properties::WriterProperties},
-    format::SortingColumn,
-    schema::types::ColumnPath,
-};
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
-use crate::common::{
-    infra::config::{
-        CONFIG, PARQUET_BATCH_SIZE, PARQUET_MAX_ROW_GROUP_SIZE, PARQUET_PAGE_SIZE,
-        SQL_FULL_TEXT_SEARCH_FIELDS,
-    },
-    meta::{common::FileMeta, functions::ZoFunction},
-};
+use crate::common::meta::functions::ZoFunction;
 
 mod date_format_udf;
 pub mod exec;
@@ -93,59 +80,3 @@ pub const DEFAULT_FUNCTIONS: [ZoFunction; 6] = [
         text: "re_not_match(field, 'pattern')",
     },
 ];
-
-pub fn new_parquet_writer<'a>(
-    buf: &'a mut Vec<u8>,
-    schema: &'a Arc<Schema>,
-    metadata: &'a FileMeta,
-    bf_fields: Option<Vec<&str>>,
-) -> ArrowWriter<&'a mut Vec<u8>> {
-    let sort_column_id = schema
-        .index_of(&CONFIG.common.column_timestamp)
-        .expect("Not found timestamp field");
-    let mut writer_props = WriterProperties::builder()
-        .set_write_batch_size(PARQUET_BATCH_SIZE) // in bytes
-        .set_data_page_size_limit(PARQUET_PAGE_SIZE) // maximum size of a data page in bytes
-        .set_max_row_group_size(PARQUET_MAX_ROW_GROUP_SIZE) // maximum number of rows in a row group
-        .set_compression(Compression::ZSTD(Default::default()))
-        .set_dictionary_enabled(true)
-        .set_encoding(Encoding::PLAIN)
-        .set_sorting_columns(Some(
-            [SortingColumn::new(sort_column_id as i32, false, false)].to_vec(),
-        ))
-        .set_column_dictionary_enabled(
-            ColumnPath::from(vec![CONFIG.common.column_timestamp.to_string()]),
-            false,
-        )
-        .set_column_encoding(
-            ColumnPath::from(vec![CONFIG.common.column_timestamp.to_string()]),
-            Encoding::DELTA_BINARY_PACKED,
-        )
-        .set_key_value_metadata(Some(vec![
-            KeyValue::new("min_ts".to_string(), metadata.min_ts.to_string()),
-            KeyValue::new("max_ts".to_string(), metadata.max_ts.to_string()),
-            KeyValue::new("records".to_string(), metadata.records.to_string()),
-            KeyValue::new(
-                "original_size".to_string(),
-                metadata.original_size.to_string(),
-            ),
-        ]));
-    for field in SQL_FULL_TEXT_SEARCH_FIELDS.iter() {
-        writer_props = writer_props
-            .set_column_dictionary_enabled(ColumnPath::from(vec![field.to_string()]), false);
-    }
-    if let Some(fields) = bf_fields {
-        for field in fields {
-            writer_props = writer_props
-                .set_column_bloom_filter_enabled(ColumnPath::from(vec![field.to_string()]), true);
-            if metadata.records > 0 {
-                writer_props = writer_props.set_column_bloom_filter_ndv(
-                    ColumnPath::from(vec![field.to_string()]),
-                    metadata.records as u64,
-                );
-            }
-        }
-    }
-    let writer_props = writer_props.build();
-    ArrowWriter::try_new(buf, schema.clone(), Some(writer_props)).unwrap()
-}

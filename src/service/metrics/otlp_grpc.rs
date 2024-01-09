@@ -1,51 +1,56 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{collections::HashMap, sync::Arc};
 
 use actix_web::{http, HttpResponse};
-use ahash::AHashMap;
 use bytes::BytesMut;
 use chrono::Utc;
+use config::{meta::stream::StreamType, metrics, utils::schema_ext::SchemaExt, CONFIG};
 use datafusion::arrow::datatypes::Schema;
 use opentelemetry::trace::{SpanId, TraceId};
-use opentelemetry_proto::tonic::metrics::v1::metric::Data;
 use opentelemetry_proto::tonic::{
     collector::metrics::v1::{ExportMetricsServiceRequest, ExportMetricsServiceResponse},
-    metrics::v1::*,
+    metrics::v1::{metric::Data, *},
 };
 use prost::Message;
 
-use super::{format_label_name, get_exclude_labels};
-use crate::common::meta::stream::StreamParams;
-use crate::common::{
-    infra::{cluster, config::CONFIG, metrics},
-    meta::{
-        alert, http::HttpResponse as MetaHttpResponse, prom::*, stream::PartitioningDetails,
-        usage::UsageType, StreamType,
+use crate::{
+    common::{
+        infra::cluster,
+        meta::{
+            alerts::{self, Alert},
+            http::HttpResponse as MetaHttpResponse,
+            prom::*,
+            stream::{PartitioningDetails, SchemaRecords},
+            usage::UsageType,
+        },
+        utils::{flatten, json},
     },
-    utils::{flatten, json},
-};
-use crate::service::format_stream_name;
-use crate::service::{
-    db,
-    ingestion::{
-        chk_schema_by_record,
-        grpc::{get_exemplar_val, get_metric_val, get_val},
-        write_file,
+    service::{
+        db, format_stream_name,
+        ingestion::{
+            evaluate_trigger,
+            grpc::{get_exemplar_val, get_metric_val, get_val},
+            write_file, TriggerAlertData,
+        },
+        metrics::{format_label_name, get_exclude_labels},
+        schema::{check_for_schema, set_schema_metadata, stream_schema_exists},
+        stream::unwrap_partition_time_level,
+        usage::report_request_usage_stats,
     },
-    schema::{set_schema_metadata, stream_schema_exists},
-    stream::unwrap_partition_time_level,
-    usage::report_request_usage_stats,
 };
 
 pub async fn handle_grpc_request(
@@ -69,13 +74,25 @@ pub async fn handle_grpc_request(
             "Quota exceeded for this organisation".to_string(),
         )));
     }
+
+    // check memtable
+    if let Err(e) = ingester::check_memtable_size() {
+        return Ok(
+            HttpResponse::ServiceUnavailable().json(MetaHttpResponse::error(
+                http::StatusCode::SERVICE_UNAVAILABLE.into(),
+                e.to_string(),
+            )),
+        );
+    }
+
     let start = std::time::Instant::now();
     let mut runtime = crate::service::ingestion::init_functions_runtime();
-    let mut metric_data_map: AHashMap<String, AHashMap<String, Vec<String>>> = AHashMap::new();
-    let mut metric_schema_map: AHashMap<String, Schema> = AHashMap::new();
-    let mut stream_alerts_map: AHashMap<String, Vec<alert::Alert>> = AHashMap::new();
-    let mut stream_trigger_map: AHashMap<String, alert::Trigger> = AHashMap::new();
-    let mut stream_partitioning_map: AHashMap<String, PartitioningDetails> = AHashMap::new();
+    let mut metric_data_map: HashMap<String, HashMap<String, SchemaRecords>> = HashMap::new();
+    let mut metric_schema_map: HashMap<String, Schema> = HashMap::new();
+    let mut schema_evoluted: HashMap<String, bool> = HashMap::new();
+    let mut stream_alerts_map: HashMap<String, Vec<alerts::Alert>> = HashMap::new();
+    let mut stream_trigger_map: HashMap<String, TriggerAlertData> = HashMap::new();
+    let mut stream_partitioning_map: HashMap<String, PartitioningDetails> = HashMap::new();
 
     for resource_metric in &request.resource_metrics {
         for scope_metric in &resource_metric.scope_metrics {
@@ -100,20 +117,25 @@ pub async fn handle_grpc_request(
                     stream_partitioning_map
                         .insert(metric_name.clone().to_owned(), partition_det.clone());
                 }
-                let partition_det = stream_partitioning_map.get(metric_name).unwrap();
-                let partition_keys = partition_det.partition_keys.clone();
-                let partition_time_level = unwrap_partition_time_level(
+                let mut partition_det = stream_partitioning_map.get(metric_name).unwrap();
+                let mut partition_keys = partition_det.partition_keys.clone();
+                let mut partition_time_level = unwrap_partition_time_level(
                     partition_det.partition_time_level,
                     StreamType::Metrics,
                 );
 
                 // Start get stream alerts
-                let key = format!("{}/{}/{}", &org_id, StreamType::Metrics, metric_name);
-                crate::service::ingestion::get_stream_alerts(key, &mut stream_alerts_map).await;
+                crate::service::ingestion::get_stream_alerts(
+                    org_id,
+                    StreamType::Metrics,
+                    metric_name,
+                    &mut stream_alerts_map,
+                )
+                .await;
                 // End get stream alert
 
                 // Start Register Transforms for stream
-                let (local_trans, stream_vrl_map) =
+                let (mut local_trans, mut stream_vrl_map) =
                     crate::service::ingestion::register_stream_transforms(
                         org_id,
                         StreamType::Metrics,
@@ -121,7 +143,6 @@ pub async fn handle_grpc_request(
                     );
                 // End Register Transforms for stream
 
-                let buf = metric_data_map.entry(metric_name.to_owned()).or_default();
                 let mut rec = json::json!({});
                 match &resource_metric.resource {
                     Some(res) => {
@@ -143,14 +164,14 @@ pub async fn handle_grpc_request(
                 }
                 rec[NAME_LABEL] = metric_name.to_owned().into();
 
-                //metadata handling
+                // metadata handling
                 let mut metadata = Metadata {
                     metric_family_name: rec[NAME_LABEL].to_string(),
                     metric_type: MetricType::Unknown,
                     help: metric.description.to_owned(),
                     unit: metric.unit.to_owned(),
                 };
-                let mut prom_meta: AHashMap<String, String> = AHashMap::new();
+                let mut prom_meta: HashMap<String, String> = HashMap::new();
 
                 let records = match &metric.data {
                     Some(data) => match data {
@@ -173,22 +194,79 @@ pub async fn handle_grpc_request(
                     },
                     None => vec![],
                 };
-                if !schema_exists.has_metadata {
-                    set_schema_metadata(org_id, metric_name, StreamType::Metrics, prom_meta)
-                        .await
-                        .unwrap();
-                }
 
                 for mut rec in records {
                     // flattening
-                    rec = flatten::flatten(&rec)?;
+                    rec = flatten::flatten(rec)?;
+
+                    let local_metric_name =
+                        &format_stream_name(rec.get(NAME_LABEL).unwrap().as_str().unwrap());
+
+                    if !schema_exists.has_metadata {
+                        set_schema_metadata(
+                            org_id,
+                            local_metric_name,
+                            StreamType::Metrics,
+                            &prom_meta,
+                        )
+                        .await
+                        .unwrap();
+                    }
+
+                    if local_metric_name != metric_name {
+                        // check for schema
+                        stream_schema_exists(
+                            org_id,
+                            local_metric_name,
+                            StreamType::Metrics,
+                            &mut metric_schema_map,
+                        )
+                        .await;
+
+                        // get partition keys
+                        if !stream_partitioning_map.contains_key(local_metric_name) {
+                            let partition_det =
+                                crate::service::ingestion::get_stream_partition_keys(
+                                    local_metric_name,
+                                    &metric_schema_map,
+                                )
+                                .await;
+                            stream_partitioning_map
+                                .insert(local_metric_name.to_owned(), partition_det.clone());
+                        }
+                        partition_det = stream_partitioning_map.get(local_metric_name).unwrap();
+                        partition_keys = partition_det.partition_keys.clone();
+                        partition_time_level = unwrap_partition_time_level(
+                            partition_det.partition_time_level,
+                            StreamType::Metrics,
+                        );
+
+                        // Start get stream alerts
+                        crate::service::ingestion::get_stream_alerts(
+                            org_id,
+                            StreamType::Metrics,
+                            local_metric_name,
+                            &mut stream_alerts_map,
+                        )
+                        .await;
+                        // End get stream alert
+
+                        // Start Register Transforms for stream
+                        (local_trans, stream_vrl_map) =
+                            crate::service::ingestion::register_stream_transforms(
+                                org_id,
+                                StreamType::Metrics,
+                                local_metric_name,
+                            );
+                        // End Register Transforms for stream
+                    }
 
                     if !local_trans.is_empty() {
                         rec = crate::service::ingestion::apply_stream_transform(
                             &local_trans,
-                            &rec,
+                            rec,
                             &stream_vrl_map,
-                            metric_name,
+                            local_metric_name,
                             &mut runtime,
                         )?;
                     }
@@ -204,62 +282,71 @@ pub async fn handle_grpc_request(
                         .unwrap_or(Utc::now().timestamp_micros());
 
                     let value_str = json::to_string(&val_map).unwrap();
-                    chk_schema_by_record(
-                        &mut metric_schema_map,
-                        org_id,
-                        StreamType::Metrics,
-                        metric_name,
-                        timestamp,
-                        &value_str,
-                    )
-                    .await;
 
+                    // check for schema evolution
+                    if schema_evoluted.get(local_metric_name).is_none() {
+                        let record_val = json::Value::Object(val_map.to_owned());
+                        if check_for_schema(
+                            org_id,
+                            local_metric_name,
+                            StreamType::Metrics,
+                            &mut metric_schema_map,
+                            &record_val,
+                            timestamp,
+                        )
+                        .await
+                        .is_ok()
+                        {
+                            schema_evoluted.insert(local_metric_name.to_owned(), true);
+                        }
+                    }
+
+                    let buf = metric_data_map
+                        .entry(local_metric_name.to_owned())
+                        .or_default();
+                    let schema = metric_schema_map.get(local_metric_name).unwrap().clone();
+                    let schema_key = schema.hash_key();
                     // get hour key
                     let hour_key = crate::service::ingestion::get_wal_time_key(
                         timestamp,
                         &partition_keys,
                         partition_time_level,
                         val_map,
-                        None,
+                        Some(&schema_key),
                     );
-                    let hour_buf = buf.entry(hour_key).or_default();
-                    hour_buf.push(value_str);
+                    let hour_buf = buf.entry(hour_key).or_insert_with(|| SchemaRecords {
+                        schema_key,
+                        schema: Arc::new(schema),
+                        records: vec![],
+                        records_size: 0,
+                    });
+                    hour_buf
+                        .records
+                        .push(Arc::new(json::Value::Object(val_map.to_owned())));
+                    hour_buf.records_size += value_str.len();
 
                     // real time alert
-                    if !stream_alerts_map.is_empty() {
+                    let need_trigger = !stream_trigger_map.contains_key(local_metric_name);
+                    if need_trigger && !stream_alerts_map.is_empty() {
                         // Start check for alert trigger
                         let key = format!(
                             "{}/{}/{}",
                             &org_id,
                             StreamType::Metrics,
-                            metric_name.clone()
+                            local_metric_name.clone()
                         );
                         if let Some(alerts) = stream_alerts_map.get(&key) {
+                            let mut trigger_alerts: Vec<(
+                                Alert,
+                                Vec<json::Map<String, json::Value>>,
+                            )> = Vec::new();
                             for alert in alerts {
-                                if alert.is_real_time {
-                                    let set_trigger = alert::Evaluate::evaluate(
-                                        &alert.condition,
-                                        val_map.clone(),
-                                    );
-                                    if set_trigger {
-                                        stream_trigger_map.insert(
-                                            metric_name.to_owned(),
-                                            alert::Trigger {
-                                                timestamp,
-                                                is_valid: true,
-                                                alert_name: alert.name.clone(),
-                                                stream: metric_name.to_owned(),
-                                                org: org_id.to_string(),
-                                                stream_type: StreamType::Metrics,
-                                                last_sent_at: 0,
-                                                count: 0,
-                                                is_ingest_time: true,
-                                                parent_alert_deleted: false,
-                                            },
-                                        );
-                                    }
+                                if let Ok(Some(v)) = alert.evaluate(Some(val_map)).await {
+                                    trigger_alerts.push((alert.clone(), v));
                                 }
                             }
+                            stream_trigger_map
+                                .insert(local_metric_name.clone(), Some(trigger_alerts));
                         }
                         // End check for alert trigger
                     }
@@ -268,15 +355,14 @@ pub async fn handle_grpc_request(
         }
     }
 
+    // write data to wal
     let time = start.elapsed().as_secs_f64();
+    let writer = ingester::get_writer(thread_id, org_id, &StreamType::Metrics.to_string()).await;
     for (stream_name, stream_data) in metric_data_map {
         // stream_data could be empty if metric value is nan, check it
         if stream_data.is_empty() {
             continue;
         }
-
-        // write to file
-        let mut stream_file_name = "".to_string();
 
         // check if we are allowed to ingest
         if db::compact::retention::is_deleting_stream(
@@ -289,20 +375,8 @@ pub async fn handle_grpc_request(
             continue;
         }
 
-        let time_level = if let Some(details) = stream_partitioning_map.get(&stream_name) {
-            details.partition_time_level
-        } else {
-            Some(CONFIG.limit.metrics_file_retention.as_str().into())
-        };
-
-        let mut req_stats = write_file(
-            &stream_data,
-            thread_id,
-            &StreamParams::new(org_id, &stream_name, StreamType::Metrics),
-            &mut stream_file_name,
-            time_level,
-        )
-        .await;
+        // write to file
+        let mut req_stats = write_file(&writer, &stream_name, stream_data).await;
 
         req_stats.response_time += time;
         report_request_usage_stats(
@@ -316,7 +390,7 @@ pub async fn handle_grpc_request(
         .await;
 
         let ep = if is_grpc {
-            "grpc/export/metrics"
+            "/grpc/export/metrics"
         } else {
             "/api/org/v1/metrics"
         };
@@ -341,27 +415,13 @@ pub async fn handle_grpc_request(
             ])
             .inc();
     }
+    if let Err(e) = writer.sync().await {
+        log::error!("ingestion error while syncing writer: {}", e);
+    }
 
     // only one trigger per request, as it updates etcd
-    for (_, entry) in &stream_trigger_map {
-        let mut alerts = stream_alerts_map
-            .get(&format!(
-                "{}/{}/{}",
-                entry.org,
-                StreamType::Metrics,
-                entry.stream
-            ))
-            .unwrap()
-            .clone();
-
-        alerts.retain(|alert| alert.name.eq(&entry.alert_name));
-        if !alerts.is_empty() {
-            crate::service::ingestion::send_ingest_notification(
-                entry.clone(),
-                alerts.first().unwrap().clone(),
-            )
-            .await;
-        }
+    for (_, entry) in stream_trigger_map {
+        evaluate_trigger(entry).await;
     }
 
     let res = ExportMetricsServiceResponse {
@@ -380,7 +440,7 @@ fn process_gauge(
     rec: &mut json::Value,
     gauge: &Gauge,
     metadata: &mut Metadata,
-    prom_meta: &mut AHashMap<String, String>,
+    prom_meta: &mut HashMap<String, String>,
 ) -> Vec<serde_json::Value> {
     let mut records = vec![];
 
@@ -394,7 +454,7 @@ fn process_gauge(
     for data_point in &gauge.data_points {
         process_data_point(rec, data_point);
         let val_map = rec.as_object_mut().unwrap();
-        let hash = super::signature_without_labels(val_map, &[VALUE_LABEL]);
+        let hash = super::signature_without_labels(val_map, &get_exclude_labels());
         val_map.insert(HASH_LABEL.to_string(), json::Value::String(hash.into()));
         records.push(rec.clone());
     }
@@ -405,7 +465,7 @@ fn process_sum(
     rec: &mut json::Value,
     sum: &Sum,
     metadata: &mut Metadata,
-    prom_meta: &mut AHashMap<String, String>,
+    prom_meta: &mut HashMap<String, String>,
 ) -> Vec<serde_json::Value> {
     // set metadata
     metadata.metric_type = MetricType::Counter;
@@ -421,10 +481,7 @@ fn process_sum(
         let mut dp_rec = rec.clone();
         process_data_point(&mut dp_rec, data_point);
         let val_map = dp_rec.as_object_mut().unwrap();
-
-        let vec: Vec<&str> = get_exclude_labels();
-
-        let hash = super::signature_without_labels(val_map, &vec);
+        let hash = super::signature_without_labels(val_map, &get_exclude_labels());
         val_map.insert(HASH_LABEL.to_string(), json::Value::String(hash.into()));
         records.push(dp_rec.clone());
     }
@@ -435,7 +492,7 @@ fn process_histogram(
     rec: &mut json::Value,
     hist: &Histogram,
     metadata: &mut Metadata,
-    prom_meta: &mut AHashMap<String, String>,
+    prom_meta: &mut HashMap<String, String>,
 ) -> Vec<serde_json::Value> {
     // set metadata
     metadata.metric_type = MetricType::Histogram;
@@ -450,8 +507,7 @@ fn process_histogram(
         let mut dp_rec = rec.clone();
         for mut bucket_rec in process_hist_data_point(&mut dp_rec, data_point) {
             let val_map = bucket_rec.as_object_mut().unwrap();
-            let vec: Vec<&str> = get_exclude_labels();
-            let hash = super::signature_without_labels(val_map, &vec);
+            let hash = super::signature_without_labels(val_map, &get_exclude_labels());
             val_map.insert(HASH_LABEL.to_string(), json::Value::String(hash.into()));
             records.push(bucket_rec);
         }
@@ -463,7 +519,7 @@ fn process_exponential_histogram(
     rec: &mut json::Value,
     hist: &ExponentialHistogram,
     metadata: &mut Metadata,
-    prom_meta: &mut AHashMap<String, String>,
+    prom_meta: &mut HashMap<String, String>,
 ) -> Vec<serde_json::Value> {
     // set metadata
     metadata.metric_type = MetricType::ExponentialHistogram;
@@ -477,8 +533,7 @@ fn process_exponential_histogram(
         let mut dp_rec = rec.clone();
         for mut bucket_rec in process_exp_hist_data_point(&mut dp_rec, data_point) {
             let val_map = bucket_rec.as_object_mut().unwrap();
-            let vec: Vec<&str> = get_exclude_labels();
-            let hash = super::signature_without_labels(val_map, &vec);
+            let hash = super::signature_without_labels(val_map, &get_exclude_labels());
             val_map.insert(HASH_LABEL.to_string(), json::Value::String(hash.into()));
             records.push(bucket_rec);
         }
@@ -490,7 +545,7 @@ fn process_summary(
     rec: &json::Value,
     summary: &Summary,
     metadata: &mut Metadata,
-    prom_meta: &mut AHashMap<String, String>,
+    prom_meta: &mut HashMap<String, String>,
 ) -> Vec<serde_json::Value> {
     // set metadata
     metadata.metric_type = MetricType::Summary;
@@ -504,8 +559,7 @@ fn process_summary(
         let mut dp_rec = rec.clone();
         for mut bucket_rec in process_summary_data_point(&mut dp_rec, data_point) {
             let val_map = bucket_rec.as_object_mut().unwrap();
-            let vec: Vec<&str> = get_exclude_labels();
-            let hash = super::signature_without_labels(val_map, &vec);
+            let hash = super::signature_without_labels(val_map, &get_exclude_labels());
             val_map.insert(HASH_LABEL.to_string(), json::Value::String(hash.into()));
             records.push(bucket_rec);
         }
@@ -549,27 +603,28 @@ fn process_hist_data_point(
     process_exemplars(rec, &data_point.exemplars);
     // add count record
     let mut count_rec = rec.clone();
-    count_rec[VALUE_LABEL] = data_point.count.into();
-    count_rec[NAME_LABEL] = format!("{}_count", count_rec[NAME_LABEL]).into();
+    count_rec[VALUE_LABEL] = (data_point.count as f64).into();
+    count_rec[NAME_LABEL] = format!("{}_count", count_rec[NAME_LABEL].as_str().unwrap()).into();
     bucket_recs.push(count_rec);
 
     // add sum record
     let mut sum_rec = rec.clone();
     sum_rec[VALUE_LABEL] = data_point.sum.into();
-    sum_rec[NAME_LABEL] = format!("{}_sum", sum_rec[NAME_LABEL]).into();
+    sum_rec[NAME_LABEL] = format!("{}_sum", sum_rec[NAME_LABEL].as_str().unwrap()).into();
     bucket_recs.push(sum_rec);
 
     // add bucket records
-    let last_index = data_point.bucket_counts.len() - 1;
-    for i in 0..last_index {
+    let len = data_point.bucket_counts.len();
+    for i in 0..len {
         let mut bucket_rec = rec.clone();
+        bucket_rec[NAME_LABEL] = format!("{}_bucket", rec[NAME_LABEL].as_str().unwrap()).into();
         if let Some(val) = data_point.bucket_counts.get(i) {
-            bucket_rec[VALUE_LABEL] = (*val).into()
+            bucket_rec[VALUE_LABEL] = (*val as f64).into()
         }
         if let Some(val) = data_point.explicit_bounds.get(i) {
             bucket_rec["le"] = (*val.to_string()).into()
         }
-        if i == last_index {
+        if i == len - 1 {
             bucket_rec["le"] = std::f64::INFINITY.to_string().into();
         }
         bucket_recs.push(bucket_rec);
@@ -597,14 +652,14 @@ fn process_exp_hist_data_point(
     process_exemplars(rec, &data_point.exemplars);
     // add count record
     let mut count_rec = rec.clone();
-    count_rec[VALUE_LABEL] = data_point.count.into();
-    count_rec[NAME_LABEL] = format!("{}_count", count_rec[NAME_LABEL]).into();
+    count_rec[VALUE_LABEL] = (data_point.count as f64).into();
+    count_rec[NAME_LABEL] = format!("{}_count", count_rec[NAME_LABEL].as_str().unwrap()).into();
     bucket_recs.push(count_rec);
 
     // add sum record
     let mut sum_rec = rec.clone();
     sum_rec[VALUE_LABEL] = data_point.sum.into();
-    sum_rec[NAME_LABEL] = format!("{}_sum", sum_rec[NAME_LABEL]).into();
+    sum_rec[NAME_LABEL] = format!("{}_sum", sum_rec[NAME_LABEL].as_str().unwrap()).into();
     bucket_recs.push(sum_rec);
 
     let base = 2 ^ (2 ^ -data_point.scale);
@@ -614,7 +669,9 @@ fn process_exp_hist_data_point(
             let offset = buckets.offset;
             for (i, val) in buckets.bucket_counts.iter().enumerate() {
                 let mut bucket_rec = rec.clone();
-                bucket_rec[VALUE_LABEL] = (*val).into();
+                bucket_rec[NAME_LABEL] =
+                    format!("{}_bucket", rec[NAME_LABEL].as_str().unwrap()).into();
+                bucket_rec[VALUE_LABEL] = (*val as f64).into();
                 bucket_rec["le"] = (base ^ (offset + (i as i32) + 1)).to_string().into();
                 bucket_recs.push(bucket_rec);
             }
@@ -627,7 +684,9 @@ fn process_exp_hist_data_point(
             let offset = buckets.offset;
             for (i, val) in buckets.bucket_counts.iter().enumerate() {
                 let mut bucket_rec = rec.clone();
-                bucket_rec[VALUE_LABEL] = (*val).into();
+                bucket_rec[NAME_LABEL] =
+                    format!("{}_bucket", rec[NAME_LABEL].as_str().unwrap()).into();
+                bucket_rec[VALUE_LABEL] = (*val as f64).into();
                 bucket_rec["le"] = (base ^ (offset + (i as i32) + 1)).to_string().into();
                 bucket_recs.push(bucket_rec);
             }
@@ -657,14 +716,14 @@ fn process_summary_data_point(
     .into();
     // add count record
     let mut count_rec = rec.clone();
-    count_rec[VALUE_LABEL] = data_point.count.into();
-    count_rec[NAME_LABEL] = format!("{}_count", count_rec[NAME_LABEL]).into();
+    count_rec[VALUE_LABEL] = (data_point.count as f64).into();
+    count_rec[NAME_LABEL] = format!("{}_count", count_rec[NAME_LABEL].as_str().unwrap()).into();
     bucket_recs.push(count_rec);
 
     // add sum record
     let mut sum_rec = rec.clone();
     sum_rec[VALUE_LABEL] = data_point.sum.into();
-    sum_rec[NAME_LABEL] = format!("{}_sum", sum_rec[NAME_LABEL]).into();
+    sum_rec[NAME_LABEL] = format!("{}_sum", sum_rec[NAME_LABEL].as_str().unwrap()).into();
     bucket_recs.push(sum_rec);
 
     // add bucket records

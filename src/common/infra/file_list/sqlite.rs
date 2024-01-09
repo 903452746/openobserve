@@ -1,37 +1,38 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::sync::atomic::AtomicBool;
 
 use ahash::HashMap;
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx::{Pool, QueryBuilder, Row, Sqlite};
-use std::sync::atomic::AtomicBool;
+use config::{
+    meta::stream::{FileKey, FileMeta, StreamType},
+    utils::parquet::parse_file_key_columns,
+};
+use sqlx::{Executor, Pool, QueryBuilder, Row, Sqlite};
 
 use crate::common::{
     infra::{
-        config::CONFIG,
         db::{
             sqlite::{CHANNEL, CLIENT_RO as CLIENT},
             DbEvent, DbEventFileList, DbEventFileListDeleted, DbEventStreamStats,
         },
         errors::{Error, Result},
     },
-    meta::{
-        common::{FileKey, FileMeta},
-        stream::{PartitionTimeLevel, StreamStats},
-        StreamType,
-    },
+    meta::stream::{PartitionTimeLevel, StreamStats},
 };
 
 /// Table file_list inited flag
@@ -95,7 +96,7 @@ impl super::FileList for SqliteFileList {
     async fn remove(&self, file: &str) -> Result<()> {
         let tx = CHANNEL.db_tx.clone();
         tx.send(DbEvent::FileList(DbEventFileList::BatchRemove(vec![
-            file.to_string()
+            file.to_string(),
         ])))
         .await
         .map_err(|e| Error::Message(e.to_string()))?;
@@ -161,7 +162,8 @@ impl super::FileList for SqliteFileList {
 
     async fn get(&self, file: &str) -> Result<FileMeta> {
         let pool = CLIENT.clone();
-        let (stream_key, date_key, file_name) = super::parse_file_key_columns(file)?;
+        let (stream_key, date_key, file_name) =
+            parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
         let ret = sqlx::query_as::<_, super::FileRecord>(
             r#"
 SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size
@@ -178,7 +180,8 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
 
     async fn contains(&self, file: &str) -> Result<bool> {
         let pool = CLIENT.clone();
-        let (stream_key, date_key, file_name) = super::parse_file_key_columns(file)?;
+        let (stream_key, date_key, file_name) =
+            parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
         let ret = sqlx::query(
             r#"
 SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size
@@ -251,16 +254,17 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
             .collect())
     }
 
-    async fn query_deleted(&self, org_id: &str, time_max: i64) -> Result<Vec<String>> {
+    async fn query_deleted(&self, org_id: &str, time_max: i64, limit: i64) -> Result<Vec<String>> {
         if time_max == 0 {
             return Ok(Vec::new());
         }
         let pool = CLIENT.clone();
         let ret = sqlx::query_as::<_, super::FileDeletedRecord>(
-            r#"SELECT stream, date, file FROM file_list_deleted WHERE org = $1 AND created_at < $2;"#,
+            r#"SELECT stream, date, file FROM file_list_deleted WHERE org = $1 AND created_at < $2 LIMIT $3;"#,
         )
         .bind(org_id)
         .bind(time_max)
+        .bind(limit)
         .fetch_all(&pool)
         .await?;
         Ok(ret
@@ -269,12 +273,31 @@ SELECT stream, date, file, deleted, min_ts, max_ts, records, original_size, comp
             .collect())
     }
 
+    async fn get_min_ts(
+        &self,
+        org_id: &str,
+        stream_type: StreamType,
+        stream_name: &str,
+    ) -> Result<i64> {
+        let stream_key = format!("{org_id}/{stream_type}/{stream_name}");
+        let min_ts = crate::common::utils::time::BASE_TIME.timestamp_micros();
+        let pool = CLIENT.clone();
+        let ret: Option<i64> = sqlx::query_scalar(
+            r#"SELECT MIN(min_ts) AS id FROM file_list WHERE stream = $1 AND min_ts > $2;"#,
+        )
+        .bind(stream_key)
+        .bind(min_ts)
+        .fetch_one(&pool)
+        .await?;
+        Ok(ret.unwrap_or_default())
+    }
+
     async fn get_max_pk_value(&self) -> Result<i64> {
         let pool = CLIENT.clone();
-        let ret: i64 = sqlx::query_scalar(r#"SELECT MAX(id) AS id FROM file_list;"#)
+        let ret: Option<i64> = sqlx::query_scalar(r#"SELECT MAX(id) AS id FROM file_list;"#)
             .fetch_one(&pool)
             .await?;
-        Ok(ret)
+        Ok(ret.unwrap_or_default())
     }
 
     async fn stats(
@@ -414,7 +437,8 @@ SELECT stream, MIN(min_ts) as min_ts, MAX(max_ts) as max_ts, COUNT(*) as file_nu
 }
 
 pub async fn add(client: &Pool<Sqlite>, file: &str, meta: &FileMeta) -> Result<()> {
-    let (stream_key, date_key, file_name) = super::parse_file_key_columns(file)?;
+    let (stream_key, date_key, file_name) =
+        parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
     let org_id = stream_key[..stream_key.find('/').unwrap()].to_string();
     match  sqlx::query(
             r#"
@@ -445,13 +469,18 @@ INSERT INTO file_list (org, stream, date, file, deleted, min_ts, max_ts, records
 }
 
 pub async fn batch_add(client: &Pool<Sqlite>, files: &[FileKey]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
     let chunks = files.chunks(100);
     for files in chunks {
         let mut tx = client.begin().await?;
-        let mut query_builder: QueryBuilder<Sqlite> = QueryBuilder::new("INSERT INTO file_list (org, stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size)");
+        let mut query_builder: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "INSERT INTO file_list (org, stream, date, file, deleted, min_ts, max_ts, records, original_size, compressed_size)",
+        );
         query_builder.push_values(files, |mut b, item| {
             let (stream_key, date_key, file_name) =
-                super::parse_file_key_columns(&item.key).expect("parse file key failed");
+                parse_file_key_columns(&item.key).expect("parse file key failed");
             let org_id = stream_key[..stream_key.find('/').unwrap()].to_string();
             b.push_bind(org_id)
                 .push_bind(stream_key)
@@ -503,39 +532,43 @@ pub async fn batch_add(client: &Pool<Sqlite>, files: &[FileKey]) -> Result<()> {
 }
 
 pub async fn batch_remove(client: &Pool<Sqlite>, files: &[String]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
     let chunks = files.chunks(100);
     for files in chunks {
-        let mut tx = client.begin().await?;
+        // get ids of the files
+        let pool = client.clone();
+        let mut ids = Vec::with_capacity(files.len());
         for file in files {
-            let (stream_key, date_key, file_name) = super::parse_file_key_columns(file)?;
-            let rows_affected = match sqlx::query(
-                r#"DELETE FROM file_list WHERE stream = $1 AND date = $2 AND file = $3;"#,
+            let (stream_key, date_key, file_name) =
+                parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
+            let ret: Option<i64> = match sqlx::query_scalar(
+                r#"SELECT id FROM file_list WHERE stream = $1 AND date = $2 AND file = $3;"#,
             )
             .bind(stream_key)
             .bind(date_key)
             .bind(file_name)
-            .execute(&mut *tx)
+            .fetch_one(&pool)
             .await
             {
-                Ok(ret) => ret.rows_affected(),
-                Err(e) => {
-                    if let Err(e) = tx.rollback().await {
-                        log::error!("[SQLITE] rollback file_list batch remove error: {}", e);
-                    }
-                    return Err(e.into());
-                }
+                Ok(v) => v,
+                Err(sqlx::Error::RowNotFound) => continue,
+                Err(e) => return Err(e.into()),
             };
-            if CONFIG.common.print_key_event {
-                log::info!(
-                    "[SQLITE] delete file from file_list: {}, affected: {}",
-                    file,
-                    rows_affected
-                );
+            match ret {
+                Some(v) => ids.push(v.to_string()),
+                None => {
+                    return Err(Error::Message(
+                        "[SQLITE] query error: id should not empty from file_list".to_string(),
+                    ));
+                }
             }
         }
-        if let Err(e) = tx.commit().await {
-            log::error!("[SQLITE] commit file_list batch remove error: {}", e);
-            return Err(e.into());
+        // delete files by ids
+        if !ids.is_empty() {
+            let sql = format!("DELETE FROM file_list WHERE id IN({});", ids.join(","));
+            _ = pool.execute(sql.as_str()).await?;
         }
     }
     Ok(())
@@ -555,7 +588,7 @@ pub async fn batch_add_deleted(
         );
         query_builder.push_values(files, |mut b, item: &String| {
             let (stream_key, date_key, file_name) =
-                super::parse_file_key_columns(item).expect("parse file key failed");
+                parse_file_key_columns(item).expect("parse file key failed");
             b.push_bind(org_id)
                 .push_bind(stream_key)
                 .push_bind(date_key)
@@ -577,45 +610,47 @@ pub async fn batch_add_deleted(
 }
 
 pub async fn batch_remove_deleted(client: &Pool<Sqlite>, files: &[String]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
     let chunks = files.chunks(100);
     for files in chunks {
-        let mut tx = client.begin().await?;
+        // get ids of the files
+        let pool = client.clone();
+        let mut ids = Vec::with_capacity(files.len());
         for file in files {
-            let (stream_key, date_key, file_name) = super::parse_file_key_columns(file)?;
-            let rows_affected = match sqlx::query(
-                r#"DELETE FROM file_list_deleted WHERE stream = $1 AND date = $2 AND file = $3;"#,
+            let (stream_key, date_key, file_name) =
+                parse_file_key_columns(file).map_err(|e| Error::Message(e.to_string()))?;
+            let ret: Option<i64> = match sqlx::query_scalar(
+                r#"SELECT id FROM file_list_deleted WHERE stream = $1 AND date = $2 AND file = $3;"#,
             )
             .bind(stream_key)
             .bind(date_key)
             .bind(file_name)
-            .execute(&mut *tx)
+            .fetch_one(&pool)
             .await
             {
-                Ok(ret) => ret.rows_affected(),
-                Err(e) => {
-                    if let Err(e) = tx.rollback().await {
-                        log::error!(
-                            "[SQLITE] rollback file_list_deleted batch remove error: {}",
-                            e
-                        );
-                    }
-                    return Err(e.into());
-                }
+                Ok(v) => v,
+                Err(sqlx::Error::RowNotFound) => continue,
+                Err(e) => return Err(e.into()),
             };
-            if CONFIG.common.print_key_event {
-                log::info!(
-                    "[SQLITE] delete file from file_list_deleted: {}, affected: {}",
-                    file,
-                    rows_affected
-                );
+            match ret {
+                Some(v) => ids.push(v.to_string()),
+                None => {
+                    return Err(Error::Message(
+                        "[SQLITE] query error: id should not empty from file_list_deleted"
+                            .to_string(),
+                    ));
+                }
             }
         }
-        if let Err(e) = tx.commit().await {
-            log::error!(
-                "[SQLITE] commit file_list_deleted batch remove error: {}",
-                e
+        // delete files by ids
+        if !ids.is_empty() {
+            let sql = format!(
+                "DELETE FROM file_list_deleted WHERE id IN({});",
+                ids.join(",")
             );
-            return Err(e.into());
+            _ = pool.execute(sql.as_str()).await?;
         }
     }
     Ok(())
@@ -784,23 +819,24 @@ CREATE TABLE IF NOT EXISTS stream_stats
 pub async fn create_table_index(client: &Pool<Sqlite>) -> Result<()> {
     let sqls = vec![
         (
-            "file_list", 
-            "CREATE INDEX IF NOT EXISTS file_list_org_idx on file_list (org);"),
+            "file_list",
+            "CREATE INDEX IF NOT EXISTS file_list_org_idx on file_list (org);",
+        ),
         (
             "file_list",
             "CREATE INDEX IF NOT EXISTS file_list_stream_ts_idx on file_list (stream, min_ts, max_ts);",
         ),
         // (
         //     "file_list",
-        //     "CREATE UNIQUE INDEX IF NOT EXISTS file_list_stream_file_idx on file_list (stream, date, file);",
-        // ),
-        (
-            "file_list_deleted",
-            "CREATE INDEX IF NOT EXISTS file_list_deleted_stream_idx on file_list_deleted (stream);",
-        ),
+        //     "CREATE UNIQUE INDEX IF NOT EXISTS file_list_stream_file_idx on file_list (stream,
+        // date, file);", ),
         (
             "file_list_deleted",
             "CREATE INDEX IF NOT EXISTS file_list_deleted_created_at_idx on file_list_deleted (org, created_at);",
+        ),
+        (
+            "file_list_deleted",
+            "CREATE INDEX IF NOT EXISTS file_list_deleted_stream_date_file_idx on file_list_deleted (stream, date, file);",
         ),
         (
             "stream_stats",
@@ -821,33 +857,35 @@ pub async fn create_table_index(client: &Pool<Sqlite>) -> Result<()> {
     // create UNIQUE index for file_list
     let unique_index_sql = r#"CREATE UNIQUE INDEX IF NOT EXISTS file_list_stream_file_idx on file_list (stream, date, file);"#;
     if let Err(e) = sqlx::query(unique_index_sql).execute(client).await {
-        if e.to_string().contains("UNIQUE constraint failed") {
-            // delete duplicate records
-            let ret = sqlx::query(
-                r#"SELECT stream, date, file, min(id) as id FROM file_list GROUP BY stream, date, file HAVING COUNT(*) > 1;"#,
-            ).fetch_all(client).await?;
-            for r in ret {
-                let stream = r.get::<String, &str>("stream");
-                let date = r.get::<String, &str>("date");
-                let file = r.get::<String, &str>("file");
-                let id = r.get::<i64, &str>("id");
-                if CONFIG.common.print_key_event {
-                    log::info!(
-                        "[SQLITE] delete duplicate file: {}/{}/{}",
-                        stream,
-                        date,
-                        file
-                    );
-                }
-                sqlx::query(
-                    r#"DELETE FROM file_list WHERE id != $1 AND stream = $2 AND date = $3 AND file = $4;"#,
-                ).bind(id).bind(stream).bind(date).bind(file).execute(client).await?;
-            }
-            // create index again
-            sqlx::query(unique_index_sql).execute(client).await?;
-        } else {
+        if !e.to_string().contains("UNIQUE constraint failed") {
             return Err(e.into());
         }
+        // delete duplicate records
+        log::warn!("[SQLITE] starting delete duplicate records");
+        let ret = sqlx::query(
+                r#"SELECT stream, date, file, min(id) as id FROM file_list GROUP BY stream, date, file HAVING COUNT(*) > 1;"#,
+            ).fetch_all(client).await?;
+        log::warn!("[SQLITE] total: {} duplicate records", ret.len());
+        for (i, r) in ret.iter().enumerate() {
+            let stream = r.get::<String, &str>("stream");
+            let date = r.get::<String, &str>("date");
+            let file = r.get::<String, &str>("file");
+            let id = r.get::<i64, &str>("id");
+            sqlx::query(
+                    r#"DELETE FROM file_list WHERE id != $1 AND stream = $2 AND date = $3 AND file = $4;"#,
+                ).bind(id).bind(stream).bind(date).bind(file).execute(client).await?;
+            if i / 1000 == 0 {
+                log::warn!("[SQLITE] delete duplicate records: {}/{}", i, ret.len());
+            }
+        }
+        log::warn!(
+            "[SQLITE] delete duplicate records: {}/{}",
+            ret.len(),
+            ret.len()
+        );
+        // create index again
+        sqlx::query(unique_index_sql).execute(client).await?;
+        log::warn!("[SQLITE] create table index(file_list_stream_file_idx) succeed");
     }
 
     // delete trigger for old version
@@ -861,5 +899,5 @@ pub async fn create_table_index(client: &Pool<Sqlite>) -> Result<()> {
 
 /// set file list inited flag
 pub fn set_initialised() {
-    FILE_LIST_INITED.store(true, std::sync::atomic::Ordering::Relaxed);
+    FILE_LIST_INITED.store(true, std::sync::atomic::Ordering::Release);
 }

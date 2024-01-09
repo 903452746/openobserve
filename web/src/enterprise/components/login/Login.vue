@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -26,12 +27,13 @@ import { useQuasar } from "quasar";
 import { useRouter } from "vue-router";
 import { useStore } from "vuex";
 import { getUserInfo, getDecodedUserInfo, getPath } from "@/utils/zincutils";
-
+import config from "../../../aws-exports";
 import usersService from "@/services/users";
 import organizationsService from "@/services/organizations";
 import { useLocalCurrentUser, useLocalOrganization } from "@/utils/zincutils";
 import segment from "@/services/segment_analytics";
 import moment from "moment";
+import { openobserveRum } from "@openobserve/browser-rum";
 
 export default defineComponent({
   name: "PageLoginCallback",
@@ -50,50 +52,63 @@ export default defineComponent({
      * redirect user to the page where user was redirected from
      */
     const getDefaultOrganization = () => {
-      organizationsService.list(0, 1000, "id", false, "").then((res: any) => {
-        const localOrg: any = useLocalOrganization();
-        if (
-          localOrg.value != null &&
-          localOrg.value.user_email !== store.state.userInfo.email
-        ) {
-          localOrg.value = null;
-          useLocalOrganization("");
-        }
-
-        store.dispatch("setOrganizations", res.data.data);
-        orgOptions.value = res.data.data.map(
-          (data: {
-            id: any;
-            name: any;
-            type: any;
-            identifier: any;
-            UserObj: any;
-          }) => {
-            let optiondata: any = {
-              label: data.name,
-              id: data.id,
-              identifier: data.identifier,
-              user_email: store.state.userInfo.email,
-            };
-
-            if (
-              (selectedOrg.value == "" &&
-                data.type == "default" &&
-                store.state.userInfo.email == data.UserObj.email) ||
-              res.data.data.length == 1
-            ) {
-              selectedOrg.value = localOrg.value ? localOrg.value : optiondata;
-              useLocalOrganization(selectedOrg.value);
-              store.dispatch("setSelectedOrganization", selectedOrg.value);
-            }
-            return optiondata;
+      organizationsService
+        .os_list(0, 1000, "id", false, "")
+        .then((res: any) => {
+          const localOrg: any = useLocalOrganization();
+          if (
+            localOrg.value != null &&
+            localOrg.value.user_email !== store.state.userInfo.email
+          ) {
+            localOrg.value = null;
+            useLocalOrganization("");
           }
-        );
 
-        const redirectURI = window.sessionStorage.getItem("redirectURI");
-        window.sessionStorage.removeItem("redirectURI");
-        redirectUser(redirectURI);
-      });
+          store.dispatch("setOrganizations", res.data.data);
+          orgOptions.value = res.data.data.map(
+            (data: {
+              id: any;
+              name: any;
+              type: any;
+              identifier: any;
+              UserObj: any;
+            }) => {
+              let optiondata: any = {
+                label: data.name,
+                id: data.id,
+                identifier: data.identifier,
+                user_email: store.state.userInfo.email,
+                ingest_threshold: data.ingest_threshold,
+                search_threshold: data.search_threshold,
+                subscription_type: data.hasOwnProperty("CustomerBillingObj")
+                  ? data.CustomerBillingObj.subscription_type
+                  : "",
+                status: data.status,
+                note: data.hasOwnProperty("CustomerBillingObj")
+                  ? data.CustomerBillingObj.note
+                  : "",
+              };
+
+              if (
+                (selectedOrg.value == "" &&
+                  (data.type == "default" || data.id == "1") &&
+                  store.state.userInfo.email == data.UserObj.email) ||
+                res.data.data.length == 1
+              ) {
+                selectedOrg.value = localOrg.value
+                  ? localOrg.value
+                  : optiondata;
+                useLocalOrganization(selectedOrg.value);
+                store.dispatch("setSelectedOrganization", selectedOrg.value);
+              }
+              return optiondata;
+            }
+          );
+
+          const redirectURI = window.sessionStorage.getItem("redirectURI");
+          window.sessionStorage.removeItem("redirectURI");
+          redirectUser(redirectURI);
+        });
     };
 
     /**
@@ -152,11 +167,15 @@ export default defineComponent({
     const d = new Date();
     this.userInfo =
       sessionUserInfo !== null ? JSON.parse(sessionUserInfo) : null;
-    if (this.userInfo !== null && this.userInfo.hasOwnProperty("pgdata")) {
+    if (
+      (this.userInfo !== null && this.userInfo.hasOwnProperty("pgdata")) ||
+      config.isEnterprise === "true"
+    ) {
       this.store.dispatch("login", {
         loginState: true,
         userInfo: this.userInfo,
       });
+      this.getDefaultOrganization();
     } else {
       this.VerifyAndCreateUser();
     }
@@ -201,6 +220,11 @@ export default defineComponent({
               },
               { originalTimestamp: moment.utc().format() }
             );
+
+            openobserveRum.setUser({
+              name: this.userInfo.given_name + " " + this.userInfo.family_name,
+              email: this.userInfo.email,
+            });
             //analytics
           });
         } else {
@@ -222,6 +246,11 @@ export default defineComponent({
             },
             { originalTimestamp: moment.utc().format() }
           );
+
+          openobserveRum.setUser({
+            name: this.userInfo.given_name + " " + this.userInfo.family_name,
+            email: this.userInfo.email,
+          });
           //analytics
 
           this.getDefaultOrganization();

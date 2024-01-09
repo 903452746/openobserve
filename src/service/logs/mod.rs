@@ -1,60 +1,47 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use ahash::AHashMap;
+use std::{collections::HashMap, sync::Arc};
+
 use arrow_schema::{DataType, Field};
+use config::{meta::stream::StreamType, utils::schema_ext::SchemaExt, CONFIG};
 use datafusion::arrow::datatypes::Schema;
 
-use crate::common::{
-    infra::config::CONFIG,
-    meta::{
-        alert::{Alert, Evaluate, Trigger},
-        ingestion::RecordStatus,
-        stream::PartitionTimeLevel,
-        StreamType,
+use super::ingestion::{get_string_value, TriggerAlertData};
+use crate::{
+    common::{
+        meta::{
+            alerts::Alert,
+            ingestion::RecordStatus,
+            stream::{PartitionTimeLevel, SchemaRecords},
+        },
+        utils::json::{self, Map, Value},
     },
-    utils::{
-        self,
-        hasher::get_fields_key_xxh3,
-        json::{Map, Value},
+    service::{
+        ingestion::get_wal_time_key, schema::check_for_schema, stream::unwrap_partition_time_level,
     },
-};
-use crate::service::schema::check_for_schema;
-
-use super::{
-    ingestion::{get_value, get_wal_time_key},
-    stream::unwrap_partition_time_level,
 };
 
 pub mod bulk;
-pub mod gcs_pub_sub;
 pub mod ingest;
-pub mod json;
-pub mod kinesis_firehose;
 pub mod multi;
 pub mod otlp_grpc;
 pub mod otlp_http;
 pub mod syslog;
 
 static BULK_OPERATORS: [&str; 3] = ["create", "index", "update"];
-
-pub(crate) fn get_upto_discard_error() -> String {
-    format!(
-        "Too old data, only last {} hours data can be ingested. Data discarded. You can adjust ingestion max time by setting the environment variable ZO_INGEST_ALLOWED_UPTO=<max_hours>",
-        CONFIG.limit.ingest_allowed_upto
-    )
-}
 
 fn parse_bulk_index(v: &Value) -> Option<(String, String, String)> {
     let local_val = v.as_object().unwrap();
@@ -75,205 +62,157 @@ fn parse_bulk_index(v: &Value) -> Option<(String, String, String)> {
     None
 }
 
-pub fn cast_to_type(mut value: Value, delta: Vec<Field>) -> (Option<String>, Option<String>) {
-    let local_map = value.as_object_mut().unwrap();
-    //let mut error_msg = String::new();
+pub fn cast_to_type(
+    value: &mut Map<String, Value>,
+    delta: Vec<Field>,
+) -> Result<(), anyhow::Error> {
     let mut parse_error = String::new();
     for field in delta {
-        let field_map = local_map.get(field.name());
-        if let Some(val) = field_map {
-            if val.is_null() {
-                local_map.insert(field.name().clone(), val.clone());
-                continue;
-            }
-            let local_val = get_value(val);
-            match field.data_type() {
-                DataType::Boolean => {
-                    match local_val.parse::<bool>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Int8 => {
-                    match local_val.parse::<i8>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Int16 => {
-                    match local_val.parse::<i16>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Int32 => {
-                    match local_val.parse::<i32>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Int64 => {
-                    match local_val.parse::<i64>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::UInt8 => {
-                    match local_val.parse::<u8>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::UInt16 => {
-                    match local_val.parse::<u16>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::UInt32 => {
-                    match local_val.parse::<u32>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::UInt64 => {
-                    match local_val.parse::<u64>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Float16 => {
-                    match local_val.parse::<f32>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Float32 => {
-                    match local_val.parse::<f32>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Float64 => {
-                    match local_val.parse::<f64>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                DataType::Utf8 => {
-                    match local_val.parse::<String>() {
-                        Ok(val) => {
-                            local_map.insert(field.name().clone(), val.into());
-                        }
-                        Err(_) => set_parsing_error(&mut parse_error, &field),
-                    };
-                }
-                _ => println!("{local_val:?}"),
-            };
+        let field_name = field.name().clone();
+        let Some(val) = value.get(&field_name) else {
+            continue;
+        };
+        if val.is_null() {
+            value.insert(field_name, Value::Null);
+            continue;
         }
+        match field.data_type() {
+            DataType::Utf8 => {
+                if val.is_string() {
+                    continue;
+                }
+                value.insert(field_name, Value::String(get_string_value(val)));
+            }
+            DataType::Int64 | DataType::Int32 | DataType::Int16 | DataType::Int8 => {
+                if val.is_i64() {
+                    continue;
+                }
+                let val = get_string_value(val);
+                match val.parse::<i64>() {
+                    Ok(val) => {
+                        value.insert(field_name, Value::Number(val.into()));
+                    }
+                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                };
+            }
+            DataType::UInt64 | DataType::UInt32 | DataType::UInt16 | DataType::UInt8 => {
+                if val.is_u64() {
+                    continue;
+                }
+                let val = get_string_value(val);
+                match val.parse::<u64>() {
+                    Ok(val) => {
+                        value.insert(field_name, Value::Number(val.into()));
+                    }
+                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                };
+            }
+            DataType::Float64 | DataType::Float32 | DataType::Float16 => {
+                if val.is_f64() {
+                    continue;
+                }
+                let val = get_string_value(val);
+                match val.parse::<f64>() {
+                    Ok(val) => {
+                        value.insert(
+                            field_name,
+                            Value::Number(serde_json::Number::from_f64(val).unwrap()),
+                        );
+                    }
+                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                };
+            }
+            DataType::Boolean => {
+                if val.is_boolean() {
+                    continue;
+                }
+                let val = get_string_value(val);
+                match val.parse::<bool>() {
+                    Ok(val) => {
+                        value.insert(field_name, Value::Bool(val));
+                    }
+                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                };
+            }
+            _ => set_parsing_error(&mut parse_error, &field),
+        };
     }
-    if parse_error.is_empty() {
-        (Some(utils::json::to_string(&local_map).unwrap()), None)
+    if !parse_error.is_empty() {
+        Err(anyhow::Error::msg(parse_error))
     } else {
-        (None, Some(parse_error))
+        Ok(())
     }
 }
 
 async fn add_valid_record(
     stream_meta: &StreamMeta<'_>,
-    stream_schema_map: &mut AHashMap<String, Schema>,
+    stream_schema_map: &mut HashMap<String, Schema>,
     status: &mut RecordStatus,
-    buf: &mut AHashMap<String, Vec<String>>,
-    local_val: &mut Map<String, Value>,
-) -> Option<Trigger> {
-    let mut trigger: Option<Trigger> = None;
-    let timestamp: i64 = local_val
+    write_buf: &mut HashMap<String, SchemaRecords>,
+    record_val: &mut Map<String, Value>,
+    need_trigger: bool,
+) -> Result<TriggerAlertData, anyhow::Error> {
+    let mut trigger: Vec<(Alert, Vec<Map<String, Value>>)> = Vec::new();
+    let timestamp: i64 = record_val
         .get(&CONFIG.common.column_timestamp)
         .unwrap()
         .as_i64()
         .unwrap();
 
-    let mut value_str = utils::json::to_string(&local_val).unwrap();
     // check schema
     let schema_evolution = check_for_schema(
         &stream_meta.org_id,
         &stream_meta.stream_name,
         StreamType::Logs,
-        &value_str,
         stream_schema_map,
+        &Value::Object(record_val.clone()),
         timestamp,
     )
-    .await;
+    .await?;
 
     // get hour key
-    let schema_key = get_fields_key_xxh3(&schema_evolution.schema_fields);
+    let rec_schema = stream_schema_map.get(&stream_meta.stream_name).unwrap();
+    let schema_key = rec_schema.hash_key();
     let hour_key = get_wal_time_key(
         timestamp,
         stream_meta.partition_keys,
         unwrap_partition_time_level(*stream_meta.partition_time_level, StreamType::Logs),
-        local_val,
+        record_val,
         Some(&schema_key),
     );
-    let hour_buf = buf.entry(hour_key).or_default();
 
     if schema_evolution.schema_compatible {
         let valid_record = if schema_evolution.types_delta.is_some() {
             let delta = schema_evolution.types_delta.unwrap();
-            let loc_value: Value = utils::json::from_slice(value_str.as_bytes()).unwrap();
-            let (ret_val, error) = if !CONFIG.common.widening_schema_evolution {
-                cast_to_type(loc_value, delta)
+            let ret_val = if !CONFIG.common.widening_schema_evolution {
+                cast_to_type(record_val, delta)
             } else if schema_evolution.is_schema_changed {
                 let local_delta = delta
                     .into_iter()
                     .filter(|x| x.metadata().contains_key("zo_cast"))
                     .collect::<Vec<_>>();
-
-                if local_delta.is_empty() {
-                    (Some(value_str.clone()), None)
+                if !local_delta.is_empty() {
+                    cast_to_type(record_val, local_delta)
                 } else {
-                    cast_to_type(loc_value, local_delta)
+                    Ok(())
                 }
             } else {
-                cast_to_type(loc_value, delta)
+                cast_to_type(record_val, delta)
             };
-            if ret_val.is_some() {
-                value_str = ret_val.unwrap();
-                true
-            } else {
-                status.failed += 1;
-                status.error = error.unwrap();
-                false
+            match ret_val {
+                Ok(_) => true,
+                Err(e) => {
+                    status.failed += 1;
+                    status.error = e.to_string();
+                    false
+                }
             }
         } else {
             true
         };
 
         if valid_record {
-            if !stream_meta.stream_alerts_map.is_empty() {
+            if need_trigger && !stream_meta.stream_alerts_map.is_empty() {
                 // Start check for alert trigger
                 let key = format!(
                     "{}/{}/{}",
@@ -283,35 +222,37 @@ async fn add_valid_record(
                 );
                 if let Some(alerts) = stream_meta.stream_alerts_map.get(&key) {
                     for alert in alerts {
-                        if alert.is_real_time {
-                            let set_trigger = alert.condition.evaluate(local_val.clone());
-                            if set_trigger {
-                                // let _ = triggers::save_trigger(alert.name.clone(), trigger).await;
-                                trigger = Some(Trigger {
-                                    timestamp,
-                                    is_valid: true,
-                                    alert_name: alert.name.clone(),
-                                    stream: stream_meta.stream_name.to_string(),
-                                    org: stream_meta.org_id.to_string(),
-                                    stream_type: StreamType::Logs,
-                                    last_sent_at: 0,
-                                    count: 0,
-                                    is_ingest_time: true,
-                                    parent_alert_deleted: false,
-                                });
-                            }
+                        if let Ok(Some(v)) = alert.evaluate(Some(record_val)).await {
+                            trigger.push((alert.clone(), v));
                         }
                     }
                 }
                 // End check for alert trigger
             }
-            hour_buf.push(value_str);
+            let hour_buf = write_buf.entry(hour_key).or_insert_with(|| {
+                let schema = Arc::new(rec_schema.clone().with_metadata(HashMap::new()));
+                let schema_key = schema.hash_key();
+                SchemaRecords {
+                    schema_key,
+                    schema,
+                    records: vec![],
+                    records_size: 0,
+                }
+            });
+            let record_val = Value::Object(record_val.clone());
+            let record_size = json::to_vec(&record_val).unwrap_or_default().len();
+            hour_buf.records.push(Arc::new(record_val));
+            hour_buf.records_size += record_size;
             status.successful += 1;
         };
     } else {
         status.failed += 1;
     }
-    trigger
+    if trigger.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trigger))
+    }
 }
 
 fn set_parsing_error(parse_error: &mut String, field: &Field) {
@@ -322,34 +263,12 @@ fn set_parsing_error(parse_error: &mut String, field: &Field) {
     ));
 }
 
-async fn evaluate_trigger(
-    trigger: Option<Trigger>,
-    stream_alerts_map: &AHashMap<String, Vec<Alert>>,
-) {
-    if trigger.is_some() {
-        let val = trigger.unwrap();
-        let mut alerts = stream_alerts_map
-            .get(&format!("{}/{}/{}", val.org, StreamType::Logs, val.stream))
-            .unwrap()
-            .clone();
-
-        alerts.retain(|alert| alert.name.eq(&val.alert_name));
-        if !alerts.is_empty() {
-            crate::service::ingestion::send_ingest_notification(
-                val,
-                alerts.first().unwrap().clone(),
-            )
-            .await;
-        }
-    }
-}
-
 struct StreamMeta<'a> {
     org_id: String,
     stream_name: String,
     partition_keys: &'a Vec<String>,
     partition_time_level: &'a Option<PartitionTimeLevel>,
-    stream_alerts_map: &'a AHashMap<String, Vec<Alert>>,
+    stream_alerts_map: &'a HashMap<String, Vec<Alert>>,
 }
 
 #[cfg(test)]
@@ -368,8 +287,7 @@ mod tests {
         let mut local_val = Map::new();
         local_val.insert("test".to_string(), Value::from("test13212"));
         let delta = vec![Field::new("test", DataType::Utf8, true)];
-        let (ret_val, error) = cast_to_type(Value::from(local_val), delta);
-        assert!(ret_val.is_some());
-        assert!(error.is_none());
+        let ret_val = cast_to_type(&mut local_val, delta);
+        assert!(ret_val.is_ok());
     }
 }

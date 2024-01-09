@@ -1,38 +1,43 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use ahash::AHashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
+
+use arrow_schema::{DataType, Field, Schema};
+use config::{meta::stream::StreamType, utils::schema_ext::SchemaExt, FxIndexMap, CONFIG};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use tokio::{
     sync::{mpsc, RwLock},
     time,
 };
 
-use crate::common::{
-    infra::{
-        config::{FxIndexMap, CONFIG},
-        errors::{Error, Result},
+use crate::{
+    common::{
+        infra::errors::{Error, Result},
+        meta::stream::SchemaRecords,
+        utils::json,
     },
-    meta::{stream::StreamParams, StreamType},
-    utils::json,
+    service::{ingestion, stream::unwrap_partition_time_level},
 };
-use crate::service::{ingestion, stream::unwrap_partition_time_level};
 
 const CHANNEL_SIZE: usize = 10240;
 const STREAM_NAME: &str = "distinct_values";
@@ -109,7 +114,7 @@ impl DistinctValues {
     async fn write(&self, org_id: &str, data: Vec<DvItem>) -> Result<()> {
         let mut group_items: FxIndexMap<DvItem, u32> = FxIndexMap::default();
         for item in data {
-            let count = group_items.entry(item).or_insert(0);
+            let count = group_items.entry(item).or_default();
             *count += 1;
         }
         for (item, count) in group_items {
@@ -129,17 +134,34 @@ impl DistinctValues {
 
         // write to wal
         let timestamp = chrono::Utc::now().timestamp_micros();
-        let mut stream_file_name = "".to_string();
-        for (org, items) in new_table {
+        let schema = generate_schema();
+        let schema_key = schema.hash_key();
+        for (org_id, items) in new_table {
             if items.is_empty() {
                 continue;
             }
-            let stream_params = StreamParams {
-                org_id: org.into(),
-                stream_name: STREAM_NAME.into(),
-                stream_type: StreamType::Metadata,
-            };
-            let mut buf: AHashMap<String, Vec<String>> = AHashMap::new();
+
+            // check for schema
+            let db_schema = super::db::schema::get(&org_id, STREAM_NAME, StreamType::Metadata)
+                .await
+                .unwrap();
+            if db_schema.fields().is_empty() {
+                let schema = schema.as_ref().clone();
+                if let Err(e) = super::db::schema::set(
+                    &org_id,
+                    STREAM_NAME,
+                    StreamType::Metadata,
+                    &schema,
+                    None,
+                    false,
+                )
+                .await
+                {
+                    log::error!("[DISTINCT_VALUES] error while setting schema: {}", e);
+                }
+            }
+
+            let mut buf: HashMap<String, SchemaRecords> = HashMap::new();
             for (item, count) in items {
                 let mut data = json::to_value(item).unwrap();
                 let data = data.as_object_mut().unwrap();
@@ -151,15 +173,28 @@ impl DistinctValues {
                 let hour_key = ingestion::get_wal_time_key(
                     timestamp,
                     &vec![],
-                    unwrap_partition_time_level(None, StreamType::Logs),
+                    unwrap_partition_time_level(None, StreamType::Metadata),
                     data,
-                    None,
+                    Some(&schema_key),
                 );
-                let line_str = json::to_string(&data).unwrap();
-                let hour_buf = buf.entry(hour_key).or_default();
-                hour_buf.push(line_str);
+                let data = json::Value::Object(data.clone());
+                let data_size = json::to_vec(&data).unwrap_or_default().len();
+
+                let hour_buf = buf.entry(hour_key).or_insert_with(|| SchemaRecords {
+                    schema_key: schema_key.clone(),
+                    schema: schema.clone(),
+                    records: vec![],
+                    records_size: 0,
+                });
+                hour_buf.records.push(Arc::new(data));
+                hour_buf.records_size += data_size;
             }
-            _ = ingestion::write_file(&buf, 0, &stream_params, &mut stream_file_name, None).await;
+
+            let writer = ingester::get_writer(0, &org_id, &StreamType::Metadata.to_string()).await;
+            _ = ingestion::write_file(&writer, STREAM_NAME, buf).await;
+            if let Err(e) = writer.sync().await {
+                log::error!("[DISTINCT_VALUES] error while syncing writer: {}", e);
+            }
         }
         Ok(())
     }
@@ -186,23 +221,23 @@ fn handle_channel() -> Arc<mpsc::Sender<DvEvent>> {
             let event = match rx.recv().await {
                 Some(v) => v,
                 None => {
-                    log::info!("[distinct_values] event channel closed");
+                    log::info!("[DISTINCT_VALUES] event channel closed");
                     break;
                 }
             };
             if let DvEventType::Shutudown = event.ev_type {
                 if let Err(e) = CHANNEL.flush().await {
-                    log::error!("flush error: {}", e);
+                    log::error!("[DISTINCT_VALUES] flush error: {}", e);
                 }
-                CHANNEL.shutdown.store(true, Ordering::Relaxed);
+                CHANNEL.shutdown.store(true, Ordering::Release);
                 break;
             }
             let mut mem_table = CHANNEL.mem_table.write().await;
             let entry = mem_table.entry(event.org_id).or_default();
-            let field_entry = entry.entry(event.item).or_insert(0);
+            let field_entry = entry.entry(event.item).or_default();
             *field_entry += event.count;
         }
-        log::info!("[distinct_values] event loop exit");
+        log::info!("[DISTINCT_VALUES] event loop exit");
     });
     Arc::new(tx)
 }
@@ -213,7 +248,7 @@ async fn run_flush() {
     loop {
         interval.tick().await;
         if let Err(e) = CHANNEL.flush().await {
-            log::error!("[distinct_values] errot flush data to wal: {}", e);
+            log::error!("[DISTINCT_VALUES] errot flush data to wal: {}", e);
         }
     }
 }
@@ -225,4 +260,21 @@ pub async fn write(org_id: &str, data: Vec<DvItem>) -> Result<()> {
 pub async fn close() -> Result<()> {
     CHANNEL.stop().await?;
     Ok(())
+}
+
+fn generate_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new(
+            CONFIG.common.column_timestamp.as_str(),
+            DataType::Int64,
+            false,
+        ),
+        Field::new("count", DataType::Int64, false),
+        Field::new("stream_name", DataType::Utf8, false),
+        Field::new("stream_type", DataType::Utf8, false),
+        Field::new("field_name", DataType::Utf8, false),
+        Field::new("field_value", DataType::Utf8, true),
+        Field::new("filter_name", DataType::Utf8, true),
+        Field::new("filter_value", DataType::Utf8, true),
+    ]))
 }

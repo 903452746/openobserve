@@ -1,29 +1,34 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
+
+use config::meta::stream::StreamType;
 use vrl::prelude::NotNan;
 
-use crate::common::infra::cache::stats;
-use crate::common::{
-    meta::{self, search::Request},
-    utils::json,
+use crate::{
+    common::{
+        infra::cache::stats,
+        meta::{self, search::Request},
+        utils::json,
+    },
+    service::search as SearchService,
 };
-use crate::service::search as SearchService;
 
 pub async fn get(org_id: &str, name: &str) -> Result<Vec<vrl::value::Value>, anyhow::Error> {
-    let stats = stats::get_stream_stats(org_id, name, meta::StreamType::EnrichmentTables);
+    let stats = stats::get_stream_stats(org_id, name, StreamType::EnrichmentTables);
 
     let rec_num = if stats.doc_num == 0 {
         100000
@@ -44,7 +49,7 @@ pub async fn get(org_id: &str, name: &str) -> Result<Vec<vrl::value::Value>, any
         timeout: 0,
     };
     // do search
-    match SearchService::search(org_id, meta::StreamType::EnrichmentTables, &req).await {
+    match SearchService::search("", org_id, StreamType::EnrichmentTables, &req).await {
         Ok(res) => {
             if !res.hits.is_empty() {
                 Ok(res.hits.iter().map(convert_to_vrl).collect())

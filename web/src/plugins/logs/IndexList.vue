@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -78,7 +79,7 @@
             >
               <!-- TODO OK : Repeated code make seperate component to display field  -->
               <div
-                v-if="props.row.ftsKey"
+                v-if="props.row.ftsKey || !props.row.isSchemaField"
                 class="field-container flex content-center ellipsis q-pl-lg q-pr-sm"
                 :title="props.row.name"
               >
@@ -90,6 +91,7 @@
                 </div>
                 <div class="field_overlay">
                   <q-btn
+                    v-if="props.row.isSchemaField"
                     :icon="outlinedAdd"
                     :data-test="`log-search-index-list-filter-${props.row.name}-field-btn`"
                     style="margin-right: 0.375rem"
@@ -152,6 +154,7 @@
                     </div>
                     <div class="field_overlay">
                       <q-btn
+                        v-if="props.row.isSchemaField"
                         :data-test="`log-search-index-list-filter-${props.row.name}-field-btn`"
                         :icon="outlinedAdd"
                         style="margin-right: 0.375rem"
@@ -351,8 +354,12 @@ export default defineComponent({
     const router = useRouter();
     const { t } = useI18n();
     const $q = useQuasar();
-    const { searchObj, updatedLocalLogFilterField, handleQueryData } =
-      useLogs();
+    const {
+      searchObj,
+      updatedLocalLogFilterField,
+      handleQueryData,
+      onStreamChange,
+    } = useLogs();
     const streamOptions: any = ref(searchObj.data.stream.streamLists);
     const fieldValues: Ref<{
       [key: string | number]: {
@@ -378,9 +385,14 @@ export default defineComponent({
     };
 
     watch(
-      () => searchObj.data.stream.streamLists.length,
       () => {
-        streamOptions.value = searchObj.data.stream.streamLists;
+        searchObj.data.stream.streamLists.length;
+        store.state.organizationData.streams;
+      },
+      () => {
+        streamOptions.value =
+          searchObj.data.stream.streamLists ||
+          store.state.organizationData.streams;
       }
     );
 
@@ -415,7 +427,7 @@ export default defineComponent({
       updatedLocalLogFilterField();
     }
 
-    const openFilterCreator = (event: any, { name, ftsKey }: any) => {
+    const openFilterCreator = (event: any, { name, ftsKey, isSchemaField }: any) => {
       if (ftsKey) {
         event.stopPropagation();
         event.preventDefault();
@@ -563,16 +575,17 @@ export default defineComponent({
       searchObj.data.stream.addToFilter = term;
     };
 
-    const onStreamChange = () => {
-      const query = searchObj.meta.sqlMode
-        ? `SELECT * FROM "${searchObj.data.stream.selectedStream.value}"`
-        : "";
+    // const onStreamChange = () => {
+    //   alert("onStreamChange")
+    //   const query = searchObj.meta.sqlMode
+    //     ? `SELECT * FROM "${searchObj.data.stream.selectedStream.value}"`
+    //     : "";
 
-      searchObj.data.editorValue = query;
-      searchObj.data.query = query;
+    //   searchObj.data.editorValue = query;
+    //   searchObj.data.query = query;
 
-      handleQueryData();
-    };
+    //   handleQueryData();
+    // };
 
     return {
       t,

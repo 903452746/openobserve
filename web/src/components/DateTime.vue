@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
@@ -38,23 +39,25 @@
       >
         <div class="flex justify-evenly q-py-sm">
           <q-btn
+            data-test="date-time-relative-tab"
             size="md"
             class="tab-button no-border"
             color="primary"
             no-caps
             :flat="selectedType !== 'relative'"
-            @click="selectedType = 'relative'"
+            @click="setDateType('relative')"
           >
             Relative
           </q-btn>
           <q-separator vertical inset />
           <q-btn
+            data-test="date-time-absolute-tab"
             size="md"
             class="tab-button no-border"
             color="primary"
             no-caps
             :flat="selectedType !== 'absolute'"
-            @click="selectedType = 'absolute'"
+            @click="setDateType('absolute')"
           >
             Absolute
           </q-btn>
@@ -135,6 +138,7 @@
                   class="absolute-calendar"
                   range
                   :locale="dateLocale"
+                  :options="optionsFn"
                 />
               </div>
               <div class="notePara">* You can choose multiple date</div>
@@ -216,9 +220,15 @@
           </q-tab-panel>
         </q-tab-panels>
         <q-select
+          data-test="datetime-timezone-select"
           v-model="timezone"
           :options="filteredTimezone"
-          @blur="timezone = timezone == '' ? 'UTC' : timezone"
+          @blur="
+            timezone =
+              timezone == ''
+                ? Intl.DateTimeFormat().resolvedOptions().timeZone
+                : timezone
+          "
           use-input
           @filter="timezoneFilterFn"
           input-debounce="0"
@@ -230,11 +240,13 @@
           :label="t('logStream.timezone')"
           @update:modelValue="onTimezoneChange"
           :display-value="`Timezone: ${timezone}`"
+          class="timezone-select"
         >
         </q-select>
         <div v-if="!autoApply" class="flex justify-end q-py-sm q-px-md">
           <q-separator class="q-my-sm" />
           <q-btn
+            data-test="date-time-apply-btn"
             class="no-border q-py-xs"
             color="secondary"
             no-caps
@@ -264,10 +276,12 @@ import {
   getImageURL,
   useLocalTimezone,
   convertToUtcTimestamp,
+  timestampToTimezoneDate,
 } from "../utils/zincutils";
 import { date } from "quasar";
 import { useStore } from "vuex";
 import { useI18n } from "vue-i18n";
+import { utcToZonedTime } from "date-fns-tz";
 
 export default defineComponent({
   props: {
@@ -305,14 +319,18 @@ export default defineComponent({
     });
     const relativePeriod = ref("m");
     const relativeValue = ref(15);
-    const currentTimezone = useLocalTimezone() || "UTC";
+    const currentTimezone =
+      useLocalTimezone() || Intl.DateTimeFormat().resolvedOptions().timeZone;
     const timezone = ref(currentTimezone);
     let timezoneOptions = Intl.supportedValuesOf("timeZone").map((tz) => {
       return tz;
     });
+    const browserTime =
+      "Browser Time (" + Intl.DateTimeFormat().resolvedOptions().timeZone + ")";
 
     // Add the UTC option
     timezoneOptions.unshift("UTC");
+    timezoneOptions.unshift(browserTime);
 
     const filteredTimezone: any = ref([]);
 
@@ -352,20 +370,12 @@ export default defineComponent({
         );
         setRelativeTime(props.defaultRelativeTime);
         displayValue.value = getDisplayValue();
+
         if (props.autoApply) saveDate(props.defaultType);
       } catch (e) {
         console.log(e);
       }
     });
-
-    watch(
-      () => selectedType.value,
-      (value) => {
-        displayValue.value = getDisplayValue();
-        if (props.autoApply)
-          saveDate(value === "absolute" ? "absolute" : "relative-custom");
-      }
-    );
 
     watch(
       () => {
@@ -375,32 +385,40 @@ export default defineComponent({
         selectedDate.value?.to;
       },
       () => {
-        if (props.autoApply && selectedType.value === "absolute")
+        if (
+          props.autoApply &&
+          selectedType.value === "absolute" &&
+          store.state.savedViewFlag == false
+        ) {
           saveDate("absolute");
+        }
       },
       { deep: true }
     );
 
-    watch(
-      () => props.defaultAbsoluteTime,
-      (value) => {
-        if (
-          value.startTime !== datePayload.value.startTime ||
-          value.endTime !== datePayload.value.endTime
-        ) {
-          selectedType.value = props.defaultType;
-          setAbsoluteTime(value.startTime, value.endTime);
-        }
-      },
-      {
-        deep: true,
-      }
-    );
+    // watch(
+    //   () => props.defaultAbsoluteTime,
+    //   (value) => {
+    //     console.log("defaultAbsoluteTime", value);
+    //     if (
+    //       (value.startTime !== datePayload.value.startTime ||
+    //         value.endTime !== datePayload.value.endTime) &&
+    //       store.state.savedViewFlag == false
+    //     ) {
+    //       selectedType.value = props.defaultType;
+    //       setAbsoluteTime(value.startTime, value.endTime);
+    //     }
+    //   },
+    //   {
+    //     deep: true,
+    //   }
+    // );
 
     const setRelativeDate = (period, value) => {
       selectedType.value = "relative";
       relativePeriod.value = period;
       relativeValue.value = value;
+
       if (props.autoApply) saveDate("relative");
     };
 
@@ -409,8 +427,13 @@ export default defineComponent({
     };
 
     const onTimezoneChange = async () => {
-      useLocalTimezone(timezone.value);
-      store.dispatch("setTimezone", timezone.value);
+      let selectedTimezone = timezone.value;
+      if (selectedTimezone.toLowerCase() == browserTime.toLowerCase()) {
+        selectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      }
+      //Intl.DateTimeFormat().resolvedOptions().timeZone
+      useLocalTimezone(selectedTimezone);
+      store.dispatch("setTimezone", selectedTimezone);
       await nextTick();
       if (selectedType.value == "absolute") saveDate("absolute");
       else saveDate("relative");
@@ -469,7 +492,7 @@ export default defineComponent({
 
     function convertUnixTime(unixTimeMicros) {
       // Convert microseconds to milliseconds and create a new Date object
-      var date = new Date(unixTimeMicros / 1000);
+      var date = utcToZonedTime(unixTimeMicros / 1000, store.state.timezone);
 
       // Extract hour, minute, day, month, and year
       const hours = ("0" + date.getHours()).slice(-2); // pad with leading zero if needed
@@ -492,7 +515,38 @@ export default defineComponent({
       const date = getConsumableDateTime();
       datePayload.value = date;
       date["valueType"] = dateType || selectedType.value;
-      emit("on:date-change", date);
+      // date["relativeTimePeriod"] = "";
+      if (store.state.savedViewFlag == false) {
+        emit("on:date-change", date);
+      }
+    };
+
+    function formatDate(d) {
+      var year = d.getFullYear();
+      var month = ("0" + (d.getMonth() + 1)).slice(-2); // Months are zero-based
+      var day = ("0" + d.getDate()).slice(-2);
+      var hours = ("0" + d.getHours()).slice(-2);
+      var minutes = ("0" + d.getMinutes()).slice(-2);
+
+      return {
+        date: year + "/" + month + "/" + day,
+        time: hours + ":" + minutes,
+      };
+    }
+
+    const setCustomDate = (dateType, dateobj) => {
+      var start_date = new Date(Math.floor(dateobj.start));
+      const startObj = formatDate(start_date);
+
+      var end_date = new Date(Math.floor(dateobj.end));
+      const endObj = formatDate(end_date);
+
+      selectedDate.value.from = startObj.date;
+      selectedDate.value.to = endObj.date;
+      selectedTime.value.startTime = startObj.time;
+      selectedTime.value.endTime = endObj.time;
+
+      selectedType.value = dateType;
     };
 
     const onBeforeShow = () => {
@@ -572,6 +626,8 @@ export default defineComponent({
           startTime: absoluteUTCTimestamp.startUTC,
           endTime: absoluteUTCTimestamp.endUTC,
           relativeTimePeriod: null,
+          selectedDate: JSON.parse(JSON.stringify(selectedDate.value)),
+          selectedTime: JSON.parse(JSON.stringify(selectedTime.value)),
         };
         // console.log(rVal)
         return rVal;
@@ -583,12 +639,37 @@ export default defineComponent({
         selectedDate.value.from + " " + selectedTime.value.startTime + ":00";
       let endTime =
         selectedDate.value.to + " " + selectedTime.value.endTime + ":00";
-      // console.log("start time", startTime);
-      // console.log("end time", endTime);
       const startUTC = convertToUtcTimestamp(startTime, store.state.timezone);
       const endUTC = convertToUtcTimestamp(endTime, store.state.timezone);
-      // console.log(store.state.timezone, startTime, startUTC, endTime, endUTC);
       return { startUTC, endUTC };
+    };
+
+    const setSavedDate = (dateobj: any) => {
+      timezone.value = store.state.timezone;
+      selectedType.value = dateobj.type;
+
+      if (dateobj.type === "relative") {
+        setRelativeTime(dateobj.relativeTimePeriod);
+      } else {
+        if (
+          dateobj.hasOwnProperty("selectedDate") &&
+          dateobj.hasOwnProperty("selectedTime") &&
+          dateobj.selectedDate.hasOwnProperty("from") &&
+          dateobj.selectedDate.hasOwnProperty("to") &&
+          dateobj.selectedTime.hasOwnProperty("startTime") &&
+          dateobj.selectedTime.hasOwnProperty("endTime")
+        ) {
+          selectedDate.value = dateobj.selectedDate;
+          selectedTime.value = dateobj.selectedTime;
+        } else {
+          setCustomDate(dateobj.type, {
+            start: dateobj.startTime / 1000,
+            end: dateobj.endTime / 1000,
+          });
+        }
+      }
+
+      displayValue.value = getDisplayValue();
     };
 
     const getDisplayValue = () => {
@@ -632,6 +713,23 @@ export default defineComponent({
       return filteredOptions;
     };
 
+    const optionsFn = (date) => {
+      const formattedDate = timestampToTimezoneDate(
+        new Date().getTime(),
+        store.state.timezone,
+        "yyyy/MM/dd"
+      );
+      return date >= "1999/01/01" && date <= formattedDate;
+    };
+
+    const setDateType = (type) => {
+      selectedType.value = type;
+      displayValue.value = getDisplayValue();
+
+      if (props.autoApply)
+        saveDate(type === "absolute" ? "absolute" : "relative-custom");
+    };
+
     return {
       t,
       datetimeBtn,
@@ -656,6 +754,10 @@ export default defineComponent({
       timezone,
       filteredTimezone,
       timezoneFilterFn,
+      setCustomDate,
+      setSavedDate,
+      optionsFn,
+      setDateType,
     };
   },
 });
@@ -871,6 +973,11 @@ export default defineComponent({
       margin-right: 1rem;
       color: $dark-page;
     }
+  }
+}
+.timezone-select {
+  .q-item:nth-child(2) {
+    border-bottom: 1px solid #dcdcdc;
   }
 }
 </style>

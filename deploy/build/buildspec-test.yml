@@ -10,9 +10,9 @@ phases:
       - unzip protoc-21.12-linux-x86_64.zip -d protoc && cp protoc/bin/protoc /usr/local/bin/ && cp -r protoc/include/google /usr/local/include/
       - curl https://sh.rustup.rs -sSf | sh -s -- -y
       - . "$HOME/.cargo/env"
-      - rustup toolchain install nightly-2023-10-24
+      - rustup toolchain install nightly-2023-12-24
       - rustup toolchain list
-      - rustup default nightly-2023-10-24  
+      - rustup default nightly-2023-12-24  
       - rustup component add clippy llvm-tools
       - export RUSTFLAGS='-C target-cpu=native'
       - rm -rf ~/.cargo/registry
@@ -20,12 +20,14 @@ phases:
   build:
     commands:
       # Increase swap file size
-      - fallocate -l 24G /swapfile
+      - fallocate -l 32G /swapfile
       - chmod 600 /swapfile
       - mkswap /swapfile || true
       - swapon /swapfile || true
       - pwd
       - mkdir -p web/dist 
       - touch web/dist/index.html
+
+      # run tests
       - cargo --config net.git-fetch-with-cli=true clippy -- -D warnings
       - ./coverage.sh

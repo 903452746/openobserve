@@ -1,35 +1,54 @@
 <!-- Copyright 2023 Zinc Labs Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-     http:www.apache.org/licenses/LICENSE-2.0
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <q-page class="q-pa-none q-pa-md" style="min-height: inherit">
+  <q-page class="q-pa-none" style="min-height: inherit">
     <div>
-      <div class="col-12 items-center no-wrap">
-        <div class="col" data-test="add-destination-title">
-          <div v-if="destination" class="text-h6">
-            {{ t("alert_destinations.updateTitle") }}
+      <div class="row items-center no-wrap q-mx-md q-my-sm">
+        <div class="flex items-center">
+          <div
+            class="flex justify-center items-center q-mr-md cursor-pointer"
+            style="
+              border: 1.5px solid;
+              border-radius: 50%;
+              width: 22px;
+              height: 22px;
+            "
+            title="Go Back"
+            @click="router.back()"
+          >
+            <q-icon name="arrow_back_ios_new" size="14px" />
           </div>
-          <div v-else class="text-h6">
-            {{ t("alert_destinations.addTitle") }}
+          <div class="col" data-test="add-destination-title">
+            <div v-if="destination" class="text-h6">
+              {{ t("alert_destinations.updateTitle") }}
+            </div>
+            <div v-else class="text-h6">
+              {{ t("alert_destinations.addTitle") }}
+            </div>
           </div>
         </div>
       </div>
       <q-separator />
-      <div class="row q-col-gutter-sm q-pt-lg">
+      <div class="row q-col-gutter-sm q-pt-lg q-px-lg q-my-md">
         <div class="col-6 q-py-xs">
           <q-input
             data-test="add-destination-name-input"
             v-model="formData.name"
-            :label="t('alerts.name')"
+            :label="t('alerts.name') + ' *'"
             color="input-border"
             bg-color="input-bg"
             class="showLabelOnTop"
@@ -39,7 +58,7 @@
             dense
             v-bind:readonly="isUpdatingDestination"
             v-bind:disable="isUpdatingDestination"
-            :rules="[(val: any) => !!val || 'Field is required!']"
+            :rules="[(val: any) => !!val.trim() || 'Field is required!']"
             tabindex="0"
           />
         </div>
@@ -48,7 +67,7 @@
             <q-select
               data-test="add-destination-template-select"
               v-model="formData.template"
-              :label="t('alert_destinations.template')"
+              :label="t('alert_destinations.template') + ' *'"
               :options="getFormattedTemplates"
               color="input-border"
               bg-color="input-bg"
@@ -66,7 +85,7 @@
           <q-input
             data-test="add-destination-url-input"
             v-model="formData.url"
-            :label="t('alert_destinations.url')"
+            :label="t('alert_destinations.url') + ' *'"
             color="input-border"
             bg-color="input-bg"
             class="showLabelOnTop"
@@ -74,7 +93,7 @@
             outlined
             filled
             dense
-            :rules="[(val: any) => !!val || 'Field is required!']"
+            :rules="[(val: any) => !!val.trim() || 'Field is required!']"
             tabindex="0"
           />
         </div>
@@ -82,7 +101,7 @@
           <q-select
             data-test="add-destination-method-select"
             v-model="formData.method"
-            :label="t('alert_destinations.method')"
+            :label="t('alert_destinations.method') + ' *'"
             :options="apiMethods"
             color="input-border"
             bg-color="input-bg"
@@ -212,6 +231,7 @@ import destinationService from "@/services/alert_destination";
 import { useStore } from "vuex";
 import { useQuasar } from "quasar";
 import type { Template, DestinationData, Headers } from "@/ts/interfaces";
+import { useRouter } from "vue-router";
 const props = defineProps<{
   templates: Template[] | [];
   destination: DestinationData | null;
@@ -230,6 +250,8 @@ const formData: Ref<DestinationData> = ref({
   headers: {},
 });
 const isUpdatingDestination = ref(false);
+
+const router = useRouter();
 
 // TODO OK: Use UUID package instead of this and move this method in utils
 const getUUID = () => {
@@ -255,8 +277,7 @@ const setupDestinationData = () => {
     formData.value.url = props.destination.url;
     formData.value.method = props.destination.method;
     formData.value.skip_tls_verify = props.destination.skip_tls_verify;
-    const template = props.destination.template as Template;
-    formData.value.template = template.name;
+    formData.value.template = props.destination.template;
     formData.value.headers = props.destination.headers;
     if (Object.keys(formData.value.headers).length) {
       apiHeaders.value = [];

@@ -1,27 +1,45 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
   <div>
+    <div class="" style="max-width: 300px">
+      <div class="q-mb-sm">{{ t("dashboard.description") }}</div>
+      <q-input
+        outlined
+        v-model="dashboardPanelData.data.description"
+        filled
+        autogrow
+        class="showLabelOnTop"
+        data-test="dashboard-config-description"
+      />
+    </div>
+
+    <div class="space"></div>
+
     <q-toggle
       v-if="
         dashboardPanelData.data.type != 'table' &&
-        dashboardPanelData.data.type != 'heatmap'
+        dashboardPanelData.data.type != 'heatmap' &&
+        dashboardPanelData.data.type != 'metric' &&
+        dashboardPanelData.data.type != 'gauge'
       "
       v-model="dashboardPanelData.data.config.show_legends"
       :label="t('dashboard.showLegendsLabel')"
+      data-test="dashboard-config-show-legend"
     />
 
     <div class="space"></div>
@@ -29,7 +47,9 @@
     <q-select
       v-if="
         dashboardPanelData.data.type != 'table' &&
-        dashboardPanelData.data.type != 'heatmap'
+        dashboardPanelData.data.type != 'heatmap' &&
+        dashboardPanelData.data.type != 'metric' &&
+        dashboardPanelData.data.type != 'gauge'
       "
       outlined
       v-model="dashboardPanelData.data.config.legends_position"
@@ -42,13 +62,65 @@
       :display-value="`${
         dashboardPanelData.data.config.legends_position ?? 'Auto'
       }`"
+      data-test="dashboard-config-legend-position"
     >
     </q-select>
+
+    <div class="space"></div>
+    <div class="input-container">
+      <q-input
+        v-if="
+          dashboardPanelData.data.type != 'table' &&
+          dashboardPanelData.data.type != 'heatmap' &&
+          dashboardPanelData.data.type != 'metric' &&
+          dashboardPanelData.data.type != 'gauge'
+        "
+        v-model.number="legendWidthValue"
+        :label="t('common.legendWidth')"
+        color="input-border"
+        bg-color="input-bg"
+        class="q-py-md showLabelOnTop q-mr-sm"
+        stack-label
+        outlined
+        filled
+        dense
+        label-slot
+        :type="'number'"
+        placeholder="Auto"
+        data-test="dashboard-config-legend-width"
+      ></q-input>
+      <div class="unit-container">
+        <button
+          @click="setUnit('px')"
+          :class="{
+            active:
+              dashboardPanelData?.data?.config.legend_width?.unit === null ||
+              dashboardPanelData?.data?.config?.legend_width?.unit === 'px',
+          }"
+          style="height: 100%; width: 100%; font-size: 14px"
+          :data-test="`dashboard-config-legend-width-unit-${dashboardPanelData?.data?.config?.legend_width?.unit === 'px' ? 'active' : 'inactive'}`"
+        >
+          px
+        </button>
+        <button
+          @click="setUnit('%')"
+          :class="{
+            active:
+              dashboardPanelData?.data?.config?.legend_width?.unit === '%',
+          }"
+          style="height: 100%; width: 100%; font-size: 14px"
+          :data-test="`dashboard-config-legend-width-unit-${dashboardPanelData?.data?.config?.legend_width?.unit === '%' ? 'active' : 'inactive'}`"
+        >
+          %
+        </button>
+      </div>
+    </div>
 
     <div class="space"></div>
 
     <q-select
       outlined
+      v-if="dashboardPanelData.data.type != 'table'"
       v-model="dashboardPanelData.data.config.unit"
       :options="unitOptions"
       dense
@@ -63,6 +135,7 @@
             )?.label
           : 'Default'
       }`"
+      data-test="dashboard-config-unit"
     >
     </q-select>
     <!-- :rules="[(val: any) => !!val || 'Field is required!']" -->
@@ -77,6 +150,32 @@
       filled
       dense
       label-slot
+      data-test="dashboard-config-custom-unit"
+    />
+
+    <q-input
+      v-if="dashboardPanelData.data.type != 'geomap'"
+      type="number"
+      v-model.number="dashboardPanelData.data.config.decimals"
+      value="2"
+      min="0"
+      max="100"
+      @update:model-value="
+        (value: any) => (dashboardPanelData.data.config.decimals = ( typeof value == 'number' && value >= 0) ? value : 2)
+      "
+      :rules="[
+        (val) =>
+          (val >= 0 && val <= 100) || 'Decimals must be between 0 and 100',
+      ]"
+      label="Decimals"
+      color="input-border"
+      bg-color="input-bg"
+      class="q-py-md showLabelOnTop"
+      stack-label
+      filled
+      dense
+      label-slot
+      data-test="dashboard-config-decimals"
     />
 
     <div class="space"></div>
@@ -92,6 +191,7 @@
       stack-label
       emit-value
       :display-value="'OpenStreetMap'"
+      data-test="dashboard-config-basemap"
     >
     </q-select>
 
@@ -111,6 +211,7 @@
           dense
           label-slot
           :type="'number'"
+          data-test="dashboard-config-lattitude"
         >
         </q-input>
         <q-input
@@ -125,6 +226,7 @@
           dense
           label-slot
           :type="'number'"
+          data-test="dashboard-config-longitude"
         >
         </q-input>
       </div>
@@ -140,6 +242,7 @@
         dense
         label-slot
         :type="'number'"
+        data-test="dashboard-config-zoom"
       >
       </q-input>
     </div>
@@ -160,6 +263,7 @@
         inline-label
         outside-arrows
         mobile-arrows
+        data-test="dashboard-config-query-tab"
       >
         <q-tab
           no-caps
@@ -167,12 +271,70 @@
           :key="index"
           :name="index"
           :label="'Query ' + (index + 1)"
+          :data-test="`dashboard-config-query-tab-${index}`"
         >
         </q-tab>
       </q-tabs>
     </div>
     <!-- </q-input> -->
     <div class="space"></div>
+
+    <!-- for auto sql query limit -->
+    <!-- it should not be promql and custom query -->
+    <q-input
+      v-if="
+        !promqlMode &&
+        !dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].customQuery
+      "
+      v-model.number="
+        dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].config.limit
+      "
+      :value="0"
+      :min="0"
+      @update:model-value="
+        (value) =>
+          (dashboardPanelData.data.queries[
+            dashboardPanelData.layout.currentQueryIndex
+          ].config.limit = value ? value : 0)
+      "
+      label="Limit"
+      color="input-border"
+      bg-color="input-bg"
+      class="q-py-sm showLabelOnTop"
+      stack-label
+      outlined
+      filled
+      dense
+      label-slot
+      placeholder="0"
+      :type="'number'"
+      data-test="dashboard-config-limit"
+    >
+      <template v-slot:label>
+        <div class="row items-center all-pointer-events">
+          Query Limit
+          <div>
+            <q-icon
+              class="q-ml-xs"
+              size="20px"
+              name="info"
+              data-test="dashboard-config-limit-info"
+            />
+            <q-tooltip
+              class="bg-grey-8"
+              anchor="top middle"
+              self="bottom middle"
+            >
+              Limit for the query result
+            </q-tooltip>
+          </div>
+        </div>
+      </template>
+    </q-input>
 
     <q-input
       v-if="promqlMode"
@@ -190,13 +352,18 @@
       filled
       dense
       label-slot
+      data-test="dashboard-config-promql-legend"
     >
       <template v-slot:label>
         <div class="row items-center all-pointer-events">
           {{ t("dashboard.legendLabel") }}
           <div>
-            <q-icon class="q-ml-xs" size="20px"
-name="info" />
+            <q-icon
+              class="q-ml-xs"
+              size="20px"
+              name="info"
+              data-test="dashboard-config-promql-legend-info"
+            />
             <q-tooltip
               class="bg-grey-8"
               anchor="top middle"
@@ -230,6 +397,7 @@ name="info" />
           dashboardPanelData.layout.currentQueryIndex
         ].config.layer_type
       }`"
+      data-test="dashboard-config-layer-type"
     >
     </q-select>
 
@@ -252,14 +420,123 @@ name="info" />
       dense
       label-slot
       :type="'number'"
+      data-test="dashboard-config-weight"
     >
     </q-input>
+
+    <q-input
+      v-if="dashboardPanelData.data.type === 'gauge'"
+      v-model.number="
+        dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].config.min
+      "
+      :value="0"
+      @update:model-value="
+        (value) =>
+          (dashboardPanelData.data.queries[
+            dashboardPanelData.layout.currentQueryIndex
+          ].config.min = value ? value : 0)
+      "
+      label="Gauge Min Value"
+      color="input-border"
+      bg-color="input-bg"
+      class="q-py-md showLabelOnTop"
+      stack-label
+      outlined
+      filled
+      dense
+      label-slot
+      :type="'number'"
+      data-test="dashboard-config-gauge-min"
+    >
+      <template v-slot:label>
+        <div class="row items-center all-pointer-events">Gauge Min Value</div>
+      </template>
+    </q-input>
+    <q-input
+      v-if="dashboardPanelData.data.type === 'gauge'"
+      v-model.number="
+        dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].config.max
+      "
+      :value="100"
+      @update:model-value="
+        (value) =>
+          (dashboardPanelData.data.queries[
+            dashboardPanelData.layout.currentQueryIndex
+          ].config.max = value ? value : 100)
+      "
+      label="Gauge Max Value"
+      color="input-border"
+      bg-color="input-bg"
+      class="q-py-md showLabelOnTop"
+      stack-label
+      outlined
+      filled
+      dense
+      label-slot
+      placeholder="100"
+      :type="'number'"
+      data-test="dashboard-config-gauge-max"
+    >
+      <template v-slot:label>
+        <div class="row items-center all-pointer-events">Gauge Max Value</div>
+      </template>
+    </q-input>
+
+    <q-input
+      v-if="
+        dashboardPanelData.data.type != 'gauge' &&
+        dashboardPanelData.data.type != 'metric' &&
+        dashboardPanelData.data.type != 'geomap' &&
+        dashboardPanelData.data.type != 'table' &&
+        dashboardPanelData.data.type != 'pie' &&
+        dashboardPanelData.data.type != 'donut'
+      "
+      v-model.number="dashboardPanelData.data.config.axis_width"
+      :label="t('common.axisWidth')"
+      color="input-border"
+      bg-color="input-bg"
+      class="q-py-md showLabelOnTop"
+      stack-label
+      outlined
+      filled
+      dense
+      label-slot
+      :type="'number'"
+      placeholder="Auto"
+      @update:model-value="
+        (value) =>
+          (dashboardPanelData.data.config.axis_width =
+            value !== '' ? value : null)
+      "
+      data-test="dashboard-config-axis-width"
+    >
+    </q-input>
+
+    <div class="space"></div>
+
+    <q-toggle
+      v-if="
+        dashboardPanelData.data.type != 'gauge' &&
+        dashboardPanelData.data.type != 'metric' &&
+        dashboardPanelData.data.type != 'geomap' &&
+        dashboardPanelData.data.type != 'table' &&
+        dashboardPanelData.data.type != 'pie' &&
+        dashboardPanelData.data.type != 'donut'
+      "
+      v-model="dashboardPanelData.data.config.axis_border_show"
+      :label="t('dashboard.showBorder')"
+      data-test="dashboard-config-axis-border"
+    />
   </div>
 </template>
 
 <script lang="ts">
 import useDashboardPanelData from "@/composables/useDashboardPanel";
-import { computed, defineComponent, watch } from "vue";
+import { computed, defineComponent, watch, onBeforeMount } from "vue";
 import { useI18n } from "vue-i18n";
 
 export default defineComponent({
@@ -273,6 +550,48 @@ export default defineComponent({
         value: "osm",
       },
     ];
+
+    onBeforeMount(() => {
+      // Ensure that the nested structure is initialized
+      if (!dashboardPanelData.data.config.legend_width) {
+        dashboardPanelData.data.config.legend_width = {
+          value: null,
+          unit: "px",
+        };
+      }
+    });
+
+    const legendWidthValue = computed({
+      get() {
+        return dashboardPanelData.data.config?.legend_width?.value;
+      },
+      set(value) {
+        // Ensure that the nested structure is initialized
+        if (!dashboardPanelData.data.config.legend_width) {
+          dashboardPanelData.data.config.legend_width = {
+            value: null,
+            unit: "px",
+          };
+        }
+
+        // Set the value
+        dashboardPanelData.data.config.legend_width.value =
+          value !== "" ? value : null;
+      },
+    });
+
+    const setUnit = (unit: any) => {
+      // Ensure that the nested structure is initialized
+      if (!dashboardPanelData.data.config.legend_width) {
+        dashboardPanelData.data.config.legend_width = {
+          value: null,
+          unit: null,
+        };
+      }
+
+      // Set the unit
+      dashboardPanelData.data.config.legend_width.unit = unit;
+    };
 
     const layerTypeOptions = [
       {
@@ -361,6 +680,8 @@ export default defineComponent({
       legendsPositionOptions,
       unitOptions,
       isWeightFieldPresent,
+      setUnit,
+      legendWidthValue,
     };
   },
 });
@@ -374,5 +695,46 @@ export default defineComponent({
 .space {
   margin-top: 10px;
   margin-bottom: 10px;
+}
+
+.input-container {
+  display: flex;
+  align-items: center;
+}
+
+.input-container button-group {
+  border: 1px solid gray !important;
+  border-radius: 9px;
+}
+
+.input-container button {
+  display: block;
+  cursor: pointer;
+  background-color: #f0eaea;
+  border: none;
+  font-size: 16px;
+  padding: 3px 10px;
+}
+
+.input-container button-left {
+  border-top-left-radius: 8px;
+  border-bottom-left-radius: 8px;
+}
+
+.input-container button-right {
+  border-top-right-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+
+.input-container button.active {
+  background-color: var(--q-primary) !important;
+  font-weight: bold;
+  color: white;
+}
+.unit-container {
+  display: flex;
+  height: 40px;
+  margin-top: 15px;
+  width: 100px;
 }
 </style>

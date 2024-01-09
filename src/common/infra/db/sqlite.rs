@@ -1,20 +1,28 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{
+    str::FromStr,
+    sync::{atomic::AtomicBool, Arc},
+    time::Duration,
+};
 
 use ahash::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
+use config::{FxIndexMap, CONFIG};
 use once_cell::sync::Lazy;
 use sqlx::{
     sqlite::{
@@ -23,11 +31,6 @@ use sqlx::{
     },
     Pool, Sqlite,
 };
-use std::{
-    str::FromStr,
-    sync::{atomic::AtomicBool, Arc},
-    time::Duration,
-};
 use tokio::{
     sync::{mpsc, RwLock},
     time,
@@ -35,7 +38,6 @@ use tokio::{
 
 use crate::common::infra::{
     cluster,
-    config::{FxIndexMap, CONFIG},
     db::{
         DbEvent, DbEventFileList, DbEventFileListDeleted, DbEventMeta, DbEventStreamStats, Event,
         EventData,
@@ -64,8 +66,8 @@ fn connect_rw() -> Pool<Sqlite> {
     let url = format!("{}{}", CONFIG.common.data_db_dir, "metadata.sqlite");
     if !CONFIG.common.local_mode && std::path::Path::new(&url).exists() {
         std::fs::remove_file(&url).expect("remove file sqlite failed");
-        std::fs::remove_file(format!("{url}-shm")).expect("remove file sqlite-shm failed");
-        std::fs::remove_file(format!("{url}-wal")).expect("remove file sqlite-wal failed");
+        _ = std::fs::remove_file(format!("{url}-shm"));
+        _ = std::fs::remove_file(format!("{url}-wal"));
     }
     let db_opts = SqliteConnectOptions::from_str(&url)
         .expect("sqlite connect options create failed")
@@ -76,11 +78,11 @@ fn connect_rw() -> Pool<Sqlite> {
         // .disable_statement_logging()
         .create_if_missing(true);
 
-    let pool_opts = SqlitePoolOptions::new()
+    SqlitePoolOptions::new()
         .min_connections(1)
         .max_connections(1)
-        .acquire_timeout(Duration::from_secs(30));
-    pool_opts.connect_lazy_with(db_opts)
+        .acquire_timeout(Duration::from_secs(30))
+        .connect_lazy_with(db_opts)
 }
 
 fn connect_ro() -> Pool<Sqlite> {
@@ -93,11 +95,11 @@ fn connect_ro() -> Pool<Sqlite> {
         .busy_timeout(Duration::from_secs(30))
         // .disable_statement_logging()
         .read_only(true);
-    let pool_opts = SqlitePoolOptions::new()
+    SqlitePoolOptions::new()
         .min_connections(10)
         .max_connections(512)
-        .acquire_timeout(Duration::from_secs(30));
-    pool_opts.connect_lazy_with(db_opts)
+        .acquire_timeout(Duration::from_secs(30))
+        .connect_lazy_with(db_opts)
 }
 
 pub struct SqliteDbChannel {
@@ -429,7 +431,7 @@ impl SqliteDbChannel {
                         }
                     }
                     DbEvent::Shutdown => {
-                        DB_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+                        DB_SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
                         break;
                     }
                 }
@@ -688,7 +690,8 @@ async fn delete(
     if need_watch {
         // find all keys then send event
         let items = if with_prefix {
-            super::DEFAULT.list_keys(key).await?
+            let db = super::get_db().await;
+            db.list_keys(key).await?
         } else {
             vec![key.to_string()]
         };

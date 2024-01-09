@@ -1,39 +1,41 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use actix_web::{http, http::StatusCode, HttpResponse};
-use datafusion::arrow::datatypes::Schema;
 use std::{collections::HashMap, io::Error};
 
-use crate::common::{
-    infra::{
-        cache::stats,
-        config::{
-            is_local_disk_storage, CONFIG, SIZE_IN_MB, SQL_FULL_TEXT_SEARCH_FIELDS, STREAM_SCHEMAS,
-        },
-    },
-    meta::{
-        self,
-        http::HttpResponse as MetaHttpResponse,
-        prom,
-        stream::{PartitionTimeLevel, Stream, StreamProperty, StreamSettings, StreamStats},
-        usage::Stats,
-        StreamType,
-    },
-    utils::json,
+use actix_web::{http, http::StatusCode, HttpResponse};
+use config::{
+    is_local_disk_storage, meta::stream::StreamType, CONFIG, SIZE_IN_MB,
+    SQL_FULL_TEXT_SEARCH_FIELDS,
 };
-use crate::service::{db, metrics::get_prom_metadata_from_schema, search as SearchService};
+use datafusion::arrow::datatypes::Schema;
+
+use crate::{
+    common::{
+        infra::{cache::stats, config::STREAM_SCHEMAS},
+        meta::{
+            self,
+            http::HttpResponse as MetaHttpResponse,
+            prom,
+            stream::{PartitionTimeLevel, Stream, StreamProperty, StreamSettings, StreamStats},
+            usage::Stats,
+        },
+        utils::json,
+    },
+    service::{db, metrics::get_prom_metadata_from_schema, search as SearchService},
+};
 
 const LOCAL: &str = "disk";
 const S3: &str = "s3";
@@ -275,6 +277,15 @@ pub fn get_stream_setting_fts_fields(schema: &Schema) -> Result<Vec<String>, any
     }
 }
 
+pub fn get_stream_setting_bloom_filter_fields(
+    schema: &Schema,
+) -> Result<Vec<String>, anyhow::Error> {
+    match stream_settings(schema) {
+        Some(setting) => Ok(setting.bloom_filter_fields),
+        None => Ok(vec![]),
+    }
+}
+
 fn transform_stats(stats: &mut StreamStats) {
     stats.storage_size /= SIZE_IN_MB;
     stats.compressed_size /= SIZE_IN_MB;
@@ -368,9 +379,13 @@ async fn _get_stream_stats(
     stream_name: Option<String>,
 ) -> Result<HashMap<String, StreamStats>, anyhow::Error> {
     let mut sql = if CONFIG.common.usage_report_compressed_size {
-        format!("select min(min_ts) as min_ts  , max(max_ts) as max_ts , max(compressed_size) as compressed_size , max(original_size) as original_size , max(records) as records ,stream_name , org_id , stream_type from  \"stats\" where org_id='{org_id}' ")
+        format!(
+            "select min(min_ts) as min_ts  , max(max_ts) as max_ts , max(compressed_size) as compressed_size , max(original_size) as original_size , max(records) as records ,stream_name , org_id , stream_type from  \"stats\" where org_id='{org_id}' "
+        )
     } else {
-        format!("select min(min_ts) as min_ts  , max(max_ts) as max_ts , max(original_size) as original_size , max(records) as records ,stream_name , org_id , stream_type from  \"stats\" where org_id='{org_id}'")
+        format!(
+            "select min(min_ts) as min_ts  , max(max_ts) as max_ts , max(original_size) as original_size , max(records) as records ,stream_name , org_id , stream_type from  \"stats\" where org_id='{org_id}'"
+        )
     };
 
     sql = match stream_type {
@@ -400,7 +415,7 @@ async fn _get_stream_stats(
         encoding: meta::search::RequestEncoding::Empty,
         timeout: 0,
     };
-    match SearchService::search(&CONFIG.common.usage_org, meta::StreamType::Logs, &req).await {
+    match SearchService::search("", &CONFIG.common.usage_org, StreamType::Logs, &req).await {
         Ok(res) => {
             let mut all_stats = HashMap::new();
             for item in res.hits {
@@ -417,9 +432,10 @@ async fn _get_stream_stats(
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
+mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+    use super::*;
 
     #[test]
     fn test_stream_res() {

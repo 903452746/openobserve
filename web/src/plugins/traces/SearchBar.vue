@@ -1,30 +1,86 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
   <div class="search-bar-component" id="searchBarComponent">
     <div class="row q-my-xs">
-      <div class="float-right col">
+      <div class="float-right col flex items-center">
         <syntax-guide
+          class="q-mr-lg"
           data-test="logs-search-bar-sql-mode-toggle-btn"
           :sqlmode="searchObj.meta.sqlMode"
-        ></syntax-guide>
+        />
+        <div class="flex items-center">
+          <div class="q-mr-xs text-bold">Filters:</div>
+          <app-tabs
+            style="
+              border: 1px solid #8a8a8a;
+              border-radius: 4px;
+              overflow: hidden;
+            "
+            :tabs="[
+              {
+                label: 'Basic',
+                value: 'basic',
+                style: {
+                  width: 'fit-content',
+                  padding: '0px 8px',
+                  background:
+                    searchObj.meta.filterType === 'basic' ? '#5960B2' : '',
+                  border: 'none !important',
+                  color:
+                    searchObj.meta.filterType === 'basic'
+                      ? '#ffffff !important'
+                      : '',
+                },
+              },
+              {
+                label: 'Advanced',
+                value: 'advance',
+                style: {
+                  width: 'fit-content',
+                  padding: '0px 8px',
+                  background:
+                    searchObj.meta.filterType === 'advance' ? '#5960B2' : '',
+                  border: 'none !important',
+                  color:
+                    searchObj.meta.filterType === 'advance'
+                      ? '#ffffff !important'
+                      : '',
+                },
+              },
+            ]"
+            :active-tab="searchObj.meta.filterType"
+            @update:active-tab="updateFilterType"
+          />
+        </div>
+        <q-btn
+          v-if="searchObj.meta.filterType === 'basic'"
+          label="Reset Filters"
+          no-caps
+          size="sm"
+          icon="restart_alt"
+          class="q-pr-sm q-pl-xs reset-filters q-ml-md"
+          @click="resetFilters"
+        />
       </div>
       <div class="float-right col-auto">
         <div class="float-left">
           <date-time
+            ref="dateTimeRef"
             auto-apply
             :default-type="searchObj.data.datetime.type"
             :default-absolute-time="{
@@ -46,21 +102,26 @@
             :title="t('search.runQuery')"
             class="search-button bg-secondary"
             @click="searchData"
-            :disable="
-              searchObj.loading || searchObj.data.streamResults.length == 0
-            "
+            :disable="isLoading"
             >{{ t("search.runQuery") }}</q-btn
           >
         </div>
         <q-btn
-          v-if="searchObj.data.queryResults.hits"
           class="q-mr-sm float-left download-logs-btn q-pa-sm"
           size="sm"
-          :disable="!searchObj.data.queryResults.hits.length"
+          :disable="!searchObj.data.queryResults?.hits?.length"
           icon="download"
-          title="Export logs"
+          title="Export Traces"
           @click="downloadLogs"
-        ></q-btn>
+        />
+        <q-btn
+          data-test="logs-search-bar-share-link-btn"
+          class="q-mr-sm download-logs-btn q-px-sm"
+          size="sm"
+          icon="share"
+          :title="t('search.shareLink')"
+          @click="shareLink"
+        />
       </div>
     </div>
     <div
@@ -76,17 +137,27 @@
           v-model:query="searchObj.data.editorValue"
           :keywords="autoCompleteKeywords"
           v-model:functions="searchObj.data.stream.functions"
+          :read-only="searchObj.meta.filterType === 'basic'"
           @update:query="updateQueryValue"
           @run-query="searchData"
         ></query-editor>
       </div>
     </div>
+    <template>
+      <confirm-dialog
+        title="Change Filter Type"
+        message="Query will be wiped off and reset to default."
+        @update:ok="changeToggle()"
+        @update:cancel="showWarningDialog = false"
+        v-model="showWarningDialog"
+      />
+    </template>
   </div>
 </template>
 
 <script lang="ts">
 // @ts-nocheck
-import { defineComponent, ref, watch } from "vue";
+import { defineComponent, ref, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useQuasar } from "quasar";
@@ -100,6 +171,8 @@ import { Parser } from "node-sql-parser/build/mysql";
 import segment from "@/services/segment_analytics";
 import config from "@/aws-exports";
 import useSqlSuggestions from "@/composables/useSuggestions";
+import AppTabs from "@/components/common/AppTabs.vue";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
 
 export default defineComponent({
   name: "ComponentSearchSearchBar",
@@ -107,12 +180,21 @@ export default defineComponent({
     DateTime,
     QueryEditor,
     SyntaxGuide,
+    AppTabs,
+    ConfirmDialog,
   },
-  emits: ["searchdata"],
+  emits: ["searchdata", "shareLink"],
   props: {
     fieldValues: {
       type: Object,
       default: () => {},
+    },
+    // Using loading key directly from traces composable was not working
+    // so have added as prop
+    // Run query btn was not getting disabled while loading
+    isLoading: {
+      type: Boolean,
+      default: false,
     },
   },
   methods: {
@@ -132,8 +214,11 @@ export default defineComponent({
     const { searchObj } = useTraces();
     const queryEditorRef = ref(null);
 
+    const showWarningDialog = ref(false);
+
     const parser = new Parser();
     let streamName = "";
+    const dateTimeRef = ref(null);
 
     const {
       autoCompleteData,
@@ -209,7 +294,7 @@ export default defineComponent({
       }
     };
 
-    const updateDateTime = (value: object) => {
+    const updateDateTime = async (value: object) => {
       searchObj.data.datetime = {
         startTime: value.startTime,
         endTime: value.endTime,
@@ -218,6 +303,11 @@ export default defineComponent({
           : searchObj.data.datetime.relativeTimePeriod,
         type: value.relativeTimePeriod ? "relative" : "absolute",
       };
+
+      await nextTick();
+      await nextTick();
+      await nextTick();
+      await nextTick();
 
       if (config.isCloud == "true" && value.userChangedValue) {
         segment.track("Button Click", {
@@ -261,7 +351,7 @@ export default defineComponent({
     };
 
     const downloadLogs = () => {
-      const filename = "logs-data.csv";
+      const filename = "traces-data.csv";
       const data = jsonToCsv(searchObj.data.queryResults.hits);
       const file = new File([data], filename, {
         type: "text/csv",
@@ -280,6 +370,33 @@ export default defineComponent({
       emit("onChangeTimezone");
     };
 
+    const updateFilterType = (value) => {
+      if (value === "basic") {
+        searchObj.meta.filterType = "basic";
+        searchObj.data.editorValue = searchObj.data.advanceFiltersQuery;
+      } else {
+        searchObj.meta.filterType = value;
+      }
+    };
+
+    const changeToggle = () => {
+      showWarningDialog.value = false;
+      searchObj.meta.filterType = "basic";
+    };
+
+    const resetFilters = () => {
+      searchObj.data.editorValue = "";
+      searchObj.data.advanceFiltersQuery = "";
+      Object.values(searchObj.data.stream.fieldValues).forEach((field) => {
+        field.selectedValues = [];
+        field.searchKeyword = "";
+      });
+    };
+
+    const shareLink = () => {
+      emit("shareLink");
+    };
+
     return {
       t,
       router,
@@ -295,6 +412,12 @@ export default defineComponent({
       setEditorValue,
       autoCompleteKeywords,
       updateTimezone,
+      dateTimeRef,
+      updateFilterType,
+      showWarningDialog,
+      changeToggle,
+      resetFilters,
+      shareLink,
     };
   },
   computed: {
@@ -338,6 +461,7 @@ export default defineComponent({
           this.queryEditorRef.setValue(this.searchObj.data.query);
       }
     },
+    filters() {},
   },
 });
 </script>
@@ -442,7 +566,7 @@ export default defineComponent({
   }
   .monaco-editor {
     width: 100% !important;
-    height: 70px !important;
+    height: 40px !important;
   }
 
   .search-button {
@@ -468,6 +592,19 @@ export default defineComponent({
 
   .download-logs-btn {
     height: 30px;
+  }
+}
+</style>
+
+<style lang="scss">
+.reset-filters {
+  font-size: 22px;
+
+  .block {
+    font-size: 12px;
+  }
+  .q-icon {
+    margin-right: 4px;
   }
 }
 </style>

@@ -1,29 +1,33 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::io::Error;
 
 use actix_web::{get, http, post, web, HttpRequest, HttpResponse};
 use promql_parser::parser;
-use std::io::Error;
 
 use crate::{
-    common::infra::errors,
-    common::meta::{self, http::HttpResponse as MetaHttpResponse},
-    common::utils::time::{parse_milliseconds, parse_str_to_timestamp_micros},
-    service::{metrics, promql},
+    common::{
+        infra::errors,
+        meta::{self, http::HttpResponse as MetaHttpResponse},
+        utils::time::{parse_milliseconds, parse_str_to_timestamp_micros},
+    },
+    service::{metrics, promql, promql::MetricsQueryRequest},
 };
 
-/** prometheus remote-write endpoint for metrics */
+/// prometheus remote-write endpoint for metrics
 #[utoipa::path(
     context_path = "/api",
     tag = "Metrics",
@@ -36,8 +40,8 @@ use crate::{
     ),
     request_body(content = String, description = "prometheus WriteRequest", content_type = "application/x-protobuf"),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200})),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 200, description = "Success", content_type = "application/json", body = IngestionResponse, example = json!({"code": 200})),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[post("/{org_id}/prometheus/api/v1/write")]
@@ -67,7 +71,7 @@ pub async fn remote_write(
     }
 }
 
-/** prometheus instant queries */
+/// prometheus instant queries
 // refer: https://prometheus.io/docs/prometheus/latest/querying/api/#instant-queries
 #[utoipa::path(
     context_path = "/api",
@@ -83,7 +87,7 @@ pub async fn remote_write(
         ("timeout" = Option<String>, Query, description = "Evaluation timeout"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse, example = json!({
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse, example = json!({
             "status" : "success",
             "data" : {
                "resultType" : "vector",
@@ -107,7 +111,7 @@ pub async fn remote_write(
                ]
             }
         })),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/prometheus/api/v1/query")]
@@ -149,51 +153,19 @@ async fn query(org_id: &str, req: meta::prom::RequestQuery) -> Result<HttpRespon
         },
     };
     let end = start;
+    let timeout = search_timeout(req.timeout);
 
-    let timeout = match req.timeout {
-        None => 0,
-        Some(v) => match parse_milliseconds(&v) {
-            Ok(v) => (v / 1000) as i64, // seconds
-            Err(e) => {
-                log::error!("parse timeout error: {}", e);
-                0
-            }
-        },
-    };
-
-    let req = promql::MetricsQueryRequest {
+    let req = MetricsQueryRequest {
         query: req.query.unwrap_or_default(),
         start,
         end,
         step: 300_000_000, // 5m
     };
 
-    match promql::search::search(org_id, &req, timeout).await {
-        Ok(data) => Ok(HttpResponse::Ok().json(promql::QueryResponse {
-            status: promql::Status::Success,
-            data: Some(promql::QueryResult {
-                result_type: data.get_type().to_string(),
-                result: data,
-            }),
-            error_type: None,
-            error: None,
-        })),
-        Err(err) => {
-            let err = match err {
-                errors::Error::ErrorCode(code) => code.get_error_detail(),
-                _ => err.to_string(),
-            };
-            Ok(HttpResponse::BadRequest().json(promql::QueryResponse {
-                status: promql::Status::Error,
-                data: None,
-                error_type: Some("bad_data".to_string()),
-                error: Some(err),
-            }))
-        }
-    }
+    search(org_id, timeout, &req).await
 }
 
-/** prometheus range queries */
+/// prometheus range queries
 // refer: https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries
 #[utoipa::path(
     context_path = "/api",
@@ -211,7 +183,7 @@ async fn query(org_id: &str, req: meta::prom::RequestQuery) -> Result<HttpRespon
         ("timeout" = Option<String>, Query, description = "Evaluation timeout"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse, example = json!({
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse, example = json!({
             "status" : "success",
             "data" : {
                "resultType" : "matrix",
@@ -243,7 +215,7 @@ async fn query(org_id: &str, req: meta::prom::RequestQuery) -> Result<HttpRespon
                ]
             }
         })),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/prometheus/api/v1/query_range")]
@@ -324,49 +296,19 @@ async fn query_range(
     if step < promql::micros(promql::MINIMAL_INTERVAL) {
         step = promql::micros(promql::MINIMAL_INTERVAL);
     }
-    let timeout = match req.timeout {
-        None => 0,
-        Some(v) => match parse_milliseconds(&v) {
-            Ok(v) => (v / 1000) as i64, // seconds
-            Err(e) => {
-                log::error!("parse timeout error: {}", e);
-                0
-            }
-        },
-    };
 
-    let req = promql::MetricsQueryRequest {
+    let timeout = search_timeout(req.timeout);
+
+    let req = MetricsQueryRequest {
         query: req.query.unwrap_or_default(),
         start,
         end,
         step,
     };
-    match promql::search::search(org_id, &req, timeout).await {
-        Ok(data) => Ok(HttpResponse::Ok().json(promql::QueryResponse {
-            status: promql::Status::Success,
-            data: Some(promql::QueryResult {
-                result_type: data.get_type().to_string(),
-                result: data,
-            }),
-            error_type: None,
-            error: None,
-        })),
-        Err(err) => {
-            let err = match err {
-                errors::Error::ErrorCode(code) => code.get_error_detail(),
-                _ => err.to_string(),
-            };
-            Ok(HttpResponse::BadRequest().json(promql::QueryResponse {
-                status: promql::Status::Error,
-                data: None,
-                error_type: Some("bad_data".to_string()),
-                error: Some(err),
-            }))
-        }
-    }
+    search(org_id, timeout, &req).await
 }
 
-/** prometheus query metric metadata */
+/// prometheus query metric metadata
 // refer: https://prometheus.io/docs/prometheus/latest/querying/api/#querying-metric-metadata
 #[utoipa::path(
     context_path = "/api",
@@ -381,7 +323,7 @@ async fn query_range(
         ("metric" = Option<String>, Query, description = "A metric name to filter metadata for. All metric metadata is retrieved if left empty"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse, example = json!({
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse, example = json!({
             "status": "success",
             "data": {
               "cortex_ring_tokens": [
@@ -405,7 +347,7 @@ async fn query_range(
               ]
             }
         })),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/prometheus/api/v1/metadata")]
@@ -425,7 +367,7 @@ pub async fn metadata(
     )
 }
 
-/** prometheus finding series by label matchers */
+/// prometheus finding series by label matchers
 // refer: https://prometheus.io/docs/prometheus/latest/querying/api/#finding-series-by-label-matchers
 #[utoipa::path(
     context_path = "/api",
@@ -441,7 +383,7 @@ pub async fn metadata(
         ("end" = Option<String>, Query, description = "<rfc3339 | unix_timestamp>: End timestamp"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse, example = json!({
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse, example = json!({
             "status" : "success",
             "data" : [
                {
@@ -461,7 +403,7 @@ pub async fn metadata(
                }
             ]
         })),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/prometheus/api/v1/series")]
@@ -497,7 +439,7 @@ async fn series(org_id: &str, req: meta::prom::RequestSeries) -> Result<HttpResp
         Err(e) => {
             return Ok(
                 HttpResponse::BadRequest().json(promql::ApiFuncResponse::<()>::err_bad_data(e))
-            )
+            );
         }
     };
     Ok(
@@ -512,7 +454,7 @@ async fn series(org_id: &str, req: meta::prom::RequestSeries) -> Result<HttpResp
     )
 }
 
-/** prometheus getting label names */
+/// prometheus getting label names
 // refer: https://prometheus.io/docs/prometheus/latest/querying/api/#getting-label-names
 #[utoipa::path(
     context_path = "/api",
@@ -528,7 +470,7 @@ async fn series(org_id: &str, req: meta::prom::RequestSeries) -> Result<HttpResp
         ("end" = Option<String>, Query, description = "<rfc3339 | unix_timestamp>: End timestamp"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse, example = json!({
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse, example = json!({
             "status": "success",
             "data": [
                 "__name__",
@@ -554,7 +496,7 @@ async fn series(org_id: &str, req: meta::prom::RequestSeries) -> Result<HttpResp
                 "version"
             ]
         })),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/prometheus/api/v1/labels")]
@@ -590,7 +532,7 @@ async fn labels(org_id: &str, req: meta::prom::RequestLabels) -> Result<HttpResp
         Err(e) => {
             return Ok(
                 HttpResponse::BadRequest().json(promql::ApiFuncResponse::<()>::err_bad_data(e))
-            )
+            );
         }
     };
     Ok(
@@ -605,7 +547,7 @@ async fn labels(org_id: &str, req: meta::prom::RequestLabels) -> Result<HttpResp
     )
 }
 
-/** prometheus query label values */
+/// prometheus query label values
 // refer: https://prometheus.io/docs/prometheus/latest/querying/api/#querying-label-values
 #[utoipa::path(
     context_path = "/api",
@@ -622,14 +564,14 @@ async fn labels(org_id: &str, req: meta::prom::RequestLabels) -> Result<HttpResp
         ("end" = Option<String>, Query, description = "<rfc3339 | unix_timestamp>: End timestamp"),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse, example = json!({
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse, example = json!({
             "status" : "success",
             "data" : [
                "node",
                "prometheus"
             ]
         })),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/prometheus/api/v1/label/{label_name}/values")]
@@ -648,7 +590,7 @@ pub async fn label_values(
         Err(e) => {
             return Ok(
                 HttpResponse::BadRequest().json(promql::ApiFuncResponse::<()>::err_bad_data(e))
-            )
+            );
         }
     };
     Ok(
@@ -717,7 +659,7 @@ fn validate_metadata_params(
     Ok((selector, start, end))
 }
 
-/** prometheus formatting query expressions */
+/// prometheus formatting query expressions
 // refer: https://prometheus.io/docs/prometheus/latest/querying/api/#formatting-query-expressions
 #[utoipa::path(
     context_path = "/api",
@@ -730,11 +672,11 @@ fn validate_metadata_params(
         ("query" = String, Query, description = "Prometheus expression query string."),
     ),
     responses(
-        (status = 200, description="Success", content_type = "application/json", body = HttpResponse, example = json!({
+        (status = 200, description = "Success", content_type = "application/json", body = HttpResponse, example = json!({
             "status" : "success",
             "data" : "foo / bar"
         })),
-        (status = 500, description="Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
 #[get("/{org_id}/prometheus/api/v1/format_query")]
@@ -769,4 +711,47 @@ fn format_query(_org_id: &str, query: &str) -> Result<HttpResponse, Error> {
         }
     };
     Ok(HttpResponse::Ok().json(promql::ApiFuncResponse::ok(expr.prettify())))
+}
+
+fn search_timeout(timeout: Option<String>) -> i64 {
+    match timeout {
+        None => 0,
+        Some(v) => match parse_milliseconds(&v) {
+            Ok(v) => (v / 1000) as i64, // seconds
+            Err(e) => {
+                log::error!("parse timeout error: {}", e);
+                0
+            }
+        },
+    }
+}
+
+async fn search(
+    org_id: &str,
+    timeout: i64,
+    req: &MetricsQueryRequest,
+) -> Result<HttpResponse, Error> {
+    match promql::search::search(org_id, req, timeout).await {
+        Ok(data) => Ok(HttpResponse::Ok().json(promql::QueryResponse {
+            status: promql::Status::Success,
+            data: Some(promql::QueryResult {
+                result_type: data.get_type().to_string(),
+                result: data,
+            }),
+            error_type: None,
+            error: None,
+        })),
+        Err(err) => {
+            let err = match err {
+                errors::Error::ErrorCode(code) => code.get_error_detail(),
+                _ => err.to_string(),
+            };
+            Ok(HttpResponse::BadRequest().json(promql::QueryResponse {
+                status: promql::Status::Error,
+                data: None,
+                error_type: Some("bad_data".to_string()),
+                error: Some(err),
+            }))
+        }
+    }
 }

@@ -1,16 +1,19 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{collections::BTreeMap, sync::Arc};
 
 use ahash::AHashMap;
 use datafusion::{
@@ -22,14 +25,12 @@ use datafusion::{
     physical_plan::functions::make_scalar_function,
     prelude::create_udf,
 };
-use std::{collections::BTreeMap, sync::Arc};
 use vector_enrichment::TableRegistry;
 use vrl::compiler::{runtime::Runtime, CompilationResult, Program, TargetValueRef, VrlRuntime};
 
-use crate::service::ingestion::compile_vrl_function;
 use crate::{
     common::{infra::config::QUERY_FUNCTIONS, utils::json},
-    service::ingestion::get_value,
+    service::ingestion::{compile_vrl_function, get_string_value},
 };
 
 fn create_user_df(
@@ -71,7 +72,7 @@ pub async fn get_all_transform(org_id: &str) -> Vec<datafusion::logical_expr::Sc
     let mut udf_list = Vec::new();
     for transform in QUERY_FUNCTIONS.clone().iter() {
         let key = transform.key();
-        //do not register ingest_time transforms
+        // do not register ingest_time transforms
         if key.contains(org_id) {
             udf = get_udf_vrl(
                 transform.name.to_owned(),
@@ -99,7 +100,7 @@ fn get_udf_vrl(
     let local_fn_params = params.to_owned();
     let local_org_id = org_id.to_owned();
 
-    //pre computation stage
+    // pre computation stage
     let in_params = local_fn_params.split(',').collect::<Vec<&str>>();
     let mut in_obj_str = String::from("");
     for param in in_params {
@@ -139,20 +140,20 @@ fn get_udf_vrl(
                 registry.finish_load();
                 let result = apply_vrl_fn(&mut runtime, res.program);
                 if result != json::Value::Null {
-                    if result.is_object() {
+                    if let Some(res_map) = result.as_object() {
                         is_multi_value = true;
-                        let res_map = result.as_object().unwrap();
                         res.fields.sort();
                         for col in res.fields {
                             let field_builder = col_val_map.entry(col.to_string()).or_default();
                             if res_map.contains_key(&col) {
-                                field_builder.insert(i, get_value(res_map.get(&col).unwrap()));
+                                field_builder
+                                    .insert(i, get_string_value(res_map.get(&col).unwrap()));
                             } else {
                                 field_builder.insert(i, "".to_string());
                             }
                         }
                     } else {
-                        res_data_vec.insert(i, get_value(&result));
+                        res_data_vec.insert(i, get_string_value(&result));
                     }
                 }
             }
@@ -180,11 +181,13 @@ fn get_udf_vrl(
             Ok(Arc::new(result) as ArrayRef)
         }
 
-        // `Ok` because no error occurred during the calculation (we should add one if exponent was [0, 1[ and the base < 0 because that panics!)
+        // `Ok` because no error occurred during the calculation (we should add
+        // one if exponent was [0, 1[ and the base < 0 because that panics!)
         // `Arc` because arrays are immutable, thread-safe, trait objects.
     };
-    // the function above expects an `ArrayRef`, but DataFusion may pass a scalar to a UDF.
-    // thus, we use `make_scalar_function` to decorare the closure so that it can handle both Arrays and Scalar values.
+    // the function above expects an `ArrayRef`, but DataFusion may pass a scalar to
+    // a UDF. thus, we use `make_scalar_function` to decorare the closure so
+    // that it can handle both Arrays and Scalar values.
     let pow_scalar = make_scalar_function(pow_calc);
 
     // Next:
@@ -244,18 +247,26 @@ pub fn apply_vrl_fn(runtime: &mut Runtime, program: vrl::compiler::Program) -> j
 
 #[cfg(test)]
 mod tests {
-    use crate::service::search::datafusion::transform_udf::get_udf_vrl;
-    use datafusion::arrow::array::{Int64Array, StringArray};
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::datasource::MemTable;
-    use datafusion::prelude::SessionContext;
     use std::sync::Arc;
+
+    use datafusion::{
+        arrow::{
+            array::{Int64Array, StringArray},
+            datatypes::{DataType, Field, Schema},
+            record_batch::RecordBatch,
+        },
+        datasource::MemTable,
+        prelude::SessionContext,
+    };
+
+    use crate::service::search::datafusion::transform_udf::get_udf_vrl;
 
     #[tokio::test]
     async fn vrl_udf_test() {
-        //let sql = "select temp.d['account_id'] as acc , temp.pod_id ,temp.lua_test from (select *, vrltest(log) ,luaconcat(log,pod_id) as lua_test from t) as temp";
-        // let sql = "select vrltest(log)['account_id']  from (select *, vrltest(log) ,luaconcat(log,pod_id) as lua_test from t) as temp";
+        // let sql = "select temp.d['account_id'] as acc , temp.pod_id ,temp.lua_test
+        // from (select *, vrltest(log) ,luaconcat(log,pod_id) as lua_test from t) as
+        // temp"; let sql = "select vrltest(log)['account_id']  from (select *,
+        // vrltest(log) ,luaconcat(log,pod_id) as lua_test from t) as temp";
 
         // !!!TODO: fix this test
         let sql = "select * from t";
@@ -284,7 +295,8 @@ mod tests {
             "org1",
         );
 
-        // declare a new context. In spark API, this corresponds to a new spark SQLsession
+        // declare a new context. In spark API, this corresponds to a new spark
+        // SQLsession
         let ctx = SessionContext::new();
         ctx.register_udf(vrl_udf.clone());
         let provider = MemTable::try_new(schema, vec![vec![batch]]).unwrap();

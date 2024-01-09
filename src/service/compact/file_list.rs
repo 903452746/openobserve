@@ -1,34 +1,40 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use ahash::AHashMap;
-use bytes::Buf;
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use std::{
     io::{BufRead, BufReader, Write},
     sync::Arc,
 };
+
+use ahash::AHashMap;
+use bytes::Buf;
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
+use config::{ider, meta::stream::FileKey, CONFIG};
 use tokio::sync::{RwLock, Semaphore};
 
-use crate::common::infra::{
-    cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-    config::{CONFIG, STREAM_SCHEMAS},
-    dist_lock, ider, storage,
+use crate::{
+    common::{
+        infra::{
+            cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
+            config::STREAM_SCHEMAS,
+            dist_lock, storage,
+        },
+        utils::json,
+    },
+    service::db,
 };
-use crate::common::meta::common::FileKey;
-use crate::common::utils::json;
-use crate::service::db;
 
 pub async fn run(offset: i64) -> Result<(), anyhow::Error> {
     run_merge(offset).await?;
@@ -37,8 +43,8 @@ pub async fn run(offset: i64) -> Result<(), anyhow::Error> {
 }
 
 /// check all streams done compact in this hour
-/// merge all small file list keys in this hour to a single file and upload to storage
-/// delete all small file list keys in this hour from storage
+/// merge all small file list keys in this hour to a single file and upload to
+/// storage delete all small file list keys in this hour from storage
 /// node should load new file list from storage
 pub async fn run_merge(offset: i64) -> Result<(), anyhow::Error> {
     let time_now: DateTime<Utc> = Utc::now();
@@ -103,7 +109,8 @@ pub async fn run_merge(offset: i64) -> Result<(), anyhow::Error> {
     if offsets.is_empty() {
         return Ok(()); // no stream
     }
-    // compact offset already is next hour, we need fix it, get the latest compact offset
+    // compact offset already is next hour, we need fix it, get the latest compact
+    // offset
     let mut is_waiting_streams = false;
     for (key, val) in offsets {
         if (val - Duration::hours(1).num_microseconds().unwrap()) < offset {
@@ -121,7 +128,8 @@ pub async fn run_merge(offset: i64) -> Result<(), anyhow::Error> {
             .timestamp_micros();
         merge_file_list(time_zero_hour).await?;
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        // compact last hour, because it just done compaction that generated a lot of small file_list files
+        // compact last hour, because it just done compaction that generated a lot of
+        // small file_list files
         let time_last_hour = time_now - Duration::hours(1);
         let time_last_hour = Utc
             .with_ymd_and_hms(
@@ -318,7 +326,11 @@ async fn merge_file_list(offset: i64) -> Result<(), anyhow::Error> {
     let new_file_ok = if has_content {
         match storage::put(&file_name, compressed_bytes.into()).await {
             Ok(_) => {
-                log::info!("[COMPACT] file_list merge succeed, new file: {}", file_name);
+                log::info!(
+                    "[COMPACT] file_list merge succeed, {} files into a new file: {}",
+                    file_list.len(),
+                    file_name
+                );
                 true
             }
             Err(err) => {

@@ -1,16 +1,17 @@
 <!-- Copyright 2023 Zinc Labs Inc.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-     http:www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License. 
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <!-- eslint-disable vue/v-on-event-hyphenation -->
@@ -19,29 +20,73 @@
   <div>
     <VariablesValueSelector
       :variablesConfig="dashboardData?.variables"
+      :showDynamicFilters="dashboardData.variables?.showDynamicFilters"
       :selectedTimeDate="currentTimeObj"
       :initialVariableValues="initialVariableValues"
       @variablesData="variablesDataUpdated"
     />
     <slot name="before_panels" />
     <div class="displayDiv">
-      <grid-layout ref="gridLayoutRef" v-if="dashboardData.panels?.length > 0" :layout.sync="getDashboardLayout(dashboardData)" :col-num="12" :row-height="30"
-        :is-draggable="!viewOnly" :is-resizable="!viewOnly" :vertical-compact="true" :autoSize="true"
-        :restore-on-drag="true" :use-css-transforms="false">
-        <grid-item class="gridBackground" v-for="item in dashboardData.panels" :key="item.id"
-          :x="getPanelLayout(item,'x')" :y="getPanelLayout(item,'y')"
-          :w="getPanelLayout(item,'w')" :h="getPanelLayout(item,'h')"
-          :i="getPanelLayout(item,'i')" :minH="getMinimumHeight(item.type)" :minW="getMinimumWidth(item.type)" @resized="resizedEvent" @moved="movedEvent"
-          drag-allow-from=".drag-allow">
-          <div style="height: 100%;">
-            <PanelContainer @onDeletePanel="OnDeletePanel" :viewOnly="viewOnly" :data="item" :dashboardId="dashboardData.id"
-              :selectedTimeDate="currentTimeObj" :variablesData="variablesData"
-              :width="getPanelLayout(item,'w')" :height="getPanelLayout(item,'h')">
+      <grid-layout
+        ref="gridLayoutRef"
+        v-if="dashboardData.panels?.length > 0"
+        :layout.sync="getDashboardLayout(dashboardData)"
+        :col-num="12"
+        :row-height="30"
+        :is-draggable="!viewOnly"
+        :is-resizable="!viewOnly"
+        :vertical-compact="true"
+        :autoSize="true"
+        :restore-on-drag="true"
+        :use-css-transforms="false"
+        :margin="[4, 4]"
+      >
+        <grid-item
+          class="gridBackground" :class="store.state.theme == 'dark' ? 'dark' : ''"
+          v-for="item in dashboardData.panels"
+          :key="item.id"
+          :x="getPanelLayout(item, 'x')"
+          :y="getPanelLayout(item, 'y')"
+          :w="getPanelLayout(item, 'w')"
+          :h="getPanelLayout(item, 'h')"
+          :i="getPanelLayout(item, 'i')"
+          :minH="getMinimumHeight(item.type)"
+          :minW="getMinimumWidth(item.type)"
+          @resized="resizedEvent"
+          @moved="movedEvent"
+          drag-allow-from=".drag-allow"
+        >
+          <div style="height: 100%">
+            <PanelContainer
+              @onDeletePanel="onDeletePanel"
+              @onViewPanel="onViewPanel"
+              :viewOnly="viewOnly"
+              :data="item"
+              :dashboardId="dashboardData.id"
+              :selectedTimeDate="currentTimeObj"
+              :variablesData="variablesData"
+              :width="getPanelLayout(item, 'w')"
+              :height="getPanelLayout(item, 'h')"
+              @updated:data-zoom="$emit('updated:data-zoom', $event)"
+            >
             </PanelContainer>
           </div>
         </grid-item>
       </grid-layout>
     </div>
+
+    <!-- view panel dialog -->
+    <q-dialog v-model="showViewPanel">
+      <q-card style="min-width: 95vw; min-height: 90vh">
+        <ViewPanel
+          :panelId="viewPanelId"
+          :selectedDateForViewPanel="selectedDateForViewPanel"
+          :initialVariableValues="variablesData"
+          @close-panel="() => (showViewPanel = false)"
+          :class="store.state.theme == 'dark' ? 'dark-mode' : 'bg-white'"
+        />
+      </q-card>
+    </q-dialog>
     <div v-if="!dashboardData.panels?.length">
       <!-- if data not available show nodata component -->
       <NoPanel @update:Panel="addPanelData" :view-only="viewOnly" />
@@ -51,7 +96,7 @@
 
 <script lang="ts">
 // @ts-nocheck
-import { defineComponent, ref } from "vue";
+import { defineComponent, provide, ref, toRaw } from "vue";
 import { useStore } from "vuex";
 import { useQuasar } from "quasar";
 import { useI18n } from "vue-i18n";
@@ -63,22 +108,26 @@ import { useRoute } from "vue-router";
 import { updateDashboard } from "../../utils/commons";
 import NoPanel from "../../components/shared/grid/NoPanel.vue";
 import VariablesValueSelector from "../../components/dashboards/VariablesValueSelector.vue";
+import ViewPanel from "@/components/dashboards/viewPanel/ViewPanel.vue";
 
 export default defineComponent({
   name: "RenderDashboardCharts",
-  emits: ["onDeletePanel", "variablesData"],
+  emits: ["onDeletePanel", "onViewPanel", "variablesData", "updated:data-zoom"],
   props: [
     "viewOnly",
     "dashboardData",
     "currentTimeObj",
     "initialVariableValues",
+    "selectedDateForViewPanel",
   ],
+
   components: {
     GridLayout: VueGridLayout.GridLayout,
     GridItem: VueGridLayout.GridItem,
     PanelContainer,
     NoPanel,
     VariablesValueSelector,
+    ViewPanel,
   },
   setup(props: any, { emit }) {
     const { t } = useI18n();
@@ -88,12 +137,42 @@ export default defineComponent({
     const $q = useQuasar();
     const gridLayoutRef = ref(null);
 
+    const showViewPanel = ref(false);
+    // holds the view panel id
+    const viewPanelId = ref("");
+
     // variables data
     const variablesData = reactive({});
     const variablesDataUpdated = (data: any) => {
       Object.assign(variablesData, data);
-      emit("variablesData", JSON.parse(JSON.stringify(variablesData)));
+      emit("variablesData", variablesData);
     };
+
+    const hoveredSeriesState = ref({
+      hoveredSeriesName: "",
+      panelId: -1,
+      dataIndex: -1,
+      seriesIndex: -1,
+      hoveredTime: null,
+      setHoveredSeriesName: function (name: string) {
+        hoveredSeriesState.value.hoveredSeriesName = name ?? "";
+      },
+      setIndex: function (
+        dataIndex: number,
+        seriesIndex: number,
+        panelId: any,
+        hoveredTime?: any
+      ) {
+        hoveredSeriesState.value.dataIndex = dataIndex ?? -1;
+        hoveredSeriesState.value.seriesIndex = seriesIndex ?? -1;
+        hoveredSeriesState.value.panelId = panelId ?? -1;
+        hoveredSeriesState.value.hoveredTime = hoveredTime ?? null;
+      },
+    });
+
+    // used provide and inject to share data between components
+    // it is currently used in panelschemarendered, chartrenderer, convertpromqldata(via panelschemarenderer), and convertsqldata
+    provide("hoveredSeriesState", hoveredSeriesState);
 
     // save the dashboard value
     const saveDashboard = async () => {
@@ -191,6 +270,7 @@ export default defineComponent({
     };
 
     return {
+      store,
       addPanelData,
       t,
       movedEvent,
@@ -203,11 +283,17 @@ export default defineComponent({
       getDashboardLayout,
       gridLayoutRef,
       layoutUpdate,
+      showViewPanel,
+      viewPanelId,
     };
   },
   methods: {
-    OnDeletePanel(panelId) {
+    onDeletePanel(panelId) {
       this.$emit("onDeletePanel", panelId);
+    },
+    onViewPanel(panelId) {
+      this.viewPanelId = panelId;
+      this.showViewPanel = true;
     },
   },
 });
@@ -314,5 +400,9 @@ export default defineComponent({
   background: #00000000 !important;
   border-radius: 4px;
   border-color: #c2c2c27a !important;
+}
+
+.gridBackground.dark {
+  border-color: rgba(204, 204, 220, 0.12) !important;
 }
 </style>

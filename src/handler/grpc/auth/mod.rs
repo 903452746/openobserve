@@ -1,26 +1,29 @@
 // Copyright 2023 Zinc Labs Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{
-    common::infra::{
-        cluster::get_internal_grpc_token,
-        config::{CONFIG, ROOT_USER, USERS},
-    },
-    common::utils::auth::{get_hash, is_root_user},
-};
+use config::CONFIG;
 use http_auth_basic::Credentials;
 use tonic::{Request, Status};
+
+use crate::common::{
+    infra::{
+        cluster::get_internal_grpc_token,
+        config::{ROOT_USER, USERS},
+    },
+    utils::auth::{get_hash, is_root_user},
+};
 
 pub fn check_auth(req: Request<()>) -> Result<Request<()>, Status> {
     let metadata = req.metadata();
@@ -85,10 +88,11 @@ pub fn check_auth(req: Request<()>) -> Result<Request<()>, Status> {
 
 #[cfg(test)]
 mod tests {
+    use config::INSTANCE_ID;
     use tonic::metadata::MetadataValue;
 
     use super::*;
-    use crate::common::{infra::config::INSTANCE_ID, meta::user::User};
+    use crate::common::meta::user::User;
 
     #[actix_web::test]
     async fn test_check_no_auth() {
@@ -105,6 +109,7 @@ mod tests {
                 token: "token".to_string(),
                 rum_token: Some("rum_token".to_string()),
                 org: "dummy".to_owned(),
+                is_external: false,
             },
         );
 
@@ -133,6 +138,7 @@ mod tests {
                 token: "token".to_string(),
                 rum_token: Some("rum_token".to_string()),
                 org: "dummy".to_owned(),
+                is_external: false,
             },
         );
 
@@ -159,6 +165,7 @@ mod tests {
                 token: "token".to_string(),
                 rum_token: Some("rum_token".to_string()),
                 org: "dummy".to_owned(),
+                is_external: false,
             },
         );
         let mut request = tonic::Request::new(());
