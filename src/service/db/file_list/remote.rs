@@ -21,18 +21,13 @@ use std::{
 
 use bytes::Buf;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use config::{meta::stream::FileKey, CONFIG};
+use config::{meta::stream::FileKey, utils::json, CONFIG};
 use futures::future::try_join_all;
+use infra::{cache::stats, file_list as infra_file_list, storage};
 use once_cell::sync::Lazy;
 use tokio::{sync::RwLock, time};
 
-use crate::{
-    common::{
-        infra::{cache::stats, file_list as infra_file_list, storage},
-        utils::json,
-    },
-    service::db,
-};
+use crate::service::db;
 
 pub static LOADED_FILES: Lazy<RwLock<HashSet<String>>> =
     Lazy::new(|| RwLock::new(HashSet::with_capacity(24)));
@@ -131,7 +126,7 @@ pub async fn cache(prefix: &str, force: bool) -> Result<(), anyhow::Error> {
 }
 
 pub async fn cache_stats() -> Result<(), anyhow::Error> {
-    let orgs = db::schema::list_organizations_from_cache();
+    let orgs = db::schema::list_organizations_from_cache().await;
     for org_id in orgs {
         let ret = infra_file_list::get_stream_stats(&org_id, None, None).await;
         if ret.is_err() {
@@ -212,12 +207,9 @@ async fn process_file(file: &str) -> Result<Vec<FileKey>, anyhow::Error> {
     Ok(records)
 }
 
-pub async fn cache_time_range(time_min: i64, mut time_max: i64) -> Result<(), anyhow::Error> {
-    if time_min == 0 {
+pub async fn cache_time_range(time_min: i64, time_max: i64) -> Result<(), anyhow::Error> {
+    if time_min == 0 || time_max == 0 {
         return Ok(());
-    }
-    if time_max == 0 {
-        time_max = Utc::now().timestamp_micros();
     }
     let mut cur_time = time_min;
     while cur_time <= time_max {

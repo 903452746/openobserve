@@ -119,11 +119,17 @@ pub(crate) async fn replay_wal_files() -> Result<()> {
             .unwrap_or_default();
         let key = WriterKey::new(org_id, stream_type);
         let mut memtable = memtable::MemTable::new();
-        let mut reader = wal::Reader::from_path(wal_file).context(WalSnafu)?;
+        let mut reader = match wal::Reader::from_path(wal_file) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("Unable to open the wal file err: {}, skip", e);
+                continue;
+            }
+        };
         let mut total = 0;
         let mut i = 0;
         loop {
-            if i > 0 && i % 100 == 0 {
+            if i > 0 && i % 1000 == 0 {
                 log::warn!(
                     "replay wal file: {:?}, entries: {}, records: {}",
                     wal_file,
@@ -135,6 +141,22 @@ pub(crate) async fn replay_wal_files() -> Result<()> {
                 Ok(entry) => entry,
                 Err(wal::Error::UnableToReadData { source }) => {
                     log::error!("Unable to read entry from: {}, skip the entry", source);
+                    continue;
+                }
+                Err(wal::Error::LengthMismatch { expected, actual }) => {
+                    log::error!(
+                        "Unable to read entry: Length mismatch: expected {}, actual {}, skip the entry",
+                        expected,
+                        actual
+                    );
+                    continue;
+                }
+                Err(wal::Error::ChecksumMismatch { expected, actual }) => {
+                    log::error!(
+                        "Unable to read entry: Checksum mismatch: expected {}, actual {}, skip the entry",
+                        expected,
+                        actual
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -169,7 +191,7 @@ pub(crate) async fn replay_wal_files() -> Result<()> {
 
         immutable::IMMUTABLES.write().await.insert(
             wal_file.to_owned(),
-            immutable::Immutable::new(thread_id, key, memtable),
+            Arc::new(immutable::Immutable::new(thread_id, key, memtable)),
         );
     }
 

@@ -18,18 +18,28 @@ use std::collections::{HashMap, HashSet};
 use actix_web::http;
 use arrow_schema::DataType;
 use chrono::{Duration, Local, TimeZone, Utc};
-use config::{meta::stream::StreamType, CONFIG};
+use config::{
+    ider,
+    meta::stream::StreamType,
+    utils::{
+        base64,
+        json::{Map, Value},
+    },
+    CONFIG,
+};
 
+use super::promql;
 use crate::{
     common::{
         meta::{
             alerts::{
                 destinations::{DestinationWithTemplate, HTTPType},
-                Alert, Condition, Operator, QueryCondition, QueryType,
+                AggFunction, Alert, Condition, Operator, QueryCondition, QueryType,
             },
+            authz::Authz,
             search,
         },
-        utils::json::{self, Map, Value},
+        utils::auth::{remove_ownership, set_ownership},
     },
     service::{db, search as SearchService},
 };
@@ -46,7 +56,9 @@ pub async fn save(
     name: &str,
     mut alert: Alert,
 ) -> Result<(), anyhow::Error> {
-    alert.name = name.to_string();
+    if !name.is_empty() {
+        alert.name = name.trim().to_string();
+    }
     alert.org_id = org_id.to_string();
     alert.stream_type = stream_type;
     alert.stream_name = stream_name.to_string();
@@ -54,6 +66,9 @@ pub async fn save(
 
     if alert.name.is_empty() || alert.stream_name.is_empty() {
         return Err(anyhow::anyhow!("Alert name is required"));
+    }
+    if alert.name.contains('/') {
+        return Err(anyhow::anyhow!("Alert name cannot contain '/'"));
     }
 
     // before saving alert check alert destination
@@ -96,29 +111,23 @@ pub async fn save(
                 // if it has result we should fire the alert when enable aggregation
                 alert.trigger_condition.operator = Operator::GreaterThanEquals;
                 alert.trigger_condition.threshold = 1;
-            } else if alert.query_condition.conditions.is_none()
-                || alert
-                    .query_condition
-                    .conditions
-                    .as_ref()
-                    .unwrap()
-                    .is_empty()
-            {
-                return Err(anyhow::anyhow!("Alert should have conditions"));
             }
         }
         QueryType::SQL => {
             if alert.query_condition.sql.is_none()
                 || alert.query_condition.sql.as_ref().unwrap().is_empty()
             {
-                return Err(anyhow::anyhow!("Alert should have a SQL"));
+                return Err(anyhow::anyhow!("Alert with SQL mode should have a query"));
             }
         }
         QueryType::PromQL => {
             if alert.query_condition.promql.is_none()
                 || alert.query_condition.promql.as_ref().unwrap().is_empty()
+                || alert.query_condition.promql_condition.is_none()
             {
-                return Err(anyhow::anyhow!("Alert should have a PromQL"));
+                return Err(anyhow::anyhow!(
+                    "Alert with PromQL mode should have a query"
+                ));
             }
         }
     }
@@ -127,13 +136,22 @@ pub async fn save(
     _ = &alert.evaluate(None).await?;
 
     // calulate the trigger frequency
-    alert.trigger_condition.frequency = std::cmp::max(
-        1,
-        alert.trigger_condition.period / alert.trigger_condition.threshold,
-    );
+    // alert.trigger_condition.frequency = std::cmp::max(
+    //     1,
+    //     alert.trigger_condition.period / alert.trigger_condition.threshold,
+    // );
+    alert.trigger_condition.frequency = std::cmp::max(10, CONFIG.limit.alert_schedule_interval);
 
     // save the alert
-    db::alerts::set(org_id, stream_type, stream_name, name, alert).await
+    match db::alerts::set(org_id, stream_type, stream_name, &alert).await {
+        Ok(_) => {
+            if name.is_empty() {
+                set_ownership(org_id, "alerts", Authz::new(&alert.name)).await;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get(
@@ -168,9 +186,13 @@ pub async fn delete(
             anyhow::anyhow!("Alert not found"),
         ));
     }
-    db::alerts::delete(org_id, stream_type, stream_name, name)
-        .await
-        .map_err(|e| (http::StatusCode::INTERNAL_SERVER_ERROR, e))
+    match db::alerts::delete(org_id, stream_type, stream_name, name).await {
+        Ok(_) => {
+            remove_ownership(org_id, "alerts", Authz::new(name)).await;
+            Ok(())
+        }
+        Err(e) => Err((http::StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
 }
 
 pub async fn enable(
@@ -190,7 +212,7 @@ pub async fn enable(
         }
     };
     alert.enabled = value;
-    db::alerts::set(org_id, stream_type, stream_name, name, alert)
+    db::alerts::set(org_id, stream_type, stream_name, &alert)
         .await
         .map_err(|e| (http::StatusCode::INTERNAL_SERVER_ERROR, e))
 }
@@ -279,36 +301,99 @@ impl QueryCondition {
         &self,
         alert: &Alert,
     ) -> Result<Option<Vec<Map<String, Value>>>, anyhow::Error> {
+        let now = Utc::now().timestamp_micros();
         let sql = match self.query_type {
             QueryType::Custom => {
-                if let Some(v) = self.conditions.as_ref() {
-                    if self.aggregation.is_none() && v.is_empty() {
-                        return Ok(None);
-                    } else {
-                        build_sql(alert, v).await?
-                    }
-                } else {
+                let Some(v) = self.conditions.as_ref() else {
                     return Ok(None);
-                }
+                };
+                build_sql(alert, v).await?
             }
             QueryType::SQL => {
-                if let Some(v) = self.sql.as_ref() {
-                    if v.is_empty() {
-                        return Ok(None);
-                    } else {
-                        v.to_string()
-                    }
-                } else {
+                let Some(v) = self.sql.as_ref() else {
                     return Ok(None);
+                };
+                if v.is_empty() {
+                    return Ok(None);
+                } else {
+                    v.to_string()
                 }
             }
             QueryType::PromQL => {
-                return Err(anyhow::anyhow!("PromQL is not supported yet"));
+                let Some(v) = self.promql.as_ref() else {
+                    return Ok(None);
+                };
+                if v.is_empty() {
+                    return Ok(None);
+                }
+                let start = now
+                    - Duration::minutes(alert.trigger_condition.period)
+                        .num_microseconds()
+                        .unwrap();
+                let end = now;
+                let condition = self.promql_condition.as_ref().unwrap();
+                let req = promql::MetricsQueryRequest {
+                    query: format!(
+                        "({}) {} {}",
+                        v,
+                        match &condition.operator {
+                            &Operator::EqualTo => "==".to_string(),
+                            _ => condition.operator.to_string(),
+                        },
+                        to_float(&condition.value)
+                    ),
+                    start,
+                    end,
+                    step: std::cmp::max(
+                        promql::micros(promql::MINIMAL_INTERVAL),
+                        (end - start) / promql::MAX_DATA_POINTS,
+                    ),
+                };
+                let resp = match promql::search::search(&alert.org_id, &req, 0, "").await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Ok(None);
+                    }
+                };
+                let promql::value::Value::Matrix(value) = resp else {
+                    log::warn!(
+                        "Alert evaluate: PromQL query {} returned unexpected response: {:?}",
+                        v,
+                        resp
+                    );
+                    return Ok(None);
+                };
+                // TODO calculate the sample in a row, suddenly a sample can be ignored
+                let value = value
+                    .into_iter()
+                    .filter(|f| f.samples.len() >= alert.trigger_condition.threshold as usize)
+                    .collect::<Vec<_>>();
+                return if value.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        value
+                            .iter()
+                            .map(|v| {
+                                let mut val = Map::with_capacity(v.labels.len() + 2);
+                                for label in v.labels.iter() {
+                                    val.insert(
+                                        label.name.to_string(),
+                                        label.value.to_string().into(),
+                                    );
+                                }
+                                let last_sample = v.samples.last().unwrap();
+                                val.insert("_timestamp".to_string(), last_sample.timestamp.into());
+                                val.insert("value".to_string(), last_sample.value.into());
+                                val
+                            })
+                            .collect(),
+                    ))
+                };
             }
         };
 
         // fire the query
-        let now = Utc::now().timestamp_micros();
         let req = search::Request {
             query: search::Query {
                 sql: sql.clone(),
@@ -331,9 +416,15 @@ impl QueryCondition {
             encoding: search::RequestEncoding::Empty,
             timeout: 0,
         };
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let resp =
-            SearchService::search(&session_id, &alert.org_id, alert.stream_type, &req).await?;
+        let session_id = ider::uuid();
+        let resp = match SearchService::search(&session_id, &alert.org_id, alert.stream_type, &req)
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(None);
+            }
+        };
         if resp.total < alert.trigger_condition.threshold as usize {
             Ok(None)
         } else {
@@ -458,13 +549,26 @@ async fn build_sql(alert: &Alert, conditions: &[Condition]) -> Result<String, an
         };
         build_expr(&agg.having, "alert_agg_value", data_type)?
     };
+
+    let func_expr = match agg.function {
+        AggFunction::Avg => format!("AVG(\"{}\")", agg.having.column),
+        AggFunction::Max => format!("MAX(\"{}\")", agg.having.column),
+        AggFunction::Min => format!("MIN(\"{}\")", agg.having.column),
+        AggFunction::Sum => format!("SUM(\"{}\")", agg.having.column),
+        AggFunction::Count => format!("COUNT(\"{}\")", agg.having.column),
+        AggFunction::P50 => format!("approx_percentile_cont(\"{}\", 0.5)", agg.having.column),
+        AggFunction::P75 => format!("approx_percentile_cont(\"{}\", 0.75)", agg.having.column),
+        AggFunction::P90 => format!("approx_percentile_cont(\"{}\", 0.9)", agg.having.column),
+        AggFunction::P95 => format!("approx_percentile_cont(\"{}\", 0.95)", agg.having.column),
+        AggFunction::P99 => format!("approx_percentile_cont(\"{}\", 0.99)", agg.having.column),
+    };
+
     if let Some(group) = agg.group_by.as_ref() {
         if !group.is_empty() {
             sql = format!(
-                "SELECT {}, {}(\"{}\") AS alert_agg_value, MIN({}) as zo_sql_min_time, MAX({}) AS zo_sql_max_time FROM \"{}\" {} GROUP BY {} HAVING {}",
+                "SELECT {}, {} AS alert_agg_value, MIN({}) as zo_sql_min_time, MAX({}) AS zo_sql_max_time FROM \"{}\" {} GROUP BY {} HAVING {}",
                 group.join(", "),
-                agg.function.to_string(),
-                agg.having.column,
+                func_expr,
                 CONFIG.common.column_timestamp,
                 CONFIG.common.column_timestamp,
                 alert.stream_name,
@@ -476,9 +580,8 @@ async fn build_sql(alert: &Alert, conditions: &[Condition]) -> Result<String, an
     }
     if sql.is_empty() {
         sql = format!(
-            "SELECT {}(\"{}\") AS alert_agg_value, MIN({}) as zo_sql_min_time, MAX({}) AS zo_sql_max_time FROM \"{}\" {} HAVING {}",
-            agg.function.to_string(),
-            agg.having.column,
+            "SELECT {} AS alert_agg_value, MIN({}) as zo_sql_min_time, MAX({}) AS zo_sql_max_time FROM \"{}\" {} HAVING {}",
+            func_expr,
             CONFIG.common.column_timestamp,
             CONFIG.common.column_timestamp,
             alert.stream_name,
@@ -647,20 +750,11 @@ pub async fn send_notification(
     rows: &[Map<String, Value>],
 ) -> Result<(), anyhow::Error> {
     let rows_tpl_val = if alert.row_template.is_empty() {
-        "".to_string()
+        vec!["".to_string()]
     } else {
         process_row_template(&alert.row_template, alert, rows)
     };
-    let resp = json::to_string(&dest.template.body)?;
-    let resp = process_dest_template(&resp, alert, rows, &rows_tpl_val);
-    let msg: Value = json::from_str(&resp)?;
-    let msg: Value = match &msg {
-        Value::String(obj) => match json::from_str(obj) {
-            Ok(obj) => obj,
-            Err(_) => msg,
-        },
-        _ => msg,
-    };
+    let msg = process_dest_template(&dest.template.body, alert, rows, &rows_tpl_val).await;
     let client = if dest.skip_tls_verify {
         reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -673,27 +767,35 @@ pub async fn send_notification(
         HTTPType::POST => client.post(url),
         HTTPType::PUT => client.put(url),
         HTTPType::GET => client.get(url),
-    }
-    .header("Content-type", "application/json");
+    };
 
     // Add additional headers if any from destination description
+    let mut has_context_type = false;
     if let Some(headers) = &dest.headers {
         for (key, value) in headers.iter() {
             if !key.is_empty() && !value.is_empty() {
+                if key.to_lowercase().trim() == "content-type" {
+                    has_context_type = true;
+                }
                 req = req.header(key, value);
             }
         }
     };
+    // set default content type
+    if !has_context_type {
+        req = req.header("Content-type", "application/json");
+    }
 
-    let resp = req.json(&msg).send().await?;
+    let resp = req.body(msg.clone()).send().await?;
     if !resp.status().is_success() {
+        log::error!("Alert body: {}", msg);
         return Err(anyhow::anyhow!("sent error: {:?}", resp.bytes().await));
     }
 
     Ok(())
 }
 
-fn process_row_template(tpl: &String, alert: &Alert, rows: &[Map<String, Value>]) -> String {
+fn process_row_template(tpl: &String, alert: &Alert, rows: &[Map<String, Value>]) -> Vec<String> {
     let alert_type = if alert.is_real_time {
         "realtime"
     } else {
@@ -708,12 +810,12 @@ fn process_row_template(tpl: &String, alert: &Alert, rows: &[Map<String, Value>]
         for (key, value) in row.iter() {
             let value = if value.is_string() {
                 value.as_str().unwrap_or_default().to_string()
+            } else if value.is_f64() {
+                format!("{:.2}", value.as_f64().unwrap_or_default())
             } else {
                 value.to_string()
             };
-            if resp.contains(&format!("{{{key}}}")) {
-                resp = resp.replace(&format!("{{{key}}}"), &format_variable_value(&value));
-            }
+            process_variable_replace(&mut resp, key, &VarValue::Str(&value));
 
             // calculate start and end time
             if key == &CONFIG.common.column_timestamp {
@@ -738,7 +840,7 @@ fn process_row_template(tpl: &String, alert: &Alert, rows: &[Map<String, Value>]
                 }
             }
         }
-        let alert_start_time = if alert_start_time > 0 {
+        let alert_start_time_str = if alert_start_time > 0 {
             Local
                 .timestamp_nanos(alert_start_time * 1000)
                 .format("%Y-%m-%dT%H:%M:%S")
@@ -746,7 +848,7 @@ fn process_row_template(tpl: &String, alert: &Alert, rows: &[Map<String, Value>]
         } else {
             String::from("N/A")
         };
-        let alert_end_time = if alert_end_time > 0 {
+        let alert_end_time_str = if alert_end_time > 0 {
             Local
                 .timestamp_nanos(alert_end_time * 1000)
                 .format("%Y-%m-%dT%H:%M:%S")
@@ -754,6 +856,7 @@ fn process_row_template(tpl: &String, alert: &Alert, rows: &[Map<String, Value>]
         } else {
             String::from("N/A")
         };
+
         resp = resp
             .replace("{org_name}", &alert.org_id)
             .replace("{stream_type}", &alert.stream_type.to_string())
@@ -773,26 +876,26 @@ fn process_row_template(tpl: &String, alert: &Alert, rows: &[Map<String, Value>]
                 &alert.trigger_condition.threshold.to_string(),
             )
             .replace("{alert_count}", &alert_count.to_string())
-            .replace("{alert_start_time}", &alert_start_time)
-            .replace("{alert_end_time}", &alert_end_time);
+            .replace("{alert_start_time}", &alert_start_time_str)
+            .replace("{alert_end_time}", &alert_end_time_str);
 
         if let Some(attrs) = &alert.context_attributes {
             for (key, value) in attrs.iter() {
-                resp = resp.replace(&format!("{{{key}}}"), &format_variable_value(value));
+                process_variable_replace(&mut resp, key, &VarValue::Str(value));
             }
         }
 
         rows_tpl.push(resp);
     }
 
-    rows_tpl.join("\\\\n")
+    rows_tpl
 }
 
-fn process_dest_template(
+async fn process_dest_template(
     tpl: &str,
     alert: &Alert,
     rows: &[Map<String, Value>],
-    rows_tpl_val: &str,
+    rows_tpl_val: &[String],
 ) -> String {
     // format values
     let alert_count = rows.len();
@@ -801,6 +904,8 @@ fn process_dest_template(
         for (key, value) in row.iter() {
             let value = if value.is_string() {
                 value.as_str().unwrap_or_default().to_string()
+            } else if value.is_f64() {
+                format!("{:.2}", value.as_f64().unwrap_or_default())
             } else {
                 value.to_string()
             };
@@ -839,7 +944,7 @@ fn process_dest_template(
             }
         }
     }
-    let alert_start_time = if alert_start_time > 0 {
+    let alert_start_time_str = if alert_start_time > 0 {
         Local
             .timestamp_nanos(alert_start_time * 1000)
             .format("%Y-%m-%dT%H:%M:%S")
@@ -847,7 +952,7 @@ fn process_dest_template(
     } else {
         String::from("N/A")
     };
-    let alert_end_time = if alert_end_time > 0 {
+    let alert_end_time_str = if alert_end_time > 0 {
         Local
             .timestamp_nanos(alert_end_time * 1000)
             .format("%Y-%m-%dT%H:%M:%S")
@@ -860,6 +965,72 @@ fn process_dest_template(
         "realtime"
     } else {
         "scheduled"
+    };
+
+    // Hack time range for alert url
+    alert_end_time = if alert_end_time == 0 {
+        Utc::now().timestamp_micros()
+    } else {
+        // the frontend will drop the second, so we add 1 minute to the end time
+        alert_end_time + Duration::minutes(1).num_microseconds().unwrap()
+    };
+    if alert_start_time == 0 {
+        alert_start_time = alert_end_time
+            - Duration::minutes(alert.trigger_condition.period)
+                .num_microseconds()
+                .unwrap();
+    }
+    if alert_end_time - alert_start_time < Duration::minutes(1).num_microseconds().unwrap() {
+        alert_start_time = alert_end_time
+            - Duration::minutes(alert.trigger_condition.period)
+                .num_microseconds()
+                .unwrap();
+    }
+
+    let mut alert_query = String::new();
+    let alert_url = if alert.query_condition.query_type == QueryType::PromQL {
+        if let Some(promql) = &alert.query_condition.promql {
+            let condition = alert.query_condition.promql_condition.as_ref().unwrap();
+            alert_query = format!(
+                "({}) {} {}",
+                promql,
+                match condition.operator {
+                    Operator::EqualTo => "==".to_string(),
+                    _ => condition.operator.to_string(),
+                },
+                to_float(&condition.value)
+            );
+        }
+        // http://localhost:5080/web/metrics?stream=zo_http_response_time_bucket&from=1705248000000000&to=1705334340000000&query=em9faHR0cF9yZXNwb25zZV90aW1lX2J1Y2tldHt9&org_identifier=default
+        format!(
+            "{}{}/web/metrics?stream_type={}&stream={}&from={}&to={}&query={}&org_identifier={}",
+            CONFIG.common.web_url,
+            CONFIG.common.base_uri,
+            alert.stream_type,
+            alert.stream_name,
+            alert_start_time,
+            alert_end_time,
+            base64::encode(&alert_query).replace('+', "%2B"),
+            alert.org_id,
+        )
+    } else {
+        if let Some(conditions) = &alert.query_condition.conditions {
+            if let Ok(v) = build_sql(alert, conditions).await {
+                alert_query = v;
+            }
+        }
+        // http://localhost:5080/web/logs?stream_type=logs&stream=default&from=1705248000000000&to=1705334340000000&sql_mode=true&query=U0VMRUNUICogRlJPTSAiZGVmYXVsdCIg&org_identifier=default
+        format!(
+            "{}{}/web/logs?stream_type={}&stream={}&from={}&to={}&sql_mode=true&query={}&org_identifier={}",
+            CONFIG.common.web_url,
+            CONFIG.common.base_uri,
+            alert.stream_type,
+            alert.stream_name,
+            alert_start_time,
+            alert_end_time,
+            base64::encode(&alert_query).replace('+', "%2B"),
+            alert.org_id,
+        )
     };
 
     let mut resp = tpl
@@ -881,29 +1052,103 @@ fn process_dest_template(
             &alert.trigger_condition.threshold.to_string(),
         )
         .replace("{alert_count}", &alert_count.to_string())
-        .replace("{alert_start_time}", &alert_start_time)
-        .replace("{alert_end_time}", &alert_end_time)
-        .replace("{rows}", rows_tpl_val);
+        .replace("{alert_start_time}", &alert_start_time_str)
+        .replace("{alert_end_time}", &alert_end_time_str)
+        .replace("{alert_url}", &alert_url);
+    process_variable_replace(&mut resp, "rows", &VarValue::Vector(rows_tpl_val));
     for (key, value) in vars.iter() {
         if resp.contains(&format!("{{{key}}}")) {
             let val = value.iter().cloned().collect::<Vec<_>>();
-            resp = resp.replace(
-                &format!("{{{key}}}"),
-                &format_variable_value(&val.join(", ")),
-            );
+            process_variable_replace(&mut resp, key, &VarValue::Str(&val.join(", ")));
         }
     }
     if let Some(attrs) = &alert.context_attributes {
         for (key, value) in attrs.iter() {
-            resp = resp.replace(&format!("{{{key}}}"), &format_variable_value(value));
+            process_variable_replace(&mut resp, key, &VarValue::Str(value));
         }
     }
 
     resp
 }
 
-fn format_variable_value(val: &str) -> String {
-    val.replace('\n', "\\\\n")
-        .replace('\r', "\\\\r")
-        .replace('\"', "\\\\\\\"")
+fn process_variable_replace(tpl: &mut String, var_name: &str, var_val: &VarValue) {
+    let pattern = "{".to_owned() + var_name + "}";
+    if tpl.contains(&pattern) {
+        *tpl = tpl.replace(&pattern, &var_val.to_string_with_length(0));
+        return;
+    }
+    let pattern = "{".to_owned() + var_name + ":";
+    if let Some(start) = tpl.find(&pattern) {
+        // find } start from position v
+        let p = start + pattern.len();
+        if let Some(end) = tpl[p..].find('}') {
+            let len = tpl[p..p + end].parse::<usize>().unwrap_or_default();
+            if len > 0 {
+                *tpl = tpl.replace(
+                    &tpl[start..p + end + 1],
+                    &var_val.to_string_with_length(len),
+                );
+            }
+        }
+    }
+}
+
+fn format_variable_value(val: String) -> String {
+    val.replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\"', "\\\"")
+}
+
+fn to_float(val: &Value) -> f64 {
+    if val.is_number() {
+        val.as_f64().unwrap_or_default()
+    } else {
+        val.as_str().unwrap_or_default().parse().unwrap_or_default()
+    }
+}
+
+enum VarValue<'a> {
+    Str(&'a str),
+    Vector(&'a [String]),
+}
+
+impl<'a> VarValue<'a> {
+    fn len(&self) -> usize {
+        match self {
+            VarValue::Str(v) => v.chars().count(),
+            VarValue::Vector(v) => v.len(),
+        }
+    }
+
+    fn to_string_with_length(&self, n: usize) -> String {
+        let n = if n > 0 && n < self.len() {
+            n
+        } else {
+            self.len()
+        };
+        match self {
+            VarValue::Str(v) => format_variable_value(v.chars().take(n).collect()),
+            VarValue::Vector(v) => v[0..n].join("\\n"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_alert_save() {
+        let org_id = "default";
+        let stream_type = StreamType::Logs;
+        let stream_name = "default";
+        let alert_name = "abc/alert";
+        let alert = Alert {
+            name: alert_name.to_string(),
+            ..Default::default()
+        };
+        let ret = save(org_id, stream_type, stream_name, alert_name, alert).await;
+        // alert name should not contain /
+        assert!(ret.is_err());
+    }
 }

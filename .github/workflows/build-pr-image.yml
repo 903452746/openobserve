@@ -11,8 +11,8 @@ env:
     AWS_REGION: us-east-1
 
 jobs:
-    build:
-      name: build
+    build_pr_image:
+      name: build_pr_image
       permissions:
         id-token: write
         contents: read
@@ -28,7 +28,10 @@ jobs:
         - name: Clone the current repo
           uses: actions/checkout@v4
           with:
+            repository: ${{ github.repo }}
+            ref: ${{ github.event.pull_request.head.ref || github.ref }}
             fetch-depth: 0
+            fetch-tags: true
   
         - name: Setup Rust Toolchain
           uses: dtolnay/rust-toolchain@master
@@ -39,7 +42,7 @@ jobs:
           with:
             cache-on-failure: true
         - name: Install Protoc
-          uses: arduino/setup-protoc@v2
+          uses: arduino/setup-protoc@v3
           with:
             version: "21.12"
         - uses: actions/setup-node@v4

@@ -30,6 +30,7 @@ mod engine;
 mod exec;
 mod functions;
 
+pub mod name_visitor;
 pub mod search;
 pub mod value;
 
@@ -49,7 +50,7 @@ pub trait TableProvider: Sync + Send + 'static {
         org_id: &str,
         stream_name: &str,
         time_range: (i64, i64),
-        filters: &[(&str, Vec<&str>)],
+        filters: &mut [(&str, Vec<String>)],
     ) -> Result<Vec<(SessionContext, Arc<Schema>, ScanStats)>>;
 }
 

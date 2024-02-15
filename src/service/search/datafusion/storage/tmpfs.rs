@@ -18,7 +18,9 @@ use std::ops::Range;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
+use config::utils::time::BASE_TIME;
 use futures::{stream::BoxStream, StreamExt};
+use infra::cache::tmpfs;
 use object_store::{
     path::Path, GetOptions, GetResult, GetResultPayload, ListResult, MultipartId, ObjectMeta,
     ObjectStore, PutOptions, PutResult, Result,
@@ -26,7 +28,7 @@ use object_store::{
 use thiserror::Error as ThisError;
 use tokio::io::AsyncWrite;
 
-use crate::common::{infra::cache::tmpfs, utils::time::BASE_TIME};
+use super::GetRangeExt;
 
 /// A specialized `Error` for in-memory object store-related errors
 #[derive(ThisError, Debug)]
@@ -94,7 +96,12 @@ impl ObjectStore for Tmpfs {
             version: None,
         };
         let (range, data) = match options.range {
-            Some(range) => (range.clone(), data.slice(range)),
+            Some(range) => {
+                let r = range
+                    .as_range(data.len())
+                    .map_err(|e| super::Error::BadRange(e.to_string()))?;
+                (r.clone(), data.slice(r))
+            }
             None => (0..data.len(), data),
         };
         Ok(GetResult {
@@ -136,7 +143,7 @@ impl ObjectStore for Tmpfs {
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
-        log::info!("head: {}", location);
+        // log::info!("head: {}", location);
         let last_modified = Utc::now();
         let bytes = self.get_bytes(location).await?;
         Ok(ObjectMeta {

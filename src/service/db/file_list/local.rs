@@ -17,17 +17,17 @@ use std::io::{BufRead, BufReader};
 
 use config::{
     meta::stream::{FileKey, FileMeta, StreamType},
-    utils::parquet::parse_file_key_columns,
+    utils::{
+        asynchronism::file::get_file_contents, file::scan_files, json,
+        parquet::parse_file_key_columns,
+    },
     CONFIG,
 };
+use infra::file_list as infra_file_list;
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 
-use crate::common::{
-    infra::{file_list as infra_file_list, wal},
-    meta::stream::StreamParams,
-    utils::{asynchronism::file::get_file_contents, file::scan_files, json},
-};
+use crate::common::{infra::wal, meta::stream::StreamParams};
 
 /// use queue to batch send broadcast to other nodes
 pub static BROADCAST_QUEUE: Lazy<RwLock<Vec<FileKey>>> =
@@ -40,9 +40,9 @@ pub async fn set(key: &str, meta: Option<FileMeta>, deleted: bool) -> Result<(),
     // write into file_list storage
     // retry 5 times
     for _ in 0..5 {
-        if let Err(e) = super::progress(key, meta.as_ref(), deleted, true).await {
+        if let Err(e) = super::progress(key, meta.as_ref(), deleted).await {
             log::error!("[FILE_LIST] Error saving file to storage, retrying: {}", e);
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         } else {
             break;
         }

@@ -14,15 +14,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use chrono::{Duration, Utc};
-use config::{meta::stream::StreamType, CONFIG};
+use config::{cluster::LOCAL_NODE_UUID, meta::stream::StreamType, CONFIG};
+use infra::dist_lock;
 
 use crate::{
     common::{
-        infra::{
-            cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-            config::TRIGGERS,
-            dist_lock,
-        },
+        infra::{cluster::get_node_by_uuid, config::TRIGGERS},
         meta::alerts::triggers::Trigger,
     },
     service::db,
@@ -34,7 +31,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
     // get the working node for the organization
     let node = db::alerts::alert_manager::get_mark(org_id).await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-        log::warn!("[ALERT_MANAGER] is processing by {node}");
+        log::debug!("[ALERT_MANAGER] is processing by {node}");
         return Ok(());
     }
 
@@ -45,16 +42,19 @@ pub async fn run() -> Result<(), anyhow::Error> {
     // first
     let node = db::alerts::alert_manager::get_mark(org_id).await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-        log::warn!("[ALERT_MANAGER] is processing by {node}");
+        log::debug!("[ALERT_MANAGER] is processing by {node}");
         dist_lock::unlock(&locker).await?;
         return Ok(());
     }
-    if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
-        db::alerts::alert_manager::set_mark(org_id, Some(&LOCAL_NODE_UUID.clone())).await?;
-    }
+    let ret = if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
+        db::alerts::alert_manager::set_mark(org_id, Some(&LOCAL_NODE_UUID.clone())).await
+    } else {
+        Ok(())
+    };
     // already bind to this node, we can unlock now
     dist_lock::unlock(&locker).await?;
     drop(locker);
+    ret?;
 
     let now = Utc::now().timestamp_micros();
     let cacher = TRIGGERS.read().await;
@@ -136,14 +136,14 @@ pub async fn handle_triggers(
             .unwrap();
         new_trigger.is_silenced = true;
     } else {
-        new_trigger.next_run_at += Duration::minutes(alert.trigger_condition.frequency)
+        new_trigger.next_run_at += Duration::seconds(alert.trigger_condition.frequency)
             .num_microseconds()
             .unwrap();
     }
 
     // send notification
-    if let Some(ret) = ret {
-        alert.send_notification(&ret).await?;
+    if let Some(data) = ret {
+        alert.send_notification(&data).await?;
     }
 
     // update trigger

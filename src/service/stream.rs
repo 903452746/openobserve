@@ -17,22 +17,27 @@ use std::{collections::HashMap, io::Error};
 
 use actix_web::{http, http::StatusCode, HttpResponse};
 use config::{
-    is_local_disk_storage, meta::stream::StreamType, CONFIG, SIZE_IN_MB,
-    SQL_FULL_TEXT_SEARCH_FIELDS,
+    is_local_disk_storage,
+    meta::{
+        stream::{PartitionTimeLevel, StreamStats, StreamType},
+        usage::Stats,
+    },
+    utils::json,
+    CONFIG, SIZE_IN_MB, SQL_FULL_TEXT_SEARCH_FIELDS,
 };
 use datafusion::arrow::datatypes::Schema;
+use infra::cache::stats;
 
 use crate::{
     common::{
-        infra::{cache::stats, config::STREAM_SCHEMAS},
+        infra::config::STREAM_SCHEMAS,
         meta::{
             self,
+            authz::Authz,
             http::HttpResponse as MetaHttpResponse,
             prom,
-            stream::{PartitionTimeLevel, Stream, StreamProperty, StreamSettings, StreamStats},
-            usage::Stats,
+            stream::{Stream, StreamProperty, StreamSettings},
         },
-        utils::json,
     },
     service::{db, metrics::get_prom_metadata_from_schema, search as SearchService},
 };
@@ -155,15 +160,15 @@ pub fn stream_res(
     }
 }
 
-#[tracing::instrument(skip(setting))]
+#[tracing::instrument(skip(settings))]
 pub async fn save_stream_settings(
     org_id: &str,
     stream_name: &str,
     stream_type: StreamType,
-    setting: StreamSettings,
+    mut settings: StreamSettings,
 ) -> Result<HttpResponse, Error> {
     // check if we are allowed to ingest
-    if db::compact::retention::is_deleting_stream(org_id, stream_name, stream_type, None) {
+    if db::compact::retention::is_deleting_stream(org_id, stream_type, stream_name, None) {
         return Ok(
             HttpResponse::InternalServerError().json(MetaHttpResponse::error(
                 http::StatusCode::INTERNAL_SERVER_ERROR.into(),
@@ -172,20 +177,43 @@ pub async fn save_stream_settings(
         );
     }
 
-    for key in setting.partition_keys.iter() {
-        if SQL_FULL_TEXT_SEARCH_FIELDS.contains(key) {
+    for key in settings.partition_keys.iter() {
+        if SQL_FULL_TEXT_SEARCH_FIELDS.contains(&key.field) {
             return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
                 http::StatusCode::BAD_REQUEST.into(),
-                format!("field [{key}] can't be used for partition key"),
+                format!("field [{}] can't be used for partition key", key.field),
             )));
         }
     }
 
+    // we need to keep the old partition information, because the hash bucket num can't be changed
+    // get old settings and then update partition_keys
     let schema = db::schema::get(org_id, stream_name, stream_type)
         .await
         .unwrap();
+    let mut old_partition_keys = stream_settings(&schema).unwrap_or_default().partition_keys;
+    // first disable all old partition keys
+    for v in old_partition_keys.iter_mut() {
+        v.disabled = true;
+    }
+    // then update new partition keys
+    for v in settings.partition_keys.iter() {
+        if let Some(old_field) = old_partition_keys.iter_mut().find(|k| k.field == v.field) {
+            if old_field.types != v.types {
+                return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                    http::StatusCode::BAD_REQUEST.into(),
+                    format!("field [{}] partition types can't be changed", v.field),
+                )));
+            }
+            old_field.disabled = v.disabled;
+        } else {
+            old_partition_keys.push(v.clone());
+        }
+    }
+    settings.partition_keys = old_partition_keys;
+
     let mut metadata = schema.metadata.clone();
-    metadata.insert("settings".to_string(), json::to_string(&setting).unwrap());
+    metadata.insert("settings".to_string(), json::to_string(&settings).unwrap());
     if !metadata.contains_key("created_at") {
         metadata.insert(
             "created_at".to_string(),
@@ -227,7 +255,7 @@ pub async fn delete_stream(
 
     // create delete for compactor
     if let Err(e) =
-        db::compact::retention::delete_stream(org_id, stream_name, stream_type, None).await
+        db::compact::retention::delete_stream(org_id, stream_type, stream_name, None).await
     {
         return Ok(
             HttpResponse::InternalServerError().json(MetaHttpResponse::error(
@@ -249,13 +277,15 @@ pub async fn delete_stream(
 
     // delete stream schema cache
     let key = format!("{org_id}/{stream_type}/{stream_name}");
-    STREAM_SCHEMAS.remove(&key);
+    let mut w = STREAM_SCHEMAS.write().await;
+    w.remove(&key);
+    drop(w);
 
     // delete stream stats cache
     stats::remove_stream_stats(org_id, stream_name, stream_type);
 
     // delete stream compaction offset
-    if let Err(e) = db::compact::files::del_offset(org_id, stream_name, stream_type).await {
+    if let Err(e) = db::compact::files::del_offset(org_id, stream_type, stream_name).await {
         return Ok(
             HttpResponse::InternalServerError().json(MetaHttpResponse::error(
                 StatusCode::INTERNAL_SERVER_ERROR.into(),
@@ -263,6 +293,13 @@ pub async fn delete_stream(
             )),
         );
     };
+
+    crate::common::utils::auth::remove_ownership(
+        org_id,
+        &stream_type.to_string(),
+        Authz::new(stream_name),
+    )
+    .await;
 
     Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
         StatusCode::OK.into(),

@@ -1,3 +1,4 @@
+
 <template>
   <q-expansion-item
     class="field-expansion-item"
@@ -26,7 +27,7 @@
           <input
             v-model="searchValue"
             class="full-width"
-            :disabled="!values?.length && !filter.isLoading"
+            :disabled="filter.isLoading"
             placeholder="Search"
             @input="onSearchValue()"
           />
@@ -48,7 +49,7 @@
                   <q-checkbox
                     size="xs"
                     v-model="_selectedValues"
-                    :val="value.key"
+                    :val="value.key.toString()"
                     class="filter-check-box cursor-pointer"
                     @update:model-value="processValues()"
                   />

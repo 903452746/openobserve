@@ -54,7 +54,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             split
             class="no-outline saved-views-dropdown no-border"
           >
-            <q-list>
+            <q-list data-test="logs-search-saved-view-list">
               <q-item-label header class="q-pa-sm">{{
                 t("search.savedViewDropdownLabel")
               }}</q-item-label>
@@ -130,7 +130,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             class="no-outline saved-views-dropdown no-border btn-function"
             @click="fnSavedFunctionDialog"
           >
-            <q-list>
+            <q-list data-test="logs-search-saved-function-list">
               <q-item-label header class="q-pa-sm">{{
                 t("search.functionPlaceholder")
               }}</q-item-label>
@@ -164,19 +164,44 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             </q-list>
           </q-btn-dropdown>
         </q-btn-group>
-        <q-btn
-          data-test="logs-search-bar-reset-function-btn"
-          class="q-mr-sm download-logs-btn q-px-sm"
-          size="sm"
-          v-bind:disable="
-            searchObj.data.queryResults &&
-            searchObj.data.queryResults.hasOwnProperty('hits') &&
-            !searchObj.data.queryResults.hits.length
-          "
-          icon="download"
-          :title="t('search.exportLogs')"
-          @click="downloadLogs"
-        ></q-btn>
+        <q-btn-group class="q-ml-xs no-outline q-pa-none no-border">
+          <q-btn-dropdown
+            data-test="logs-search-bar-reset-function-btn"
+            class="q-mr-sm download-logs-btn q-px-xs"
+            size="sm"
+            icon="download"
+            :title="t('search.exportLogs')"
+          >
+            <q-list>
+              <q-item
+                class="q-pa-sm saved-view-item"
+                clickable
+                v-close-popup
+                v-bind:disable="
+                  searchObj.data.queryResults &&
+                  searchObj.data.queryResults.hasOwnProperty('hits') &&
+                  !searchObj.data.queryResults.hits.length
+                "
+              >
+                <q-item-section
+                  @click.stop="downloadLogs(searchObj.data.queryResults.hits)"
+                  v-close-popup
+                >
+                  <q-item-label>{{ t("search.downloadTable") }}</q-item-label>
+                </q-item-section>
+              </q-item>
+              <q-separator />
+              <q-item class="q-pa-sm saved-view-item" clickable v-close-popup>
+                <q-item-section
+                  @click.stop="toggleCustomDownloadDialog"
+                  v-close-popup
+                >
+                  <q-item-label>{{ t("search.customRange") }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </q-btn-dropdown>
+        </q-btn-group>
         <q-btn
           data-test="logs-search-bar-share-link-btn"
           class="q-mr-sm download-logs-btn q-px-sm"
@@ -217,7 +242,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               class="q-pa-none search-button"
               @click="handleRunQuery"
               :disable="
-                searchObj.loading ||
+                searchObj.loading == 'true' ||
                 (searchObj.data.hasOwnProperty('streamResults') &&
                   searchObj.data.streamResults.length == 0)
               "
@@ -297,6 +322,91 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             :label="t('confirmDialog.ok')"
             color="positive"
             @click="confirmDialogOK"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+    <q-dialog
+      ref="confirmSavedViewDialog"
+      v-model="confirmSavedViewDialogVisible"
+    >
+      <q-card>
+        <q-card-section>
+          {{ confirmMessageSavedView }}
+        </q-card-section>
+
+        <q-card-actions align="right">
+          <q-btn
+            data-test="logs-search-bar-confirm-dialog-cancel-btn"
+            :label="t('confirmDialog.cancel')"
+            color="primary"
+            @click="cancelConfirmDialog"
+          />
+          <q-btn
+            data-test="logs-search-bar-confirm-dialog-ok-btn"
+            :label="t('confirmDialog.ok')"
+            color="positive"
+            @click="confirmDialogOK"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+    <q-dialog v-model="customDownloadDialog">
+      <q-card>
+        <q-card-section>
+          {{ t("search.customDownloadMessage") }}
+        </q-card-section>
+
+        <q-card-section>
+          <q-input
+            type="number"
+            data-test="custom-download-initial-number-input"
+            v-model="downloadCustomInitialNumber"
+            :label="t('search.initialNumber')"
+            default-value="0"
+            color="input-border"
+            bg-color="input-bg"
+            class="showLabelOnTop"
+            stack-label
+            outlined
+            filled
+            dense
+            tabindex="0"
+            min="0"
+          />
+          <q-select
+            data-test="custom-download-range-select"
+            v-model="downloadCustomRange"
+            :options="downloadCustomRangeOptions"
+            :label="t('search.range')"
+            color="input-border"
+            bg-color="input-bg"
+            class="q-py-sm showLabelOnTop"
+            stack-label
+            outlined
+            filled
+            dense
+          />
+        </q-card-section>
+
+        <q-card-actions align="right">
+          <q-btn
+            unelevated
+            no-caps
+            class="q-mr-sm text-bold"
+            data-test="logs-search-bar-confirm-dialog-cancel-btn"
+            :label="t('confirmDialog.cancel')"
+            color="secondary"
+            v-close-popup
+          />
+          <q-btn
+            unelevated
+            no-caps
+            class="q-mr-sm text-bold"
+            data-test="logs-search-bar-confirm-dialog-ok-btn"
+            :label="t('search.btnDownload')"
+            color="primary"
+            @click="downloadRangeData"
           />
         </q-card-actions>
       </q-card>
@@ -507,6 +617,8 @@ import {
   watch,
   toRaw,
   onActivated,
+  onUnmounted,
+  onDeactivated,
 } from "vue";
 import { useI18n } from "vue-i18n";
 import { onBeforeRouteUpdate, useRouter } from "vue-router";
@@ -518,6 +630,7 @@ import useLogs from "@/composables/useLogs";
 import QueryEditor from "@/components/QueryEditor.vue";
 import SyntaxGuide from "./SyntaxGuide.vue";
 import jsTransformService from "@/services/jstransform";
+import searchService from "@/services/search";
 
 import { Parser } from "node-sql-parser/build/mysql";
 import segment from "@/services/segment_analytics";
@@ -532,6 +645,7 @@ import useSqlSuggestions from "@/composables/useSuggestions";
 import { mergeDeep, b64DecodeUnicode, getImageURL } from "@/utils/zincutils";
 import savedviewsService from "@/services/saved_views";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
+import { cloneDeep } from "lodash-es";
 
 const defaultValue: any = () => {
   return {
@@ -584,6 +698,57 @@ export default defineComponent({
     confirmDeleteSavedViews() {
       this.deleteSavedViews();
     },
+    toggleCustomDownloadDialog() {
+      this.customDownloadDialog = true;
+    },
+    downloadRangeData() {
+      if (
+        this.downloadCustomInitialNumber < 0 ||
+        this.downloadCustomInitialNumber == ""
+      ) {
+        this.$q.notify({
+          message: "Initial number must be positive number.",
+          color: "negative",
+          position: "top",
+          timeout: 2000,
+        });
+        return;
+      }
+      // const queryReq = this.buildSearch();
+      // console.log(this.searchObj.data.customDownloadQueryObj)
+      this.searchObj.data.customDownloadQueryObj.query.from = parseInt(
+        this.downloadCustomInitialNumber
+      );
+      this.searchObj.data.customDownloadQueryObj.query.size =
+        this.downloadCustomRange;
+      searchService
+        .search({
+          org_identifier: this.searchObj.organizationIdetifier,
+          query: this.searchObj.data.customDownloadQueryObj,
+          page_type: this.searchObj.data.stream.streamType,
+        })
+        .then((res) => {
+          this.customDownloadDialog = false;
+          if (res.data.hits.length > 0) {
+            this.downloadLogs(res.data.hits);
+          } else {
+            this.$q.notify({
+              message: "No data found to download.",
+              color: "positive",
+              position: "top",
+              timeout: 2000,
+            });
+          }
+        })
+        .catch((err) => {
+          this.$q.notify({
+            message: err.message,
+            color: "negative",
+            position: "top",
+            timeout: 2000,
+          });
+        });
+    },
   },
   props: {
     fieldValues: {
@@ -607,6 +772,9 @@ export default defineComponent({
       getStreams,
       updateUrlQueryParams,
       generateURLQuery,
+      buildSearch,
+      resetStreamData,
+      loadStreamLists,
     } = useLogs();
     const queryEditorRef = ref(null);
 
@@ -622,6 +790,7 @@ export default defineComponent({
     const saveFunctionLoader = ref(false);
 
     const confirmDialogVisible: boolean = ref(false);
+    const confirmSavedViewDialogVisible: boolean = ref(false);
     let confirmCallback;
     let fnEditorobj: any = null;
     let streamName = "";
@@ -640,7 +809,7 @@ export default defineComponent({
     } = useSqlSuggestions();
 
     const refreshTimeChange = (item) => {
-      searchObj.meta.refreshInterval = item.value;
+      searchObj.meta.refreshInterval = Number(item.value);
     };
 
     const isSavedViewAction = ref("create");
@@ -785,10 +954,10 @@ export default defineComponent({
       return csv;
     };
 
-    const downloadLogs = () => {
+    const downloadLogs = (data) => {
       const filename = "logs-data.csv";
-      const data = jsonToCsv(searchObj.data.queryResults.hits);
-      const file = new File([data], filename, {
+      const dataobj = jsonToCsv(data);
+      const file = new File([dataobj], filename, {
         type: "text/csv",
       });
       const url = URL.createObjectURL(file);
@@ -878,23 +1047,55 @@ export default defineComponent({
     onMounted(async () => {
       initFunctionEditor();
 
-      if (router.currentRoute.value.query.functionContent) {
+      if (
+        router.currentRoute.value.query.functionContent ||
+        searchObj.data.tempFunctionContent
+      ) {
         searchObj.meta.toggleFunction = true;
-        fnEditorobj.setValue(
-          b64DecodeUnicode(router.currentRoute.value.query.functionContent)
-        );
+        const fnContent = router.currentRoute.value.query.functionContent
+          ? b64DecodeUnicode(router.currentRoute.value.query.functionContent)
+          : searchObj.data.tempFunctionContent;
+        fnEditorobj.setValue(fnContent);
         fnEditorobj.layout();
         searchObj.config.fnSplitterModel = 60;
       }
 
       window.addEventListener("click", () => {
         fnEditorobj.layout();
-        // queryEditorRef.value.resetEditorLayout();
+      });
+    });
+
+    onUnmounted(() => {
+      window.removeEventListener("click", () => {
+        fnEditorobj.layout();
       });
     });
 
     onActivated(() => {
       udpateQuery();
+
+      if (
+        router.currentRoute.value.query.functionContent ||
+        searchObj.data.tempFunctionContent
+      ) {
+        searchObj.meta.toggleFunction = true;
+        const fnContent = router.currentRoute.value.query.functionContent
+          ? b64DecodeUnicode(router.currentRoute.value.query.functionContent)
+          : searchObj.data.tempFunctionContent;
+        fnEditorobj.setValue(fnContent);
+        fnEditorobj.layout();
+        searchObj.config.fnSplitterModel = 60;
+        window.removeEventListener("click", () => {
+          fnEditorobj.layout();
+        });
+      }
+      fnEditorobj.layout();
+    });
+
+    onDeactivated(() => {
+      window.removeEventListener("click", () => {
+        fnEditorobj.layout();
+      });
     });
 
     const saveFunction = () => {
@@ -1073,7 +1274,13 @@ export default defineComponent({
       confirmCallback = callback;
     };
 
+    const showSavedViewConfirmDialog = (callback) => {
+      confirmSavedViewDialogVisible.value = true;
+      confirmCallback = callback;
+    };
+
     const cancelConfirmDialog = () => {
+      confirmSavedViewDialogVisible.value = false;
       confirmDialogVisible.value = false;
       confirmCallback = null;
     };
@@ -1139,51 +1346,130 @@ export default defineComponent({
               store.dispatch("setTimezone", extractedObj.data.timezone);
             }
 
-            extractedObj.data.stream.streamLists =
-              searchObj.data.stream.streamLists;
-            extractedObj.data.transforms = searchObj.data.transforms;
-            extractedObj.data.stream.functions =
-              searchObj.data.stream.functions;
-            extractedObj.data.histogram = {
-              xData: [],
-              yData: [],
-              chartParams: {},
-            };
-            extractedObj.data.savedViews = searchObj.data.savedViews;
-            extractedObj.data.queryResults = [];
-            extractedObj.meta.scrollInfo = {};
-            searchObj.value = mergeDeep(searchObj, extractedObj);
-            await nextTick();
-            if (extractedObj.data.tempFunctionContent != "") {
-              populateFunctionImplementation(
-                {
-                  name: "",
-                  function: searchObj.data.tempFunctionContent,
-                },
-                false
-              );
-              searchObj.data.tempFunctionContent =
-                extractedObj.data.tempFunctionContent;
-              searchObj.meta.functionEditorPlaceholderFlag = false;
-            } else {
-              populateFunctionImplementation(
-                {
-                  name: "",
-                  function: "",
-                },
-                false
-              );
-              searchObj.data.tempFunctionContent = "";
-              searchObj.meta.functionEditorPlaceholderFlag = true;
+            if (!extractedObj.data.stream.hasOwnProperty("streamType")) {
+              extractedObj.data.stream.streamType = "logs";
             }
-            dateTimeRef.value.setSavedDate(searchObj.data.datetime);
-            if (searchObj.meta.refreshInterval != "0") {
-              onRefreshIntervalUpdate();
+
+            if (
+              searchObj.data.stream.streamType ==
+              extractedObj.data.stream.streamType
+            ) {
+              // if (
+              //   extractedObj.data.stream.selectedStream.value !=
+              //   searchObj.data.stream.selectedStream.value
+              // ) {
+              //   extractedObj.data.stream.streamLists =
+              //     searchObj.data.stream.streamLists;
+              // }
+              delete extractedObj.data.stream.streamLists;
+              delete searchObj.data.stream.selectedStream;
+              extractedObj.data.transforms = searchObj.data.transforms;
+              extractedObj.data.stream.functions =
+                searchObj.data.stream.functions;
+              extractedObj.data.histogram = {
+                xData: [],
+                yData: [],
+                chartParams: {},
+              };
+              extractedObj.data.savedViews = searchObj.data.savedViews;
+              extractedObj.data.queryResults = [];
+              extractedObj.meta.scrollInfo = {};
+              searchObj.value = mergeDeep(searchObj, extractedObj);
+              await nextTick();
+              if (extractedObj.data.tempFunctionContent != "") {
+                populateFunctionImplementation(
+                  {
+                    name: "",
+                    function: searchObj.data.tempFunctionContent,
+                  },
+                  false
+                );
+                searchObj.data.tempFunctionContent =
+                  extractedObj.data.tempFunctionContent;
+                searchObj.meta.functionEditorPlaceholderFlag = false;
+              } else {
+                populateFunctionImplementation(
+                  {
+                    name: "",
+                    function: "",
+                  },
+                  false
+                );
+                searchObj.data.tempFunctionContent = "";
+                searchObj.meta.functionEditorPlaceholderFlag = true;
+              }
+              dateTimeRef.value.setSavedDate(searchObj.data.datetime);
+              if (searchObj.meta.refreshInterval != "0") {
+                onRefreshIntervalUpdate();
+              } else {
+                clearInterval(store.state.refreshIntervalID);
+              }
+              await updatedLocalLogFilterField();
+              await getStreams("logs", true);
             } else {
-              clearInterval(store.state.refreshIntervalID);
+              // ----- Here we are explicitly handling stream change -----
+              resetStreamData();
+              searchObj.data.stream.streamType =
+                extractedObj.data.stream.streamType;
+              // Here copying selected stream object, as in loadStreamLists() we are setting selected stream object to empty object
+              // After loading stream list, we are setting selected stream object to copied object
+              const selectedStream = cloneDeep(
+                extractedObj.data.stream.selectedStream
+              );
+
+              extractedObj.data.transforms = searchObj.data.transforms;
+              extractedObj.data.histogram = {
+                xData: [],
+                yData: [],
+                chartParams: {},
+              };
+              extractedObj.data.savedViews = searchObj.data.savedViews;
+              extractedObj.data.queryResults = [];
+              extractedObj.meta.scrollInfo = {};
+
+              searchObj.value = mergeDeep(searchObj, extractedObj);
+              searchObj.data.streamResults = {};
+
+              const streamData = await getStreams(
+                searchObj.data.stream.streamType,
+                true
+              );
+              searchObj.data.streamResults = streamData;
+              await loadStreamLists();
+              searchObj.data.stream.selectedStream = selectedStream;
+              // searchObj.value = mergeDeep(searchObj, extractedObj);
+
+              await nextTick();
+              if (extractedObj.data.tempFunctionContent != "") {
+                populateFunctionImplementation(
+                  {
+                    name: "",
+                    function: searchObj.data.tempFunctionContent,
+                  },
+                  false
+                );
+                searchObj.data.tempFunctionContent =
+                  extractedObj.data.tempFunctionContent;
+                searchObj.meta.functionEditorPlaceholderFlag = false;
+              } else {
+                populateFunctionImplementation(
+                  {
+                    name: "",
+                    function: "",
+                  },
+                  false
+                );
+                searchObj.data.tempFunctionContent = "";
+                searchObj.meta.functionEditorPlaceholderFlag = true;
+              }
+              dateTimeRef.value.setSavedDate(searchObj.data.datetime);
+              if (searchObj.meta.refreshInterval != "0") {
+                onRefreshIntervalUpdate();
+              } else {
+                clearInterval(store.state.refreshIntervalID);
+              }
+              await updatedLocalLogFilterField();
             }
-            await updatedLocalLogFilterField();
-            await getStreams("logs", true);
             $q.notify({
               message: `${item.view_name} view applied successfully.`,
               color: "positive",
@@ -1191,10 +1477,14 @@ export default defineComponent({
               timeout: 1000,
             });
             setTimeout(async () => {
-              searchObj.loading = true;
-              await getQueryData();
-              store.dispatch("setSavedViewFlag", false);
-              updateUrlQueryParams();
+              try {
+                searchObj.loading = true;
+                await getQueryData();
+                store.dispatch("setSavedViewFlag", false);
+                updateUrlQueryParams();
+              } catch (e) {
+                console.log(e);
+              }
             }, 1000);
 
             // } else {
@@ -1248,11 +1538,14 @@ export default defineComponent({
         }
       } else {
         if (savedViewSelectedName.value.view_id) {
-          saveViewLoader.value = true;
-          updateSavedViews(
-            savedViewSelectedName.value.view_id,
-            savedViewSelectedName.value.view_name
-          );
+          saveViewLoader.value = false;
+          showSavedViewConfirmDialog(() => {
+            saveViewLoader.value = true;
+            updateSavedViews(
+              savedViewSelectedName.value.view_id,
+              savedViewSelectedName.value.view_name
+            );
+          });
         } else {
           $q.notify({
             message: `Please select saved view to update.`,
@@ -1436,6 +1729,7 @@ export default defineComponent({
               isSavedViewAction.value = "create";
               savedViewSelectedName.value = "";
               saveViewLoader.value = false;
+              confirmSavedViewDialogVisible.value = false;
             } else {
               saveViewLoader.value = false;
               $q.notify({
@@ -1503,9 +1797,20 @@ export default defineComponent({
     };
 
     const resetFilters = () => {
-      searchObj.data.query = "";
+      if (searchObj.meta.sqlMode == true) {
+        searchObj.data.query = `SELECT * FROM "${searchObj.data.stream.selectedStream.value}"`;
+      } else {
+        searchObj.data.query = "";
+      }
       searchObj.data.editorValue = "";
+      queryEditorRef.value.setValue(searchObj.data.query);
+      handleRunQuery();
     };
+
+    const customDownloadDialog = ref(false);
+    const downloadCustomInitialNumber = ref(0);
+    const downloadCustomRange = ref(100);
+    const downloadCustomRangeOptions = ref([100, 500, 1000, 5000, 10000]);
 
     return {
       t,
@@ -1522,6 +1827,7 @@ export default defineComponent({
       updateQueryValue,
       updateDateTime,
       showConfirmDialog,
+      showSavedViewConfirmDialog,
       cancelConfirmDialog,
       confirmDialogOK,
       udpateQuery,
@@ -1560,6 +1866,12 @@ export default defineComponent({
       shareLink,
       getImageURL,
       resetFilters,
+      customDownloadDialog,
+      downloadCustomInitialNumber,
+      downloadCustomRange,
+      downloadCustomRangeOptions,
+      buildSearch,
+      confirmSavedViewDialogVisible,
     };
   },
   computed: {
@@ -1572,8 +1884,14 @@ export default defineComponent({
     confirmMessage() {
       return "Are you sure you want to update the function?";
     },
+    confirmMessageSavedView() {
+      return "Are you sure you want to update the saved view?";
+    },
     resetFunction() {
       return this.searchObj.data.tempFunctionName;
+    },
+    resetFunctionDefination() {
+      return this.searchObj.data.tempFunctionContent;
     },
   },
   watch: {
@@ -1636,6 +1954,9 @@ export default defineComponent({
       if (newVal == "" && store.state.savedViewFlag == false) {
         this.resetFunctionContent();
       }
+    },
+    resetFunctionDefination(newVal) {
+      if (newVal == "") this.resetFunctionContent();
     },
   },
 });
@@ -1878,9 +2199,14 @@ export default defineComponent({
   padding: 4px 5px !important;
 }
 
-.body--dark{
+.body--dark {
   .btn-function {
     filter: brightness(100);
   }
+}
+
+.q-pagination__middle > .q-btn {
+  min-width: 30px !important;
+  max-width: 30px !important;
 }
 </style>

@@ -16,9 +16,8 @@
 use std::sync::Arc;
 
 use config::{meta::stream::StreamType, RwHashSet};
+use infra::db as infra_db;
 use once_cell::sync::Lazy;
-
-use crate::common::infra::db as infra_db;
 
 static CACHE: Lazy<RwHashSet<String>> = Lazy::new(Default::default);
 
@@ -40,8 +39,8 @@ fn mk_key(
 // date_range is a tuple of (start, end), eg: (2023-01-02, 2023-01-03)
 pub async fn delete_stream(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
     date_range: Option<(&str, &str)>,
 ) -> Result<(), anyhow::Error> {
     let db = infra_db::get_db().await;
@@ -61,8 +60,8 @@ pub async fn delete_stream(
 // set the stream is processing by the node
 pub async fn process_stream(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
     date_range: Option<(&str, &str)>,
     node: &str,
 ) -> Result<(), anyhow::Error> {
@@ -77,8 +76,8 @@ pub async fn process_stream(
 // get the stream processing information
 pub async fn get_stream(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
     date_range: Option<(&str, &str)>,
 ) -> String {
     let db = infra_db::get_db().await;
@@ -93,8 +92,8 @@ pub async fn get_stream(
 // check if stream is deleting from cache
 pub fn is_deleting_stream(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
     date_range: Option<(&str, &str)>,
 ) -> bool {
     CACHE.contains(&mk_key(org_id, stream_type, stream_name, date_range))
@@ -102,8 +101,8 @@ pub fn is_deleting_stream(
 
 pub async fn delete_stream_done(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
     date_range: Option<(&str, &str)>,
 ) -> Result<(), anyhow::Error> {
     let db = infra_db::get_db().await;

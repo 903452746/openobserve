@@ -19,7 +19,13 @@ use actix_web::{http, web, HttpResponse};
 use arrow_schema::Schema;
 use bytes::BytesMut;
 use chrono::{Duration, Utc};
-use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
+use config::{
+    cluster,
+    meta::{stream::StreamType, usage::UsageType},
+    metrics,
+    utils::{flatten, json},
+    CONFIG, DISTINCT_FIELDS,
+};
 use opentelemetry::trace::{SpanId, TraceId};
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
@@ -28,16 +34,11 @@ use prost::Message;
 
 use super::StreamMeta;
 use crate::{
-    common::{
-        infra::cluster,
-        meta::{
-            alerts::Alert,
-            http::HttpResponse as MetaHttpResponse,
-            ingestion::StreamStatus,
-            stream::{SchemaRecords, StreamParams},
-            usage::UsageType,
-        },
-        utils::{flatten, json},
+    common::meta::{
+        alerts::Alert,
+        http::HttpResponse as MetaHttpResponse,
+        ingestion::StreamStatus,
+        stream::{SchemaRecords, StreamParams},
     },
     handler::http::request::CONTENT_TYPE_JSON,
     service::{
@@ -58,10 +59,18 @@ pub async fn logs_proto_handler(
     thread_id: usize,
     body: web::Bytes,
     in_stream_name: Option<&str>,
+    user_email: &str,
 ) -> Result<HttpResponse, std::io::Error> {
     let request = ExportLogsServiceRequest::decode(body).expect("Invalid protobuf");
-    match super::otlp_grpc::handle_grpc_request(org_id, thread_id, request, false, in_stream_name)
-        .await
+    match super::otlp_grpc::handle_grpc_request(
+        org_id,
+        thread_id,
+        request,
+        false,
+        in_stream_name,
+        user_email,
+    )
+    .await
     {
         Ok(res) => Ok(res),
         Err(e) => {
@@ -83,6 +92,7 @@ pub async fn logs_json_handler(
     thread_id: usize,
     body: web::Bytes,
     in_stream_name: Option<&str>,
+    user_email: &str,
 ) -> Result<HttpResponse, std::io::Error> {
     if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
         return Ok(
@@ -134,7 +144,7 @@ pub async fn logs_json_handler(
     let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut distinct_values = Vec::with_capacity(16);
     let mut stream_status = StreamStatus::new(stream_name);
-    let mut trigger: TriggerAlertData = None;
+    let mut trigger: Option<TriggerAlertData> = None;
 
     let min_ts =
         (Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
@@ -265,7 +275,7 @@ pub async fn logs_json_handler(
                 let mut value: json::Value = json::to_value(log).unwrap();
 
                 // get json object
-                let mut local_val = value.as_object_mut().unwrap();
+                let local_val = value.as_object_mut().unwrap();
 
                 if log.get("attributes").is_some() {
                     let attributes = log.get("attributes").unwrap().as_array().unwrap();
@@ -283,29 +293,38 @@ pub async fn logs_json_handler(
                 local_val.remove("body_stringvalue");
 
                 // process trace id
-                let trace_id = if log.get("trace_id").is_some() {
+                if log.get("trace_id").is_some() {
                     local_val.remove("trace_id");
-                    log.get("trace_id").unwrap()
-                } else {
-                    local_val.remove("traceIds");
-                    log.get("traceId").unwrap()
+                    let trace_id = log.get("trace_id").unwrap();
+                    let trace_id_str = trace_id.as_str().unwrap();
+                    let trace_id_bytes = hex::decode(trace_id_str).unwrap().try_into().unwrap();
+                    let trace_id = TraceId::from_bytes(trace_id_bytes).to_string();
+                    local_val.insert("trace_id".to_owned(), trace_id.into());
+                } else if log.get("traceId").is_some() {
+                    local_val.remove("traceId");
+                    let trace_id = log.get("traceId").unwrap();
+                    let trace_id_str = trace_id.as_str().unwrap();
+                    let trace_id_bytes = hex::decode(trace_id_str).unwrap().try_into().unwrap();
+                    let trace_id = TraceId::from_bytes(trace_id_bytes).to_string();
+                    local_val.insert("trace_id".to_owned(), trace_id.into());
                 };
-                let trace_id_str = trace_id.as_str().unwrap();
-                let trace_id_bytes = hex::decode(trace_id_str).unwrap().try_into().unwrap();
-                let trace_id = TraceId::from_bytes(trace_id_bytes).to_string();
-                local_val.insert("trace_id".to_owned(), trace_id.into());
 
                 // process span id
-
-                let span_id = if log.get("span_id").is_some() {
-                    log.get("span_id").unwrap()
-                } else {
-                    log.get("spanId").unwrap()
+                if log.get("span_id").is_some() {
+                    local_val.remove("span_id");
+                    let span_id = log.get("span_id").unwrap();
+                    let span_id_str = span_id.as_str().unwrap();
+                    let span_id_bytes = hex::decode(span_id_str).unwrap().try_into().unwrap();
+                    let span_id = SpanId::from_bytes(span_id_bytes).to_string();
+                    local_val.insert("span_id".to_owned(), span_id.into());
+                } else if log.get("spanId").is_some() {
+                    local_val.remove("spanId");
+                    let span_id = log.get("spanId").unwrap();
+                    let span_id_str = span_id.as_str().unwrap();
+                    let span_id_bytes = hex::decode(span_id_str).unwrap().try_into().unwrap();
+                    let span_id = SpanId::from_bytes(span_id_bytes).to_string();
+                    local_val.insert("span_id".to_owned(), span_id.into());
                 };
-                let span_id_str = span_id.as_str().unwrap();
-                let span_id_bytes = hex::decode(span_id_str).unwrap().try_into().unwrap();
-                let span_id = SpanId::from_bytes(span_id_bytes).to_string();
-                local_val.insert("span_id".to_owned(), span_id.into());
 
                 if log.get("body").is_some() {
                     let body = log.get("body").unwrap().get("stringValue").unwrap();
@@ -342,7 +361,28 @@ pub async fn logs_json_handler(
                     .unwrap();
                 }
 
-                local_val = value.as_object_mut().unwrap();
+                // get json object
+                let local_val = match value.take() {
+                    json::Value::Object(v) => v,
+                    _ => unreachable!(),
+                };
+
+                let mut to_add_distinct_values = vec![];
+                // get distinct_value item
+                for field in DISTINCT_FIELDS.iter() {
+                    if let Some(val) = local_val.get(field) {
+                        if !val.is_null() {
+                            to_add_distinct_values.push(distinct_values::DvItem {
+                                stream_type: StreamType::Logs,
+                                stream_name: stream_name.to_string(),
+                                field_name: field.to_string(),
+                                field_value: val.as_str().unwrap().to_string(),
+                                filter_name: "".to_string(),
+                                filter_value: "".to_string(),
+                            });
+                        }
+                    }
+                }
 
                 let local_trigger = match super::add_valid_record(
                     &StreamMeta {
@@ -371,21 +411,8 @@ pub async fn logs_json_handler(
                     trigger = local_trigger;
                 }
 
-                // get distinct_value item
-                for field in DISTINCT_FIELDS.iter() {
-                    if let Some(val) = local_val.get(field) {
-                        if !val.is_null() {
-                            distinct_values.push(distinct_values::DvItem {
-                                stream_type: StreamType::Logs,
-                                stream_name: stream_name.to_string(),
-                                field_name: field.to_string(),
-                                field_value: val.as_str().unwrap().to_string(),
-                                filter_name: "".to_string(),
-                                filter_value: "".to_string(),
-                            });
-                        }
-                    }
-                }
+                // add distinct values
+                distinct_values.extend(to_add_distinct_values);
             }
         }
     }
@@ -428,6 +455,7 @@ pub async fn logs_json_handler(
         .inc();
 
     req_stats.response_time = start.elapsed().as_secs_f64();
+    req_stats.user_email = Some(user_email.to_string());
     // metric + data usage
     report_request_usage_stats(
         req_stats,

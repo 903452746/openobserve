@@ -17,17 +17,16 @@ use std::ops::Range;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use config::utils::time::BASE_TIME;
 use futures::{stream::BoxStream, StreamExt};
+use infra::{cache::file_data, storage};
 use object_store::{
     path::Path, GetOptions, GetResult, GetResultPayload, ListResult, MultipartId, ObjectMeta,
     ObjectStore, PutOptions, PutResult, Result,
 };
 use tokio::io::AsyncWrite;
 
-use crate::common::{
-    infra::{cache::file_data, storage},
-    utils::time::BASE_TIME,
-};
+use super::GetRangeExt;
 
 /// File system with memory cache
 #[derive(Debug, Default)]
@@ -105,7 +104,12 @@ impl ObjectStore for FS {
                     version: None,
                 };
                 let (range, data) = match options.range {
-                    Some(range) => (range.clone(), data.slice(range)),
+                    Some(range) => {
+                        let r = range
+                            .as_range(data.len())
+                            .map_err(|e| super::Error::BadRange(e.to_string()))?;
+                        (r.clone(), data.slice(r))
+                    }
                     None => (0..data.len(), data),
                 };
                 Ok(GetResult {

@@ -15,12 +15,13 @@
 
 use std::sync::Arc;
 
+use config::utils::json;
+use infra::db as infra_db;
 use itertools::Itertools;
 
 use crate::common::{
-    infra::{config::ALERTS_TEMPLATES, db as infra_db},
+    infra::config::ALERTS_TEMPLATES,
     meta::{alerts::templates::Template, organization::DEFAULT_ORG},
-    utils::json,
 };
 
 pub async fn get(org_id: &str, name: &str) -> Result<Template, anyhow::Error> {
@@ -42,15 +43,15 @@ pub async fn get(org_id: &str, name: &str) -> Result<Template, anyhow::Error> {
     Ok(json::from_slice(&db.get(&key).await?).unwrap())
 }
 
-pub async fn set(org_id: &str, name: &str, template: Template) -> Result<(), anyhow::Error> {
+pub async fn set(org_id: &str, template: &mut Template) -> Result<(), anyhow::Error> {
     let db = infra_db::get_db().await;
-    let mut template = template;
+
     template.is_default = Some(org_id == DEFAULT_ORG);
-    let key = format!("/templates/{org_id}/{name}");
+    let key = format!("/templates/{org_id}/{}", template.name);
     Ok(db
         .put(
             &key,
-            json::to_vec(&template).unwrap().into(),
+            json::to_vec(template).unwrap().into(),
             infra_db::NEED_WATCH,
         )
         .await?)

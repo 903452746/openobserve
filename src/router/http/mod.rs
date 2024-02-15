@@ -15,10 +15,10 @@
 
 use std::time::Duration;
 
-use ::config::{meta::cluster::Role, CONFIG};
+use ::config::{meta::cluster::Role, utils::rand::get_rand_element, CONFIG};
 use actix_web::{http::Error, route, web, HttpRequest, HttpResponse};
 
-use crate::common::{infra::cluster, utils::rand::get_rand_element};
+use crate::common::infra::cluster;
 
 const QUERIER_ROUTES: [&str; 13] = [
     "/summary",
@@ -176,11 +176,13 @@ async fn dispatch(
     }
 
     // set body
-    let body = resp
-        .body()
-        .limit(CONFIG.limit.req_payload_limit)
-        .await
-        .unwrap();
+    let body = match resp.body().limit(CONFIG.limit.req_payload_limit).await {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("{}: {}", new_url.value, e);
+            return Ok(HttpResponse::ServiceUnavailable().body(e.to_string()));
+        }
+    };
     Ok(new_resp.body(body))
 }
 

@@ -21,13 +21,11 @@ use std::{
 use async_trait::async_trait;
 use config::CONFIG;
 use datafusion::{arrow::datatypes::Schema, error::DataFusionError, prelude::SessionContext};
+use infra::{cache::tmpfs, errors::Result};
 use promql_parser::parser;
 
 use crate::{
-    common::{
-        infra::{cache::tmpfs, errors::Result},
-        meta::stream::ScanStats,
-    },
+    common::meta::stream::ScanStats,
     handler::grpc::cluster_rpc,
     service::{
         promql::{value, Query, TableProvider, DEFAULT_LOOKBACK},
@@ -50,19 +48,19 @@ impl TableProvider for StorageProvider {
         org_id: &str,
         stream_name: &str,
         time_range: (i64, i64),
-        filters: &[(&str, Vec<&str>)],
+        filters: &mut [(&str, Vec<String>)],
     ) -> datafusion::error::Result<Vec<(SessionContext, Arc<Schema>, ScanStats)>> {
         let mut resp = Vec::new();
         // register storage table
+        let session_id = self.session_id.to_owned() + "-storage-" + stream_name;
         let ctx =
-            storage::create_context(&self.session_id, org_id, stream_name, time_range, filters)
-                .await?;
+            storage::create_context(&session_id, org_id, stream_name, time_range, filters).await?;
         resp.push(ctx);
         // register Wal table
         if self.need_wal {
+            let session_id = self.session_id.to_owned() + "-wal-" + stream_name;
             let wal_ctx_list =
-                wal::create_context(&self.session_id, org_id, stream_name, time_range, filters)
-                    .await?;
+                wal::create_context(&session_id, org_id, stream_name, time_range, filters).await?;
             for ctx in wal_ctx_list {
                 resp.push(ctx);
             }
@@ -121,7 +119,7 @@ pub async fn search(
     // clear session
     search::datafusion::storage::file_list::clear(&session_id);
     // clear tmpfs
-    tmpfs::delete(&format!("/{}/", session_id), true).unwrap();
+    tmpfs::delete(&session_id, true).unwrap();
 
     scan_stats.format_to_mb();
     let mut resp = cluster_rpc::MetricsQueryResponse {

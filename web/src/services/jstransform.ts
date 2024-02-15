@@ -43,7 +43,7 @@ const jstransform = {
     stream_type: string,
     data: any
   ) => {
-    return http().post(
+    return http().put(
       `/api/${org_identifier}/${stream_name}/functions/${data.name}?type=${stream_type}`,
       data
     );
@@ -64,7 +64,7 @@ const jstransform = {
     stream_type: string
   ) => {
     return http().get(
-      `/api/${org_identifier}/${stream_name}/functions?type=${stream_type}`
+      `/api/${org_identifier}/streams/${stream_name}/functions?type=${stream_type}`
     );
   },
   apply_stream_function: (
@@ -74,8 +74,8 @@ const jstransform = {
     function_name: string,
     data: any
   ) => {
-    return http().post(
-      `/api/${org_identifier}/${stream_name}/functions/${function_name}?type=${stream_type}`,
+    return http().put(
+      `/api/${org_identifier}/streams/${stream_name}/functions/${function_name}?type=${stream_type}`,
       data
     );
   },
@@ -86,7 +86,7 @@ const jstransform = {
     function_name: string
   ) => {
     return http().delete(
-      `/api/${org_identifier}/${stream_name}/functions/${function_name}?type=${stream_type}`
+      `/api/${org_identifier}/streams/${stream_name}/functions/${function_name}?type=${stream_type}`
     );
   },
   create_enrichment_table: (

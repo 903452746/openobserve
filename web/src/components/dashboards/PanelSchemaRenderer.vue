@@ -19,12 +19,43 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     <div v-show="!errorDetail" style="height: 100%; width: 100%">
       <GeoMapRenderer
         v-if="panelSchema.type == 'geomap'"
-        :data="panelData.chartType == 'geomap' ? panelData : { options: {backgroundColor: 'transparent'} }"
+        :data="
+          panelData.chartType == 'geomap'
+            ? panelData
+            : { options: { backgroundColor: 'transparent' } }
+        "
       />
       <TableRenderer
         v-else-if="panelSchema.type == 'table'"
-        :data="panelData.chartType == 'table' ? panelData : { options: {backgroundColor: 'transparent'} }"
+        :data="
+          panelData.chartType == 'table'
+            ? panelData
+            : { options: { backgroundColor: 'transparent' } }
+        "
+        ref="tableRendererRef"
       />
+      <div
+        v-else-if="panelSchema.type == 'html'"
+        class="col column"
+        style="width: 100%; height: 100%; flex: 1"
+      >
+        <HTMLRenderer
+          :htmlContent="panelSchema.htmlContent"
+          style="width: 100%; height: 100%"
+          class="col"
+        />
+      </div>
+      <div
+        v-else-if="panelSchema.type == 'markdown'"
+        class="col column"
+        style="width: 100%; height: 100%; flex: 1"
+      >
+        <MarkdownRenderer
+          :markdownContent="panelSchema.markdownContent"
+          style="width: 100%; height: 100%"
+          class="col"
+        />
+      </div>
       <ChartRenderer
         v-else
         :data="
@@ -34,12 +65,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             panelData.chartType != 'geomap' &&
             panelData.chartType != 'table')
             ? panelData
-            : { options: {backgroundColor: 'transparent'} } 
+            : { options: { backgroundColor: 'transparent' } }
         "
         @updated:data-zoom="$emit('updated:data-zoom', $event)"
       />
     </div>
-    <div v-if="!errorDetail" class="noData">{{ noData }}</div>
+    <div v-if="!errorDetail" class="noData" data-test="no-data">
+      {{ noData }}
+    </div>
     <div
       v-if="errorDetail && !panelSchema?.error_config?.custom_error_handeling"
       class="errorMessage"
@@ -80,9 +113,17 @@ import { convertPanelData } from "@/utils/dashboard/convertPanelData";
 import ChartRenderer from "@/components/dashboards/panels/ChartRenderer.vue";
 import TableRenderer from "@/components/dashboards/panels/TableRenderer.vue";
 import GeoMapRenderer from "@/components/dashboards/panels/GeoMapRenderer.vue";
+import HTMLRenderer from "./panels/HTMLRenderer.vue";
+import MarkdownRenderer from "./panels/MarkdownRenderer.vue";
 export default defineComponent({
   name: "PanelSchemaRenderer",
-  components: { ChartRenderer, TableRenderer, GeoMapRenderer },
+  components: {
+    ChartRenderer,
+    TableRenderer,
+    GeoMapRenderer,
+    HTMLRenderer,
+    MarkdownRenderer,
+  },
   props: {
     selectedTimeObj: {
       required: true,
@@ -114,6 +155,9 @@ export default defineComponent({
       variablesData,
       chartPanelRef
     );
+
+    // need tableRendererRef to access downloadTableAsCSV method
+    const tableRendererRef = ref(null);
 
     // hovered series state
     // used to show tooltip axis for all charts
@@ -221,8 +265,15 @@ export default defineComponent({
 
     // Compute the value of the 'noData' variable
     const noData = computed(() => {
+      // if panel type is 'html' or 'markdown', return an empty string
+      if (
+        panelSchema.value.type == "html" ||
+        panelSchema.value.type == "markdown"
+      ) {
+        return "";
+      }
       // Check if the queryType is 'promql'
-      if (panelSchema.value?.queryType == "promql") {
+      else if (panelSchema.value?.queryType == "promql") {
         // Check if the 'data' array has elements and every item has a non-empty 'result' array
         return data.value.length &&
           data.value.some((item: any) => item?.result?.length)
@@ -253,6 +304,7 @@ export default defineComponent({
       panelData,
       noData,
       metadata,
+      tableRendererRef,
     };
   },
 });

@@ -32,9 +32,9 @@ export const usePanelDataLoader = (
   chartPanelRef: any
 ) => {
   const log = (...args: any[]) => {
-    if (false) {
-      console.log(panelSchema?.value?.title + ": ", ...args);
-    }
+    // if (true) {
+    //   console.log(panelSchema?.value?.title + ": ", ...args);
+    // }
   };
 
   const state = reactive({
@@ -161,6 +161,10 @@ export const usePanelDataLoader = (
 
       // Checking if there are queries to execute
       if (!panelSchema.value.queries?.length || !hasAtLeastOneQuery()) {
+        log("loadData: there are no queries to execute");
+        state.loading = false;
+        state.data = [];
+        state.metadata = {}
         return;
       }
 
@@ -355,11 +359,11 @@ export const usePanelDataLoader = (
 
     //fixed variables value calculations
     //scrape interval by default 15 seconds
-    let scrapeInterval =
+    const scrapeInterval =
       store.state.organizationData.organizationSettings.scrape_interval ?? 15;
 
     // timestamp in seconds / chart panel width
-    let __interval =
+    const __interval =
       (endISOTimestamp - startISOTimestamp) /
       (chartPanelRef.value?.offsetWidth ?? 1000) /
       1000;
@@ -373,7 +377,7 @@ export const usePanelDataLoader = (
 
     // calculate rate interval in seconds
     // we need formatted interval value in seconds
-    let __rate_interval: any = Math.max(
+    const __rate_interval: any = Math.max(
       getTimeInSecondsBasedOnUnit(
         formattedInterval.value,
         formattedInterval.unit
@@ -761,10 +765,13 @@ export const usePanelDataLoader = (
     );
 
     // execute different scenarios based on the count of variables
-    if (!newDependentVariablesData?.length && !newDynamicVariablesData?.length) {
+    if (
+      !newDependentVariablesData?.length &&
+      !newDynamicVariablesData?.length
+    ) {
       // 1. Regular variables  = 0 and Dynamic variables  = 0
       // go ahead and bravly load the data
-      log("Step4: 1: Regular variables  = 0 and Dynamic variables  = 0");
+      !newDependentVariablesData?.length && !newDynamicVariablesData?.length;
 
       log(
         "Step4: 1: no variables are there, no waiting, can call the api, returning true..."

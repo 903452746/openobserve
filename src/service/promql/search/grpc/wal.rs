@@ -25,16 +25,14 @@ use datafusion::{
     prelude::SessionContext,
 };
 use futures::future::try_join_all;
+use infra::cache::tmpfs;
 use tonic::{codec::CompressionEncoding, metadata::MetadataValue, transport::Channel, Request};
 use tracing::{info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
     common::{
-        infra::{
-            cache::tmpfs,
-            cluster::{get_cached_online_ingester_nodes, get_internal_grpc_token},
-        },
+        infra::cluster::{get_cached_online_ingester_nodes, get_internal_grpc_token},
         meta::{
             search::{SearchType, Session as SearchSession},
             stream::ScanStats,
@@ -59,11 +57,11 @@ pub(crate) async fn create_context(
     org_id: &str,
     stream_name: &str,
     time_range: (i64, i64),
-    _filters: &[(&str, Vec<&str>)],
+    filters: &mut [(&str, Vec<String>)],
 ) -> Result<Vec<(SessionContext, Arc<Schema>, ScanStats)>> {
     let mut resp = vec![];
     // get file list
-    let files = get_file_list(session_id, org_id, stream_name, time_range).await?;
+    let files = get_file_list(session_id, org_id, stream_name, time_range, filters).await?;
     if files.is_empty() {
         return Ok(vec![(
             SessionContext::new(),
@@ -135,7 +133,7 @@ pub(crate) async fn create_context(
         })?;
     for (_, (mut arrow_schema, record_batches)) in record_batches_meta {
         if !record_batches.is_empty() {
-            let ctx = prepare_datafusion_context(&SearchType::Normal)?;
+            let ctx = prepare_datafusion_context(None, &SearchType::Normal)?;
             // calulate schema diff
             let mut diff_fields = HashMap::new();
             let group_fields = arrow_schema.fields();
@@ -179,6 +177,7 @@ pub(crate) async fn create_context(
         id: session_id.to_string(),
         storage_type: StorageType::Tmpfs,
         search_type: SearchType::Normal,
+        work_group: None,
     };
 
     let ctx = register_table(
@@ -201,12 +200,21 @@ async fn get_file_list(
     org_id: &str,
     stream_name: &str,
     time_range: (i64, i64),
+    filters: &[(&str, Vec<String>)],
 ) -> Result<Vec<cluster_rpc::MetricsWalFile>> {
     let nodes = get_cached_online_ingester_nodes();
     if nodes.is_none() && nodes.as_deref().unwrap().is_empty() {
         return Ok(vec![]);
     }
     let nodes = nodes.unwrap();
+
+    let mut req_filters = Vec::with_capacity(filters.len());
+    for (k, v) in filters {
+        req_filters.push(cluster_rpc::MetricsWalFileFilter {
+            field: k.to_string(),
+            value: v.clone(),
+        });
+    }
 
     let mut tasks = Vec::new();
     for node in nodes {
@@ -218,6 +226,7 @@ async fn get_file_list(
             stream_name: stream_name.to_string(),
             start_time: time_range.0,
             end_time: time_range.1,
+            filters: req_filters.clone(),
         };
         let grpc_span = info_span!("promql:search:grpc:wal:grpc_wal_file", session_id);
         let task: tokio::task::JoinHandle<

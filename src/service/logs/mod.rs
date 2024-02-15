@@ -15,19 +15,24 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use anyhow::Result;
 use arrow_schema::{DataType, Field};
-use config::{meta::stream::StreamType, utils::schema_ext::SchemaExt, CONFIG};
+use config::{
+    meta::stream::{PartitionTimeLevel, StreamType},
+    utils::{
+        json::{estimate_json_bytes, Map, Value},
+        schema_ext::SchemaExt,
+    },
+    CONFIG,
+};
 use datafusion::arrow::datatypes::Schema;
 
 use super::ingestion::{get_string_value, TriggerAlertData};
 use crate::{
-    common::{
-        meta::{
-            alerts::Alert,
-            ingestion::RecordStatus,
-            stream::{PartitionTimeLevel, SchemaRecords},
-        },
-        utils::json::{self, Map, Value},
+    common::meta::{
+        alerts::Alert,
+        ingestion::RecordStatus,
+        stream::{SchemaRecords, StreamPartition},
     },
     service::{
         ingestion::get_wal_time_key, schema::check_for_schema, stream::unwrap_partition_time_level,
@@ -149,10 +154,10 @@ async fn add_valid_record(
     stream_schema_map: &mut HashMap<String, Schema>,
     status: &mut RecordStatus,
     write_buf: &mut HashMap<String, SchemaRecords>,
-    record_val: &mut Map<String, Value>,
+    mut record_val: Map<String, Value>,
     need_trigger: bool,
-) -> Result<TriggerAlertData, anyhow::Error> {
-    let mut trigger: Vec<(Alert, Vec<Map<String, Value>>)> = Vec::new();
+) -> Result<Option<TriggerAlertData>> {
+    let mut trigger: TriggerAlertData = Vec::new();
     let timestamp: i64 = record_val
         .get(&CONFIG.common.column_timestamp)
         .unwrap()
@@ -165,7 +170,7 @@ async fn add_valid_record(
         &stream_meta.stream_name,
         StreamType::Logs,
         stream_schema_map,
-        &Value::Object(record_val.clone()),
+        &record_val,
         timestamp,
     )
     .await?;
@@ -177,27 +182,26 @@ async fn add_valid_record(
         timestamp,
         stream_meta.partition_keys,
         unwrap_partition_time_level(*stream_meta.partition_time_level, StreamType::Logs),
-        record_val,
+        &record_val,
         Some(&schema_key),
     );
 
     if schema_evolution.schema_compatible {
-        let valid_record = if schema_evolution.types_delta.is_some() {
-            let delta = schema_evolution.types_delta.unwrap();
-            let ret_val = if !CONFIG.common.widening_schema_evolution {
-                cast_to_type(record_val, delta)
-            } else if schema_evolution.is_schema_changed {
+        let valid_record = if let Some(delta) = schema_evolution.types_delta {
+            let ret_val = if !CONFIG.common.widening_schema_evolution
+                || !schema_evolution.is_schema_changed
+            {
+                cast_to_type(&mut record_val, delta)
+            } else {
                 let local_delta = delta
                     .into_iter()
                     .filter(|x| x.metadata().contains_key("zo_cast"))
                     .collect::<Vec<_>>();
                 if !local_delta.is_empty() {
-                    cast_to_type(record_val, local_delta)
+                    cast_to_type(&mut record_val, local_delta)
                 } else {
                     Ok(())
                 }
-            } else {
-                cast_to_type(record_val, delta)
             };
             match ret_val {
                 Ok(_) => true,
@@ -222,7 +226,7 @@ async fn add_valid_record(
                 );
                 if let Some(alerts) = stream_meta.stream_alerts_map.get(&key) {
                     for alert in alerts {
-                        if let Ok(Some(v)) = alert.evaluate(Some(record_val)).await {
+                        if let Ok(Some(v)) = alert.evaluate(Some(&record_val)).await {
                             trigger.push((alert.clone(), v));
                         }
                     }
@@ -239,8 +243,8 @@ async fn add_valid_record(
                     records_size: 0,
                 }
             });
-            let record_val = Value::Object(record_val.clone());
-            let record_size = json::to_vec(&record_val).unwrap_or_default().len();
+            let record_val = Value::Object(record_val);
+            let record_size = estimate_json_bytes(&record_val);
             hour_buf.records.push(Arc::new(record_val));
             hour_buf.records_size += record_size;
             status.successful += 1;
@@ -266,7 +270,7 @@ fn set_parsing_error(parse_error: &mut String, field: &Field) {
 struct StreamMeta<'a> {
     org_id: String,
     stream_name: String,
-    partition_keys: &'a Vec<String>,
+    partition_keys: &'a Vec<StreamPartition>,
     partition_time_level: &'a Option<PartitionTimeLevel>,
     stream_alerts_map: &'a HashMap<String, Vec<Alert>>,
 }

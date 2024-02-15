@@ -13,14 +13,16 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use config::{ider, CONFIG, INSTANCE_ID};
+use config::{cluster, ider, utils::file::clean_empty_dirs, CONFIG, INSTANCE_ID};
+use infra::file_list as infra_file_list;
+#[cfg(feature = "enterprise")]
+use o2_enterprise::enterprise::common::infra::config::O2_CONFIG;
 use regex::Regex;
 
 use crate::{
     common::{
-        infra::{cluster, config::SYSLOG_ENABLED, file_list as infra_file_list},
+        infra::config::SYSLOG_ENABLED,
         meta::{organization::DEFAULT_ORG, user::UserRequest},
-        utils::file::clean_empty_dirs,
     },
     service::{compact::stats::update_stats_from_file_list, db, users},
 };
@@ -112,6 +114,8 @@ pub async fn init() -> Result<(), anyhow::Error> {
     tokio::task::spawn(async move { db::alerts::watch().await });
     tokio::task::spawn(async move { db::alerts::triggers::watch().await });
     tokio::task::spawn(async move { db::organization::watch().await });
+    #[cfg(feature = "enterprise")]
+    tokio::task::spawn(async move { db::ofga::watch().await });
     tokio::task::yield_now().await; // yield let other tasks run
 
     // cache core metadata
@@ -159,9 +163,6 @@ pub async fn init() -> Result<(), anyhow::Error> {
             infra_file_list::create_table_index()
                 .await
                 .expect("file list create table index failed");
-            infra_file_list::set_initialised()
-                .await
-                .expect("file list set initialised failed");
             update_stats_from_file_list()
                 .await
                 .expect("file list remote calculate stats failed");
@@ -169,10 +170,12 @@ pub async fn init() -> Result<(), anyhow::Error> {
     }
 
     infra_file_list::create_table_index().await?;
-    infra_file_list::set_initialised().await?;
     db::file_list::remote::cache_stats()
         .await
         .expect("Load stream stats failed");
+
+    #[cfg(feature = "enterprise")]
+    db::ofga::cache().await.expect("ofga model cache failed");
 
     // check wal directory
     if cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
@@ -191,6 +194,15 @@ pub async fn init() -> Result<(), anyhow::Error> {
     tokio::task::spawn(async move { metrics::run().await });
     tokio::task::spawn(async move { prom::run().await });
     tokio::task::spawn(async move { alert_manager::run().await });
+
+    #[cfg(feature = "enterprise")]
+    o2_enterprise::enterprise::openfga::authorizer::authz::init_open_fga().await;
+
+    // RBAC model
+    #[cfg(feature = "enterprise")]
+    if O2_CONFIG.openfga.enabled {
+        crate::common::infra::ofga::init().await;
+    }
 
     // Shouldn't serve request until initialization finishes
     log::info!("Job initialization complete");

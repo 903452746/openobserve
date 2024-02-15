@@ -15,7 +15,6 @@
 
 use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
 
-use ahash::AHashMap as HashMap;
 use async_recursion::async_recursion;
 use config::CONFIG;
 use datafusion::{
@@ -27,12 +26,12 @@ use datafusion::{
     prelude::{col, lit, SessionContext},
 };
 use futures::future::try_join_all;
+use hashbrown::HashMap;
 use promql_parser::{
     label::MatchOp,
     parser::{
         token, AggregateExpr, Call, Expr as PromExpr, Function, FunctionArgs, LabelModifier,
-        MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral, TokenType, UnaryExpr,
-        VectorSelector,
+        MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral, UnaryExpr, VectorSelector,
     },
 };
 use rayon::prelude::*;
@@ -141,6 +140,7 @@ impl Engine {
                     (Value::Float(left), Value::Vector(right)) => {
                         binaries::vector_scalar_bin_op(expr, &right, left, true).await?
                     }
+                    (Value::None, Value::None) => Value::None,
                     _ => {
                         log::debug!(
                             "[PromExpr::Binary] either lhs or rhs vector is found to be empty"
@@ -244,8 +244,11 @@ impl Engine {
         if selector.name.is_none() {
             let name = selector
                 .matchers
-                .find_matcher_value(NAME_LABEL)
-                .expect("Missing selector name");
+                .find_matchers(NAME_LABEL)
+                .first()
+                .unwrap()
+                .value
+                .clone();
 
             selector.name = Some(name);
         }
@@ -322,8 +325,11 @@ impl Engine {
         if selector.name.is_none() {
             let name = selector
                 .matchers
-                .find_matcher_value(NAME_LABEL)
-                .expect("Missing selector name");
+                .find_matchers(NAME_LABEL)
+                .first()
+                .unwrap()
+                .value
+                .clone();
 
             selector.name = Some(name);
         }
@@ -405,17 +411,17 @@ impl Engine {
 
         // 1. Group by metrics (sets of label name-value pairs)
         let table_name = selector.name.as_ref().unwrap();
-        let filters = selector
+        let mut filters = selector
             .matchers
             .matchers
             .iter()
             .filter(|mat| mat.op == MatchOp::Equal)
-            .map(|mat| (mat.name.as_str(), vec![mat.value.as_str()]))
+            .map(|mat| (mat.name.as_str(), vec![mat.value.to_string()]))
             .collect::<Vec<(_, _)>>();
         let ctxs = self
             .ctx
             .table_provider
-            .create_context(&self.ctx.org_id, table_name, (start, end), &filters)
+            .create_context(&self.ctx.org_id, table_name, (start, end), &mut filters)
             .await?;
 
         let mut tasks = Vec::new();
@@ -479,7 +485,7 @@ impl Engine {
 
     async fn aggregate_exprs(
         &mut self,
-        op: &TokenType,
+        op: &token::TokenType,
         expr: &PromExpr,
         param: &Option<Box<PromExpr>>,
         modifier: &Option<LabelModifier>,

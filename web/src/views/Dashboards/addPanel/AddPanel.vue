@@ -35,6 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       </div>
       <div class="flex q-gutter-sm">
         <q-btn
+          v-if="!['html', 'markdown'].includes(dashboardPanelData.data.type)"
           outline
           padding="sm"
           class="q-mr-sm"
@@ -68,10 +69,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           no-caps
           :label="t('panel.save')"
           data-test="dashboard-panel-save"
-          @click="savePanelData.execute()"
+          @click.stop="savePanelData.execute()"
           :loading="savePanelData.isLoading.value"
         />
         <q-btn
+          v-if="!['html', 'markdown'].includes(dashboardPanelData.data.type)"
           class="q-ml-md text-bold no-border"
           data-test="dashboard-apply"
           padding="sm lg"
@@ -86,7 +88,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     <div class="row" style="height: calc(100vh - 115px); overflow-y: auto">
       <div
         class="col scroll"
-        style="overflow-y: auto; height: 100%; min-width: 90px; max-width: 90px"
+        style="
+          overflow-y: auto;
+          height: 100%;
+          min-width: 100px;
+          max-width: 100px;
+        "
       >
         <ChartSelection
           v-model:selectedChartType="dashboardPanelData.data.type"
@@ -94,7 +101,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         />
       </div>
       <q-separator vertical />
-      <div class="col" style="width: 100%; height: 100%">
+      <!-- for query related chart only -->
+      <div
+        v-if="!['html', 'markdown'].includes(dashboardPanelData.data.type)"
+        class="col"
+        style="width: 100%; height: 100%"
+      >
         <q-splitter
           v-model="dashboardPanelData.layout.splitter"
           @update:model-value="layoutSplitterUpdated"
@@ -156,7 +168,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                       <q-separator />
                       <VariablesValueSelector
                         :variablesConfig="currentDashboardData.data?.variables"
-                        :showDynamicFilters="currentDashboardData.data?.variables?.showDynamicFilters"
+                        :showDynamicFilters="
+                          currentDashboardData.data?.variables
+                            ?.showDynamicFilters
+                        "
                         :selectedTimeDate="dashboardPanelData.meta.dateTime"
                         @variablesData="variablesDataUpdated"
                       />
@@ -235,6 +250,30 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           </template>
         </q-splitter>
       </div>
+      <div
+        v-if="dashboardPanelData.data.type == 'html'"
+        class="col column"
+        style="width: 100%; height: 100%; flex: 1"
+      >
+        <CustomHTMLEditor
+          v-model="dashboardPanelData.data.htmlContent"
+          style="width: 100%; height: 100%"
+          class="col"
+        />
+        <DashboardErrorsComponent :errors="errorData" class="col-auto" />
+      </div>
+      <div
+        v-if="dashboardPanelData.data.type == 'markdown'"
+        class="col column"
+        style="width: 100%; height: 100%; flex: 1"
+      >
+        <CustomMarkdownEditor
+          v-model="dashboardPanelData.data.markdownContent"
+          style="width: 100%; height: 100%"
+          class="col"
+        />
+        <DashboardErrorsComponent :errors="errorData" class="col-auto" />
+      </div>
     </div>
   </div>
 </template>
@@ -257,6 +296,7 @@ import PanelSidebar from "../../../components/dashboards/addPanel/PanelSidebar.v
 import ConfigPanel from "../../../components/dashboards/addPanel/ConfigPanel.vue";
 import ChartSelection from "../../../components/dashboards/addPanel/ChartSelection.vue";
 import FieldList from "../../../components/dashboards/addPanel/FieldList.vue";
+import CustomHTMLEditor from "@/components/dashboards/addPanel/CustomHTMLEditor.vue";
 import { useQuasar, date } from "quasar";
 
 import { useI18n } from "vue-i18n";
@@ -280,6 +320,7 @@ import { useLoading } from "@/composables/useLoading";
 import _ from "lodash-es";
 import QueryInspector from "@/components/dashboards/QueryInspector.vue";
 import { provide } from "vue";
+import CustomMarkdownEditor from "@/components/dashboards/addPanel/CustomMarkdownEditor.vue";
 
 export default defineComponent({
   name: "AddPanel",
@@ -297,6 +338,8 @@ export default defineComponent({
     PanelSchemaRenderer,
     DashboardQueryEditor,
     QueryInspector,
+    CustomHTMLEditor,
+    CustomMarkdownEditor,
   },
   setup(props) {
     // This will be used to copy the chart data to the chart renderer component
@@ -360,7 +403,8 @@ export default defineComponent({
           store,
           route.query.dashboard,
           route.query.panelId,
-          route.query.folder
+          route.query.folder,
+          route.query.tab
         );
         Object.assign(
           dashboardPanelData.data,
@@ -519,6 +563,7 @@ export default defineComponent({
           org_identifier: store.state.selectedOrganization.identifier,
           dashboard: route.query.dashboard,
           folder: route.query.folder,
+          tab: route.query.tab ?? "default",
         },
       });
     };
@@ -598,6 +643,20 @@ export default defineComponent({
         });
       }
 
+      //check content should be empty for html
+      if (dashboardData.data.type == "html") {
+        if (dashboardData.data.htmlContent.trim() == "") {
+          errors.push("Please enter your HTML code");
+        }
+      }
+
+      //check content should be empty for html
+      if (dashboardData.data.type == "markdown") {
+        if (dashboardData.data.markdownContent.trim() == "") {
+          errors.push("Please enter your markdown code");
+        }
+      }
+
       if (promqlMode.value) {
         // 1. chart type: only line chart is supported
         const allowedChartTypes = [
@@ -608,6 +667,8 @@ export default defineComponent({
           "area-stacked",
           "metric",
           "gauge",
+          "html",
+          "markdown",
         ];
         if (!allowedChartTypes.includes(dashboardPanelData.data.type)) {
           errors.push(
@@ -656,9 +717,7 @@ export default defineComponent({
               dashboardData.data.queries[dashboardData.layout.currentQueryIndex]
                 .fields.y.length == 0
             ) {
-              errors.push(
-                "Add one value field for donut and pie charts"
-              );
+              errors.push("Add one value field for donut and pie charts");
             }
 
             if (
@@ -667,9 +726,7 @@ export default defineComponent({
               dashboardData.data.queries[dashboardData.layout.currentQueryIndex]
                 .fields.x.length == 0
             ) {
-              errors.push(
-                "Add one label field for donut and pie charts"
-              );
+              errors.push("Add one label field for donut and pie charts");
             }
 
             break;
@@ -681,9 +738,7 @@ export default defineComponent({
               dashboardData.data.queries[dashboardData.layout.currentQueryIndex]
                 .fields.y.length == 0
             ) {
-              errors.push(
-                "Add one value field for metric charts"
-              );
+              errors.push("Add one value field for metric charts");
             }
 
             if (
@@ -1021,52 +1076,69 @@ export default defineComponent({
       if (!isValid()) {
         return;
       }
-      if (editMode.value) {
-        const errorMessageOnSave = await updatePanel(
-          store,
-          dashId,
-          dashboardPanelData.data,
-          route.query.folder ?? "default"
-        );
-        if (errorMessageOnSave instanceof Error) {
-          errorData.errors.push(
-            "Error saving panel configuration : " + errorMessageOnSave.message
-          );
-          return;
-        }
-      } else {
-        const panelId =
-          "Panel_ID" + Math.floor(Math.random() * (99999 - 10 + 1)) + 10;
 
-        dashboardPanelData.data.id = panelId;
-        chartData.value = JSON.parse(JSON.stringify(dashboardPanelData.data));
-
-        const errorMessageOnSave = await addPanel(
-          store,
-          dashId,
-          dashboardPanelData.data,
-          route.query.folder ?? "default"
-        );
-        if (errorMessageOnSave instanceof Error) {
-          errorData.errors.push(
-            "Error saving panel configuration  : " + errorMessageOnSave.message
+      try {
+        if (editMode.value) {
+          const errorMessageOnSave = await updatePanel(
+            store,
+            dashId,
+            dashboardPanelData.data,
+            route.query.folder ?? "default",
+            route.query.tab ?? "default"
           );
-          return;
+          if (errorMessageOnSave instanceof Error) {
+            errorData.errors.push(
+              "Error saving panel configuration : " + errorMessageOnSave.message
+            );
+            return;
+          }
+        } else {
+          const panelId =
+            "Panel_ID" + Math.floor(Math.random() * (99999 - 10 + 1)) + 10;
+
+          dashboardPanelData.data.id = panelId;
+          chartData.value = JSON.parse(JSON.stringify(dashboardPanelData.data));
+
+          const errorMessageOnSave = await addPanel(
+            store,
+            dashId,
+            dashboardPanelData.data,
+            route.query.folder ?? "default",
+            route.query.tab ?? "default"
+          );
+          if (errorMessageOnSave instanceof Error) {
+            errorData.errors.push(
+              "Error saving panel configuration  : " +
+                errorMessageOnSave.message
+            );
+            return;
+          }
         }
+
+        isPanelConfigWatcherActivated = false;
+        isPanelConfigChanged.value = false;
+
+        await nextTick();
+        return router.push({
+          path: "/dashboards/view",
+          query: {
+            org_identifier: store.state.selectedOrganization.identifier,
+            dashboard: dashId,
+            folder: route.query.folder ?? "default",
+            tab: route.query.tab ?? "default",
+          },
+        });
+      } catch (error: any) {
+        $q.notify({
+          type: "negative",
+          message:
+            error?.message ??
+            (editMode.value
+              ? "Error while updating panel"
+              : "Error while creating panel"),
+          timeout: 2000,
+        });
       }
-
-      isPanelConfigWatcherActivated = false;
-      isPanelConfigChanged.value = false;
-
-      await nextTick();
-      return router.push({
-        path: "/dashboards/view",
-        query: {
-          org_identifier: store.state.selectedOrganization.identifier,
-          dashboard: dashId,
-          folder: route.query.folder ?? "default",
-        },
-      });
     };
 
     const layoutSplitterUpdated = () => {

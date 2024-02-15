@@ -17,8 +17,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <template>
   <div
     class="panelcontainer"
-    @mouseover="() => (showFullScreenBtn = true)"
-    @mouseleave="() => (showFullScreenBtn = false)"
+    @mouseover="() => (isCurrentlyHoveredPanel = true)"
+    @mouseleave="() => (isCurrentlyHoveredPanel = false)"
+    data-test="dashboard-panel-container"
   >
     <div class="drag-allow">
       <q-bar
@@ -28,23 +29,31 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         style="border-top-left-radius: 3px; border-top-right-radius: 3px"
         data-test="dashboard-panel-bar"
       >
-        <q-icon v-if="!viewOnly" name="drag_indicator" data-test="dashboard-panel-drag"/>
+        <q-icon
+          v-if="!viewOnly"
+          name="drag_indicator"
+          data-test="dashboard-panel-drag"
+        />
         <div :title="props.data.title" class="panelHeader">
           {{ props.data.title }}
         </div>
         <q-space />
         <q-icon
-          v-if="!viewOnly && showFullScreenBtn && props.data.description != ''"
+          v-if="
+            !viewOnly && isCurrentlyHoveredPanel && props.data.description != ''
+          "
           name="info_outline"
           style="cursor: pointer"
           data-test="dashboard-panel-description-info"
         >
           <q-tooltip anchor="bottom right" self="top right" max-width="220px">
-            <div style="white-space: pre-wrap;">{{ props.data.description }}</div>
+            <div style="white-space: pre-wrap">
+              {{ props.data.description }}
+            </div>
           </q-tooltip>
         </q-icon>
         <q-btn
-          v-if="!viewOnly && showFullScreenBtn"
+          v-if="!viewOnly && isCurrentlyHoveredPanel"
           icon="fullscreen"
           flat
           size="sm"
@@ -52,6 +61,23 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           @click="onPanelModifyClick('ViewPanel')"
           title="Full screen"
           data-test="dashboard-panel-fullscreen-btn"
+        />
+        <!-- if table chart then download button as a csv file -->
+        <q-btn
+          v-if="
+            !viewOnly && isCurrentlyHoveredPanel && props.data.type == 'table'
+          "
+          icon="download"
+          flat
+          size="sm"
+          padding="1px"
+          @click="
+            PanleSchemaRendererRef?.tableRendererRef?.downloadTableAsCSV(
+              props.data.title
+            )
+          "
+          title="Download as a CSV"
+          data-test="dashboard-panel-table-download-as-csv-btn"
         />
         <q-btn
           v-if="dependentAdHocVariable"
@@ -114,7 +140,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             </q-item>
             <q-item
               clickable
-              v-if="metaData && metaData.queries.length > 0"
+              v-if="metaData && metaData.queries?.length > 0"
               v-close-popup="true"
               @click="showViewPanel = true"
             >
@@ -123,6 +149,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   data-test="dashboard-query-inspector-panel"
                   class="q-pa-sm"
                   >Query Inspector</q-item-label
+                >
+              </q-item-section>
+            </q-item>
+            <q-item
+              clickable
+              v-close-popup="true"
+              @click="onPanelModifyClick('MovePanel')"
+            >
+              <q-item-section>
+                <q-item-label
+                  data-test="dashboard-move-to-another-panel"
+                  class="q-pa-sm"
+                  >Move To Another Tab</q-item-label
                 >
               </q-item-section>
             </q-item>
@@ -138,6 +177,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       :variablesData="props.variablesData"
       @metadata-update="metaDataValue"
       @updated:data-zoom="$emit('updated:data-zoom', $event)"
+      ref="PanleSchemaRendererRef"
     ></PanelSchemaRenderer>
     <q-dialog v-model="showViewPanel">
       <QueryInspector :metaData="metaData" :data="props.data"></QueryInspector>
@@ -149,6 +189,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       @update:ok="deletePanelDialog"
       @update:cancel="confirmDeletePanelDialog = false"
       v-model="confirmDeletePanelDialog"
+    />
+
+    <SinglePanelMove
+      title="Move Panel to Another Tab"
+      message="Select destination tab"
+      @update:ok="movePanelDialog"
+      :key="confirmMovePanelDialog"
+      @update:cancel="confirmMovePanelDialog = false"
+      v-model="confirmMovePanelDialog"
+      @refresh="$emit('refresh')"
     />
   </div>
 </template>
@@ -163,10 +213,17 @@ import { useQuasar } from "quasar";
 import QueryInspector from "@/components/dashboards/QueryInspector.vue";
 import ConfirmDialog from "../ConfirmDialog.vue";
 import { outlinedWarning } from "@quasar/extras/material-icons-outlined";
+import SinglePanelMove from "@/components/dashboards/settings/SinglePanelMove.vue";
 
 export default defineComponent({
   name: "PanelContainer",
-  emits: ["onDeletePanel", "onViewPanel", "updated:data-zoom"],
+  emits: [
+    "onDeletePanel",
+    "onViewPanel",
+    "updated:data-zoom",
+    "onMovePanel",
+    "refresh",
+  ],
   props: [
     "data",
     "selectedTimeDate",
@@ -181,6 +238,7 @@ export default defineComponent({
     PanelSchemaRenderer,
     QueryInspector,
     ConfirmDialog,
+    SinglePanelMove,
   },
   setup(props, { emit }) {
     const store = useStore();
@@ -190,10 +248,14 @@ export default defineComponent({
     const metaData = ref();
     const showViewPanel = ref(false);
     const confirmDeletePanelDialog = ref(false);
+    const confirmMovePanelDialog: any = ref(false);
     const metaDataValue = (metadata: any) => {
       metaData.value = metadata;
     };
     const showText = ref(false);
+
+    // need PanleSchemaRendererRef for table download as a csv
+    const PanleSchemaRendererRef: any = ref(null);
 
     //check if dependent adhoc variable exists
     const dependentAdHocVariable = computed(() => {
@@ -215,7 +277,7 @@ export default defineComponent({
     });
 
     // for full screen button
-    const showFullScreenBtn: any = ref(false);
+    const isCurrentlyHoveredPanel: any = ref(false);
 
     //for edit panel
     const onEditPanel = (data: any) => {
@@ -225,6 +287,7 @@ export default defineComponent({
           dashboard: String(route.query.dashboard),
           panelId: data.id,
           folder: route.query.folder ?? "default",
+          tab: route.query.tab ?? "default",
         },
       });
     };
@@ -251,7 +314,8 @@ export default defineComponent({
           store,
           route.query.dashboard,
           panelData,
-          route.query.folder ?? "default"
+          route.query.folder ?? "default",
+          route.query.tab ?? "default"
         );
 
         // Show a success notification.
@@ -267,6 +331,7 @@ export default defineComponent({
             dashboard: String(route.query.dashboard),
             panelId: panelId,
             folder: route.query.folder ?? "default",
+            tab: route.query.tab ?? "default",
           },
         });
         return;
@@ -274,9 +339,7 @@ export default defineComponent({
         // Show an error notification.
         $q.notify({
           type: "negative",
-          message: err?.response?.data["error"]
-            ? JSON.stringify(err?.response?.data["error"])
-            : "Panel duplication failed",
+          message: err?.message ?? "Panel duplication failed",
         });
       }
       // Hide the loading spinner notification.
@@ -286,12 +349,17 @@ export default defineComponent({
     const deletePanelDialog = async (data: any) => {
       emit("onDeletePanel", props.data.id);
     };
+
+    const movePanelDialog = async (selectedTabId: any) => {
+      emit("onMovePanel", props.data.id, selectedTabId);
+    };
+
     return {
       props,
       onEditPanel,
       onDuplicatePanel,
       deletePanelDialog,
-      showFullScreenBtn,
+      isCurrentlyHoveredPanel,
       outlinedWarning,
       store,
       metaDataValue,
@@ -299,7 +367,10 @@ export default defineComponent({
       showViewPanel,
       dependentAdHocVariable,
       confirmDeletePanelDialog,
-      showText
+      showText,
+      PanleSchemaRendererRef,
+      confirmMovePanelDialog,
+      movePanelDialog,
     };
   },
   methods: {
@@ -312,6 +383,8 @@ export default defineComponent({
         this.confirmDeletePanelDialog = true;
       } else if (evt == "DuplicatePanel") {
         this.onDuplicatePanel(this.props.data);
+      } else if (evt == "MovePanel") {
+        this.confirmMovePanelDialog = true;
       } else {
       }
     },

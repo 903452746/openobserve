@@ -22,23 +22,23 @@ use std::{
 
 use arrow_schema::Schema;
 use config::{
+    cluster,
     meta::stream::{FileMeta, StreamType},
     metrics,
     utils::{
+        file::scan_files,
+        json,
         parquet::new_parquet_writer,
         schema::{infer_json_schema_from_seekable, infer_json_schema_from_values},
     },
     CONFIG,
 };
 use datafusion::arrow::json::ReaderBuilder;
+use infra::storage;
 use tokio::{sync::Semaphore, task, time};
 
 use crate::{
-    common::{
-        infra::{cluster, storage, wal},
-        meta::stream::StreamParams,
-        utils::{file::scan_files, json, stream::populate_file_meta},
-    },
+    common::{infra::wal, meta::stream::StreamParams, utils::stream::populate_file_meta},
     service::{
         db, schema::schema_evolution, stream::get_stream_setting_bloom_filter_fields,
         usage::report_compression_stats,
@@ -112,7 +112,7 @@ pub async fn move_files_to_storage() -> Result<(), anyhow::Error> {
         // log::info!("[JOB] convert json file: {}", file);
 
         // check if we are allowed to ingest or just delete the file
-        if db::compact::retention::is_deleting_stream(&org_id, &stream_name, stream_type, None) {
+        if db::compact::retention::is_deleting_stream(&org_id, stream_type, &stream_name, None) {
             log::warn!(
                 "[JOB] the stream [{}/{}/{}] is deleting, just delete file: {}",
                 &org_id,
@@ -329,9 +329,9 @@ async fn upload_file(
         &file_meta,
     );
     for batch in batches {
-        writer.write(&batch)?;
+        writer.write(&batch).await?;
     }
-    writer.close()?;
+    writer.close().await?;
     file_meta.compressed_size = buf_parquet.len() as i64;
 
     schema_evolution(

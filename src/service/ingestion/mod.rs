@@ -18,9 +18,21 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::{anyhow, Result};
 use arrow_schema::Schema;
 use chrono::{TimeZone, Utc};
-use config::{meta::stream::StreamType, SIZE_IN_MB};
+use config::{
+    cluster,
+    meta::{
+        stream::{PartitionTimeLevel, StreamType},
+        usage::RequestStats,
+    },
+    utils::{
+        flatten,
+        json::{self, Map, Value},
+    },
+    SIZE_IN_MB,
+};
 use vector_enrichment::TableRegistry;
 use vrl::{
     compiler::{runtime::Runtime, CompilationResult, TargetValueRef},
@@ -29,28 +41,20 @@ use vrl::{
 
 use crate::{
     common::{
-        infra::{
-            cluster,
-            config::{STREAM_ALERTS, STREAM_FUNCTIONS, TRIGGERS},
-        },
+        infra::config::{STREAM_ALERTS, STREAM_FUNCTIONS, TRIGGERS},
         meta::{
             alerts::Alert,
             functions::{StreamTransform, VRLResultResolver, VRLRuntimeConfig},
-            stream::{PartitionTimeLevel, PartitioningDetails, SchemaRecords},
-            usage::RequestStats,
+            stream::{PartitioningDetails, SchemaRecords, StreamPartition},
         },
-        utils::{
-            flatten,
-            functions::get_vrl_compiler_config,
-            json::{self, Map, Value},
-        },
+        utils::functions::get_vrl_compiler_config,
     },
     service::{db, format_partition_key, stream::stream_settings},
 };
 
 pub mod grpc;
 
-pub type TriggerAlertData = Option<Vec<(Alert, Vec<Map<String, Value>>)>>;
+pub type TriggerAlertData = Vec<(Alert, Vec<Map<String, Value>>)>;
 
 pub fn compile_vrl_function(func: &str, org_id: &str) -> Result<VRLRuntimeConfig, std::io::Error> {
     if func.contains("get_env_var") {
@@ -100,7 +104,10 @@ pub fn apply_vrl_fn(runtime: &mut Runtime, vrl_runtime: &VRLResultResolver, row:
     match result {
         Ok(res) => match res.try_into() {
             Ok(val) => val,
-            Err(_) => row.clone(),
+            Err(err) => {
+                log::error!("Returning original row , got error from vrl {:?}", err);
+                row.clone()
+            }
         },
         Err(err) => {
             log::error!("Returning original row , got error from vrl {:?}", err);
@@ -176,7 +183,7 @@ pub async fn get_stream_alerts(
     stream_alerts_map.insert(key, alerts);
 }
 
-pub async fn evaluate_trigger(trigger: TriggerAlertData) {
+pub async fn evaluate_trigger(trigger: Option<TriggerAlertData>) {
     if trigger.is_none() {
         return;
     }
@@ -190,7 +197,7 @@ pub async fn evaluate_trigger(trigger: TriggerAlertData) {
 
 pub fn get_wal_time_key(
     timestamp: i64,
-    partition_keys: &Vec<String>,
+    partition_keys: &Vec<StreamPartition>,
     time_level: PartitionTimeLevel,
     local_val: &Map<String, Value>,
     suffix: Option<&str>,
@@ -212,13 +219,13 @@ pub fn get_wal_time_key(
         time_key.push_str("/default");
     }
     for key in partition_keys {
-        match local_val.get(key) {
+        if key.disabled {
+            continue;
+        }
+        match local_val.get(&key.field) {
             Some(v) => {
-                let val = if v.is_string() {
-                    format!("{}={}", key, v.as_str().unwrap())
-                } else {
-                    format!("{}={}", key, v)
-                };
+                let val = get_string_value(v);
+                let val = key.get_partition_key(&val);
                 time_key.push_str(&format!("/{}", format_partition_key(&val)));
             }
             None => continue,
@@ -268,7 +275,7 @@ pub fn apply_stream_transform(
     stream_vrl_map: &HashMap<String, VRLResultResolver>,
     stream_name: &str,
     runtime: &mut Runtime,
-) -> Result<Value, anyhow::Error> {
+) -> Result<Value> {
     for trans in local_trans {
         let func_key = format!("{stream_name}/{}", trans.transform.name);
         if stream_vrl_map.contains_key(&func_key) && !value.is_null() {
@@ -316,22 +323,22 @@ pub async fn write_file(
     req_stats
 }
 
-pub fn is_ingestion_allowed(org_id: &str, stream_name: Option<&str>) -> Option<anyhow::Error> {
+pub fn check_ingestion_allowed(org_id: &str, stream_name: Option<&str>) -> Result<()> {
     if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
-        return Some(anyhow::anyhow!("not an ingester"));
+        return Err(anyhow!("not an ingester"));
     }
     if !db::file_list::BLOCKED_ORGS.is_empty() && db::file_list::BLOCKED_ORGS.contains(&org_id) {
-        return Some(anyhow::anyhow!("Quota exceeded for this organization"));
+        return Err(anyhow!("Quota exceeded for this organization"));
     }
 
     // check if we are allowed to ingest
     if let Some(stream_name) = stream_name {
-        if db::compact::retention::is_deleting_stream(org_id, stream_name, StreamType::Logs, None) {
-            return Some(anyhow::anyhow!("stream [{stream_name}] is being deleted"));
+        if db::compact::retention::is_deleting_stream(org_id, StreamType::Logs, stream_name, None) {
+            return Err(anyhow!("stream [{stream_name}] is being deleted"));
         }
     };
 
-    None
+    Ok(())
 }
 
 pub fn get_float_value(val: &Value) -> f64 {
@@ -452,6 +459,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::common::meta::stream::StreamPartition;
 
     #[test]
     fn test_format_partition_key() {
@@ -465,7 +473,10 @@ mod tests {
         assert_eq!(
             get_wal_time_key(
                 1620000000,
-                &vec!["country".to_string(), "sport".to_string()],
+                &vec![
+                    StreamPartition::new("country"),
+                    StreamPartition::new("sport")
+                ],
                 PartitionTimeLevel::Hourly,
                 &local_val,
                 None
@@ -503,7 +514,7 @@ mod tests {
             "1970/01/01/00/default"
         );
     }
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_get_stream_partition_keys() {
         let mut stream_schema_map = HashMap::new();
         let mut meta = HashMap::new();
@@ -516,12 +527,14 @@ mod tests {
         let keys = get_stream_partition_keys("olympics", &stream_schema_map).await;
         assert_eq!(
             keys.partition_keys,
-            vec!["country".to_string(), "sport".to_string()]
+            vec![
+                StreamPartition::new("country"),
+                StreamPartition::new("sport")
+            ]
         );
     }
 
-    #[actix_web::test]
-
+    #[tokio::test]
     async fn test_compile_vrl_function() {
         let result = compile_vrl_function(
             r#"if .country == "USA" {

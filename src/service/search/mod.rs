@@ -13,13 +13,28 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{cmp::min, io::Cursor, sync::Arc};
+use std::{
+    cmp::{max, min},
+    io::Cursor,
+    sync::Arc,
+};
 
 use ::datafusion::arrow::{datatypes::Schema, ipc, json as arrow_json, record_batch::RecordBatch};
-use ahash::AHashMap as HashMap;
+use chrono::Duration;
 use config::{
-    meta::stream::{FileKey, QueryPartitionStrategy, StreamType},
+    cluster::{is_ingester, is_querier},
+    ider,
+    meta::{
+        cluster::{Node, Role},
+        stream::{FileKey, PartitionTimeLevel, QueryPartitionStrategy, StreamType},
+    },
+    utils::{flatten, json, str::find},
     CONFIG,
+};
+use hashbrown::HashMap;
+use infra::{
+    dist_lock,
+    errors::{Error, ErrorCodes},
 };
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
@@ -30,19 +45,15 @@ use vector_enrichment::TableRegistry;
 
 use crate::{
     common::{
-        infra::{
-            cluster, dist_lock,
-            errors::{Error, ErrorCodes},
-        },
+        infra::cluster::{self, get_node_from_consistent_hash},
         meta::{
             functions::VRLResultResolver,
             search,
-            stream::{PartitionTimeLevel, ScanStats, StreamParams},
+            stream::{ScanStats, StreamParams, StreamPartition},
         },
-        utils::{flatten, json, str::find},
     },
     handler::grpc::cluster_rpc,
-    service::{db, file_list, format_partition_key, stream},
+    service::{file_list, format_partition_key, stream},
 };
 
 pub(crate) mod datafusion;
@@ -60,7 +71,7 @@ pub async fn search(
     req: &search::Request,
 ) -> Result<search::Response, Error> {
     let session_id = if session_id.is_empty() {
-        uuid::Uuid::new_v4().to_string()
+        ider::uuid()
     } else {
         session_id.to_string()
     };
@@ -72,24 +83,86 @@ pub async fn search(
     search_in_cluster(req).await
 }
 
-async fn get_times(sql: &sql::Sql, stream_type: StreamType) -> (i64, i64) {
-    let (mut time_min, mut time_max) = sql.meta.time_range.unwrap();
-    if time_min == 0 {
-        // get created_at from schema
-        let schema = db::schema::get(&sql.org_id, &sql.stream_name, stream_type)
-            .await
-            .unwrap_or_else(|_| Schema::empty());
-        if schema != Schema::empty() {
-            time_min = schema
-                .metadata
-                .get("created_at")
-                .map_or(0, |v| v.parse::<i64>().unwrap_or(0));
-        }
+#[tracing::instrument(name = "service:search_partition:enter", skip(req))]
+pub async fn search_partition(
+    session_id: &str,
+    org_id: &str,
+    stream_type: StreamType,
+    req: &search::SearchPartitionRequest,
+) -> Result<search::SearchPartitionResponse, Error> {
+    let query = cluster_rpc::SearchQuery {
+        start_time: req.start_time,
+        end_time: req.end_time,
+        sql: req.sql.to_string(),
+        ..Default::default()
+    };
+    let search_req = cluster_rpc::SearchRequest {
+        org_id: org_id.to_string(),
+        stream_type: stream_type.to_string(),
+        query: Some(query),
+        ..Default::default()
+    };
+    let meta = sql::Sql::new(&search_req).await?;
+
+    let stream_settings = stream::stream_settings(&meta.schema).unwrap_or_default();
+    let partition_time_level =
+        stream::unwrap_partition_time_level(stream_settings.partition_time_level, stream_type);
+    let files = get_file_list(
+        session_id,
+        &meta,
+        stream_type,
+        partition_time_level,
+        &stream_settings.partition_keys,
+    )
+    .await;
+
+    let nodes = cluster::get_cached_online_querier_nodes().unwrap_or_default();
+    let cpu_cores = nodes.iter().map(|n| n.cpu_num).sum::<u64>() as usize;
+
+    let (records, original_size, compressed_size) =
+        files
+            .iter()
+            .fold((0, 0, 0), |(records, original_size, compressed_size), f| {
+                (
+                    records + f.meta.records,
+                    original_size + f.meta.original_size,
+                    compressed_size + f.meta.compressed_size,
+                )
+            });
+    let mut resp = search::SearchPartitionResponse {
+        file_num: files.len(),
+        records: records as usize,
+        original_size: original_size as usize,
+        compressed_size: compressed_size as usize,
+        partitions: vec![],
+    };
+    let mut total_secs = resp.original_size / CONFIG.limit.query_group_base_speed / cpu_cores;
+    if total_secs * CONFIG.limit.query_group_base_speed * cpu_cores < resp.original_size {
+        total_secs += 1;
     }
-    if time_max == 0 {
-        time_max = chrono::Utc::now().timestamp_micros();
+    let mut part_num = max(1, total_secs / CONFIG.limit.query_partition_by_secs);
+    if part_num * CONFIG.limit.query_partition_by_secs < total_secs {
+        part_num += 1;
     }
-    (time_min, time_max)
+    let mut step = max(
+        Duration::seconds(CONFIG.limit.query_partition_min_secs)
+            .num_microseconds()
+            .unwrap(),
+        (req.end_time - req.start_time) / part_num as i64,
+    );
+    // step must be times of minute
+    step = step - step % Duration::minutes(1).num_microseconds().unwrap();
+
+    // generate partitions
+    let mut partitions = Vec::with_capacity(part_num);
+    let mut end = req.end_time;
+    while end > req.start_time {
+        let start = max(end - step, req.start_time);
+        partitions.push([start, end]);
+        end = start;
+    }
+    resp.partitions = partitions;
+    Ok(resp)
 }
 
 #[tracing::instrument(skip(sql), fields(session_id = ?_session_id, org_id = sql.org_id, stream_name = sql.stream_name))]
@@ -98,13 +171,14 @@ async fn get_file_list(
     sql: &sql::Sql,
     stream_type: StreamType,
     time_level: PartitionTimeLevel,
+    partition_keys: &[StreamPartition],
 ) -> Vec<FileKey> {
     let is_local = CONFIG.common.meta_store_external
         || cluster::get_cached_online_querier_nodes()
             .unwrap_or_default()
             .len()
             <= 1;
-    let (time_min, time_max) = get_times(sql, stream_type).await;
+    let (time_min, time_max) = sql.meta.time_range.unwrap();
     let file_list = match file_list::query(
         &sql.org_id,
         &sql.stream_name,
@@ -122,7 +196,10 @@ async fn get_file_list(
 
     let mut files = Vec::with_capacity(file_list.len());
     for file in file_list {
-        if sql.match_source(&file, false, false, stream_type).await {
+        if sql
+            .match_source(&file, false, false, stream_type, partition_keys)
+            .await
+        {
             files.push(file.to_owned());
         }
     }
@@ -143,21 +220,15 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
     let stream_type = StreamType::from(req.stream_type.as_str());
     let meta = sql::Sql::new(&req).await?;
 
-    // get a cluster search queue lock
-    let locker = dist_lock::lock("search/cluster_queue", 0).await?;
-    let took_wait = start.elapsed().as_millis() as usize;
-
     // get nodes from cluster
     let mut nodes = cluster::get_cached_online_query_nodes().unwrap();
     // sort nodes by node_id this will improve hit cache ratio
+    nodes.sort_by(|a, b| a.grpc_addr.cmp(&b.grpc_addr));
+    nodes.dedup_by(|a, b| a.grpc_addr == b.grpc_addr);
     nodes.sort_by_key(|x| x.id);
     let nodes = nodes;
 
-    let querier_num = match nodes
-        .iter()
-        .filter(|node| cluster::is_querier(&node.role))
-        .count()
-    {
+    let querier_num = match nodes.iter().filter(|node| is_querier(&node.role)).count() {
         0 => 1,
         n => n,
     };
@@ -175,11 +246,67 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
     let partition_time_level =
         stream::unwrap_partition_time_level(stream_settings.partition_time_level, stream_type);
 
-    let file_list = get_file_list(&session_id, &meta, stream_type, partition_time_level).await;
-    let mut partition_files = None;
+    let file_list = get_file_list(
+        &session_id,
+        &meta,
+        stream_type,
+        partition_time_level,
+        &stream_settings.partition_keys,
+    )
+    .await;
+    let total_files = file_list.len();
+
+    #[cfg(not(feature = "enterprise"))]
+    let work_group: Option<String> = None;
+    // 1. get work group
+    #[cfg(feature = "enterprise")]
+    let work_group: Option<o2_enterprise::enterprise::search::WorkGroup> =
+        Some(o2_enterprise::enterprise::search::queue::predict_work_group(&nodes, &file_list));
+    // 2. check concurrency
+    let work_group_str = if work_group.is_none() {
+        "global".to_string()
+    } else {
+        work_group.as_ref().unwrap().to_string()
+    };
+    let locker_key = "search/cluster_queue/".to_string() + work_group_str.as_str();
+    // get a cluster search queue lock
+    let locker = dist_lock::lock(&locker_key, 0).await?;
+    #[cfg(feature = "enterprise")]
+    loop {
+        match work_group.as_ref().unwrap().need_wait().await {
+            Ok(true) => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            Ok(false) => {
+                break;
+            }
+            Err(e) => {
+                dist_lock::unlock(&locker).await?;
+                return Err(Error::Message(e.to_string()));
+            }
+        }
+    }
+    // 3. process the search in the work group
+    #[cfg(feature = "enterprise")]
+    if let Err(e) = work_group.as_ref().unwrap().process(&session_id).await {
+        dist_lock::unlock(&locker).await?;
+        return Err(Error::Message(e.to_string()));
+    }
+    #[cfg(feature = "enterprise")]
+    dist_lock::unlock(&locker).await?;
+    let took_wait = start.elapsed().as_millis() as usize;
+
+    // set work_group
+    req.work_group = work_group_str;
+
+    let mut partition_files = Vec::new();
     let mut file_num = file_list.len();
-    let offset = match QueryPartitionStrategy::from(&CONFIG.common.feature_query_partition_strategy)
-    {
+    let mut partition_strategy =
+        QueryPartitionStrategy::from(&CONFIG.common.feature_query_partition_strategy);
+    if CONFIG.memory_cache.cache_latest_files {
+        partition_strategy = QueryPartitionStrategy::FileHash;
+    }
+    let offset = match partition_strategy {
         QueryPartitionStrategy::FileNum => {
             if querier_num >= file_num {
                 1
@@ -190,12 +317,18 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
         QueryPartitionStrategy::FileSize => {
             let files = partition_file_by_bytes(&file_list, querier_num);
             file_num = files.len();
-            partition_files = Some(files);
+            partition_files = files;
+            1
+        }
+        QueryPartitionStrategy::FileHash => {
+            let files = partition_file_by_hash(&file_list, &nodes).await;
+            file_num = files.len();
+            partition_files = files;
             1
         }
     };
     log::info!(
-        "[session_id {session_id}] search->file_list: time_range: {:?}, num: {file_num}, offset: {offset}",
+        "[session_id {session_id}] search->file_list: time_range: {:?}, num: {total_files}",
         meta.meta.time_range
     );
 
@@ -215,12 +348,11 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
         job.partition = partition_no as i32;
         req.job = Some(job);
         req.stype = cluster_rpc::SearchType::WalOnly as i32;
-        let is_querier = cluster::is_querier(&node.role);
+        let is_querier = is_querier(&node.role);
         if is_querier {
             if offset_start < file_num {
                 req.stype = cluster_rpc::SearchType::Cluster as i32;
-                match QueryPartitionStrategy::from(&CONFIG.common.feature_query_partition_strategy)
-                {
+                match partition_strategy {
                     QueryPartitionStrategy::FileNum => {
                         req.file_list = file_list
                             [offset_start..min(offset_start + offset, file_num)]
@@ -230,28 +362,36 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
                             .collect();
                         offset_start += offset;
                     }
-                    QueryPartitionStrategy::FileSize => {
+                    QueryPartitionStrategy::FileSize | QueryPartitionStrategy::FileHash => {
                         req.file_list = partition_files
-                            .as_ref()
-                            .unwrap()
                             .get(offset_start)
                             .unwrap()
                             .iter()
-                            .map(|fk| cluster_rpc::FileKey::from(*fk))
+                            .map(|f| cluster_rpc::FileKey::from(*f))
                             .collect();
                         offset_start += offset;
+                        if req.file_list.is_empty() {
+                            if is_ingester(&node.role) {
+                                req.stype = cluster_rpc::SearchType::WalOnly as i32;
+                            } else {
+                                continue; // no need more querier
+                            }
+                        }
                     }
                 };
-            } else if !cluster::is_ingester(&node.role) {
+            } else if !is_ingester(&node.role) {
                 continue; // no need more querier
             }
         }
 
+        let req_files = req.file_list.len();
         let node_addr = node.grpc_addr.clone();
         let grpc_span = info_span!(
             "service:search:cluster:grpc_search",
             session_id,
-            org_id = req.org_id
+            org_id = req.org_id,
+            node_id = node.id,
+            node_addr = node_addr.as_str(),
         );
         let task = tokio::task::spawn(
             async move {
@@ -268,6 +408,8 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
                         &mut MetadataMap(request.metadata_mut()),
                     )
                 });
+
+                log::info!("[session_id {session_id}] search->grpc: request node: {}, is_querier: {}, files: {req_files}", &node_addr, is_querier);
 
                 let token: MetadataValue<_> = cluster::get_internal_grpc_token()
                     .parse()
@@ -305,7 +447,7 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
                 };
 
                 log::info!(
-                    "[session_id {session_id}] search->grpc: result node: {}, is_querier: {}, total: {}, took: {}, files: {}, scan_size: {}",
+                    "[session_id {session_id}] search->grpc: response node: {}, is_querier: {}, total: {}, took: {}, files: {}, scan_size: {}",
                     &node.grpc_addr,
                     is_querier,
                     response.total,
@@ -327,22 +469,35 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
                 Ok(res) => results.push(res),
                 Err(err) => {
                     // search done, release lock
+                    #[cfg(not(feature = "enterprise"))]
                     dist_lock::unlock(&locker).await?;
+                    #[cfg(feature = "enterprise")]
+                    work_group
+                        .as_ref()
+                        .unwrap()
+                        .done(&session_id)
+                        .await
+                        .map_err(|e| Error::Message(e.to_string()))?;
                     return Err(err);
                 }
             },
             Err(e) => {
                 // search done, release lock
+                #[cfg(not(feature = "enterprise"))]
                 dist_lock::unlock(&locker).await?;
+                #[cfg(feature = "enterprise")]
+                work_group
+                    .as_ref()
+                    .unwrap()
+                    .done(&session_id)
+                    .await
+                    .map_err(|e| Error::Message(e.to_string()))?;
                 return Err(Error::ErrorCode(ErrorCodes::ServerInternalError(
                     e.to_string(),
                 )));
             }
         }
     }
-
-    // search done, release lock
-    dist_lock::unlock(&locker).await?;
 
     // merge multiple instances data
     let mut scan_stats = ScanStats::new();
@@ -393,6 +548,16 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
         {
             Ok(res) => res,
             Err(err) => {
+                // search done, release lock
+                #[cfg(not(feature = "enterprise"))]
+                dist_lock::unlock(&locker).await?;
+                #[cfg(feature = "enterprise")]
+                work_group
+                    .as_ref()
+                    .unwrap()
+                    .done(&session_id)
+                    .await
+                    .map_err(|e| Error::Message(e.to_string()))?;
                 return Err(Error::ErrorCode(ErrorCodes::ServerInternalError(
                     err.to_string(),
                 )));
@@ -400,6 +565,17 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
         };
         merge_batches.insert(name, batch);
     }
+
+    // search done, release lock
+    #[cfg(not(feature = "enterprise"))]
+    dist_lock::unlock(&locker).await?;
+    #[cfg(feature = "enterprise")]
+    work_group
+        .as_ref()
+        .unwrap()
+        .done(&session_id)
+        .await
+        .map_err(|e| Error::Message(e.to_string()))?;
 
     // final result
     let mut result = search::Response::new(sql.meta.offset, sql.meta.limit);
@@ -439,7 +615,14 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
                         registry.finish_load();
                         Some(program)
                     }
-                    Err(_) => None,
+                    Err(err) => {
+                        log::error!(
+                            "[session_id {session_id}] search->vrl: compile err: {:?}",
+                            err
+                        );
+                        result.function_error = err.to_string();
+                        None
+                    }
                 };
             match program {
                 Some(program) => json_rows
@@ -515,6 +698,7 @@ async fn search_in_cluster(mut req: cluster_rpc::SearchRequest) -> Result<search
     result.set_cluster_took(start.elapsed().as_millis() as usize, took_wait);
     result.set_file_count(scan_stats.files as usize);
     result.set_scan_size(scan_stats.original_size as usize);
+    result.set_scan_records(scan_stats.records as usize);
 
     if query_type == "table" {
         result.response_type = "table".to_string();
@@ -550,6 +734,30 @@ fn partition_file_by_bytes(file_keys: &[FileKey], num_nodes: usize) -> Vec<Vec<&
             continue;
         }
         partitions[node_k].push(fk);
+    }
+    partitions
+}
+
+async fn partition_file_by_hash<'a>(
+    file_keys: &'a [FileKey],
+    nodes: &'a [Node],
+) -> Vec<Vec<&'a FileKey>> {
+    let mut node_idx = HashMap::with_capacity(nodes.len());
+    let mut idx = 0;
+    for node in nodes {
+        if !is_querier(&node.role) {
+            continue;
+        }
+        node_idx.insert(&node.uuid, idx);
+        idx += 1;
+    }
+    let mut partitions: Vec<Vec<&FileKey>> = vec![Vec::new(); idx];
+    for fk in file_keys {
+        let node_uuid = get_node_from_consistent_hash(&fk.key, &Role::Querier)
+            .await
+            .expect("there is no querier node in consistent hash ring");
+        let idx = node_idx.get(&node_uuid).unwrap_or(&0);
+        partitions[*idx].push(fk);
     }
     partitions
 }
@@ -624,7 +832,7 @@ fn handle_metrics_response(sources: Vec<json::Value>) -> Vec<json::Value> {
 pub async fn match_source(
     stream: StreamParams,
     time_range: Option<(i64, i64)>,
-    filters: &[(&str, Vec<&str>)],
+    filters: &[(&str, Vec<String>)],
     source: &FileKey,
     is_wal: bool,
     match_min_ts_only: bool,
@@ -689,7 +897,7 @@ pub async fn match_source(
 }
 
 /// match a source is a needed file or not, return true if needed
-fn filter_source_by_partition_key(source: &str, filters: &[(&str, Vec<&str>)]) -> bool {
+fn filter_source_by_partition_key(source: &str, filters: &[(&str, Vec<String>)]) -> bool {
     !filters.iter().any(|(k, v)| {
         let field = format_partition_key(&format!("{k}="));
         find(source, &format!("/{field}"))
@@ -727,56 +935,77 @@ mod tests {
         let path = "files/default/logs/gke-fluentbit/2023/04/14/08/kuberneteshost=gke-dev1/kubernetesnamespacename=ziox-dev/7052558621820981249.parquet";
         let filters = vec![
             (vec![], true),
-            (vec![("kuberneteshost", vec!["gke-dev1"])], true),
-            (vec![("kuberneteshost", vec!["gke-dev2"])], false),
-            (vec![("kuberneteshost", vec!["gke-dev1", "gke-dev2"])], true),
-            (vec![("some_other_key", vec!["no-matter"])], true),
+            (vec![("kuberneteshost", vec!["gke-dev1".to_string()])], true),
+            (
+                vec![("kuberneteshost", vec!["gke-dev2".to_string()])],
+                false,
+            ),
+            (
+                vec![(
+                    "kuberneteshost",
+                    vec!["gke-dev1".to_string(), "gke-dev2".to_string()],
+                )],
+                true,
+            ),
+            (
+                vec![("some_other_key", vec!["no-matter".to_string()])],
+                true,
+            ),
             (
                 vec![
-                    ("kuberneteshost", vec!["gke-dev1"]),
-                    ("kubernetesnamespacename", vec!["ziox-dev"]),
+                    ("kuberneteshost", vec!["gke-dev1".to_string()]),
+                    ("kubernetesnamespacename", vec!["ziox-dev".to_string()]),
                 ],
                 true,
             ),
             (
                 vec![
-                    ("kuberneteshost", vec!["gke-dev1"]),
-                    ("kubernetesnamespacename", vec!["abcdefg"]),
+                    ("kuberneteshost", vec!["gke-dev1".to_string()]),
+                    ("kubernetesnamespacename", vec!["abcdefg".to_string()]),
                 ],
                 false,
             ),
             (
                 vec![
-                    ("kuberneteshost", vec!["gke-dev2"]),
-                    ("kubernetesnamespacename", vec!["ziox-dev"]),
+                    ("kuberneteshost", vec!["gke-dev2".to_string()]),
+                    ("kubernetesnamespacename", vec!["ziox-dev".to_string()]),
                 ],
                 false,
             ),
             (
                 vec![
-                    ("kuberneteshost", vec!["gke-dev2"]),
-                    ("kubernetesnamespacename", vec!["abcdefg"]),
+                    ("kuberneteshost", vec!["gke-dev2".to_string()]),
+                    ("kubernetesnamespacename", vec!["abcdefg".to_string()]),
                 ],
                 false,
             ),
             (
                 vec![
-                    ("kuberneteshost", vec!["gke-dev1", "gke-dev2"]),
-                    ("kubernetesnamespacename", vec!["ziox-dev"]),
+                    (
+                        "kuberneteshost",
+                        vec!["gke-dev1".to_string(), "gke-dev2".to_string()],
+                    ),
+                    ("kubernetesnamespacename", vec!["ziox-dev".to_string()]),
                 ],
                 true,
             ),
             (
                 vec![
-                    ("kuberneteshost", vec!["gke-dev1", "gke-dev2"]),
-                    ("kubernetesnamespacename", vec!["abcdefg"]),
+                    (
+                        "kuberneteshost",
+                        vec!["gke-dev1".to_string(), "gke-dev2".to_string()],
+                    ),
+                    ("kubernetesnamespacename", vec!["abcdefg".to_string()]),
                 ],
                 false,
             ),
             (
                 vec![
-                    ("kuberneteshost", vec!["gke-dev1", "gke-dev2"]),
-                    ("some_other_key", vec!["no-matter"]),
+                    (
+                        "kuberneteshost",
+                        vec!["gke-dev1".to_string(), "gke-dev2".to_string()],
+                    ),
+                    ("some_other_key", vec!["no-matter".to_string()]),
                 ],
                 true,
             ),

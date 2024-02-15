@@ -16,11 +16,17 @@
 use std::io::Error;
 
 use actix_web::{delete, get, http, post, put, web, HttpResponse};
+use strum::IntoEnumIterator;
 
 use crate::{
     common::{
-        meta,
-        meta::user::{SignInResponse, SignInUser, UpdateUser, UserOrgRole, UserRequest},
+        meta::{
+            self,
+            user::{
+                RolesResponse, SignInResponse, SignInUser, UpdateUser, UserOrgRole, UserRequest,
+                UserRole,
+            },
+        },
         utils::auth::UserEmail,
     },
     service::users,
@@ -73,6 +79,7 @@ pub async fn save(
     let initiator_id = user_email.user_id;
     let mut user = user.into_inner();
     user.email = user.email.trim().to_string();
+
     if user.role.eq(&meta::user::UserRole::Root) {
         return Ok(
             HttpResponse::BadRequest().json(meta::http::HttpResponse::error(
@@ -81,7 +88,10 @@ pub async fn save(
             )),
         );
     }
-
+    #[cfg(not(feature = "enterprise"))]
+    {
+        user.role = meta::user::UserRole::Admin;
+    }
     users::post_user(&org_id, user, &initiator_id).await
 }
 
@@ -110,6 +120,9 @@ pub async fn update(
 ) -> Result<HttpResponse, Error> {
     let (org_id, email_id) = params.into_inner();
     let email_id = email_id.trim().to_string();
+    #[cfg(not(feature = "enterprise"))]
+    let mut user = user.into_inner();
+    #[cfg(feature = "enterprise")]
     let user = user.into_inner();
     if user.eq(&UpdateUser::default()) {
         return Ok(
@@ -118,6 +131,10 @@ pub async fn update(
                 "Please specify appropriate fields to update user".to_string(),
             )),
         );
+    }
+    #[cfg(not(feature = "enterprise"))]
+    {
+        user.role = Some(meta::user::UserRole::Admin);
     }
     let initiator_id = &user_email.user_id;
     let self_update = user_email.user_id.eq(&email_id);
@@ -144,11 +161,12 @@ pub async fn update(
 #[post("/{org_id}/users/{email_id}")]
 pub async fn add_user_to_org(
     params: web::Path<(String, String)>,
-    role: web::Json<UserOrgRole>,
+    _role: web::Json<UserOrgRole>,
     user_email: UserEmail,
 ) -> Result<HttpResponse, Error> {
     let (org_id, email_id) = params.into_inner();
-    let role = role.into_inner().role;
+    // let role = role.into_inner().role;
+    let role = meta::user::UserRole::Admin;
     let initiator_id = user_email.user_id;
     users::add_user_to_org(&org_id, &email_id, role, &initiator_id).await
 }
@@ -212,4 +230,37 @@ pub async fn authentication(auth: web::Json<SignInUser>) -> Result<HttpResponse,
     } else {
         Ok(HttpResponse::Unauthorized().json(resp))
     }
+}
+
+/// ListUsers
+#[utoipa::path(
+    context_path = "/api",
+    tag = "Users",
+    operation_id = "UserRoles",
+    security(
+        ("Authorization"= [])
+    ),
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+      ),
+    responses(
+        (status = 200, description = "Success", content_type = "application/json", body = UserList),
+    )
+)]
+#[get("/{org_id}/users/roles")]
+pub async fn list_roles(_org_id: web::Path<String>) -> Result<HttpResponse, Error> {
+    let roles = UserRole::iter()
+        .filter_map(|role| {
+            if role.eq(&UserRole::Root) || role.eq(&UserRole::Member) {
+                None
+            } else {
+                Some(RolesResponse {
+                    label: role.get_label(),
+                    value: role.to_string(),
+                })
+            }
+        })
+        .collect::<Vec<RolesResponse>>();
+
+    Ok(HttpResponse::Ok().json(roles))
 }

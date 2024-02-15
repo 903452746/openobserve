@@ -25,13 +25,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       :initialVariableValues="initialVariableValues"
       @variablesData="variablesDataUpdated"
     />
+    <TabList
+      v-if="showTabs && selectedTabId !== null"
+      class="q-mt-sm"
+      :dashboardData="dashboardData"
+      :viewOnly="viewOnly"
+      @refresh="refreshDashboard"
+    />
     <slot name="before_panels" />
     <div class="displayDiv">
       <grid-layout
         ref="gridLayoutRef"
-        v-if="dashboardData.panels?.length > 0"
-        :layout.sync="getDashboardLayout(dashboardData)"
-        :col-num="12"
+        v-if="panels.length > 0"
+        :layout.sync="getDashboardLayout(panels)"
+        :col-num="48"
         :row-height="30"
         :is-draggable="!viewOnly"
         :is-resizable="!viewOnly"
@@ -42,8 +49,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         :margin="[4, 4]"
       >
         <grid-item
-          class="gridBackground" :class="store.state.theme == 'dark' ? 'dark' : ''"
-          v-for="item in dashboardData.panels"
+          class="gridBackground"
+          :class="store.state.theme == 'dark' ? 'dark' : ''"
+          v-for="item in panels"
           :key="item.id"
           :x="getPanelLayout(item, 'x')"
           :y="getPanelLayout(item, 'y')"
@@ -68,6 +76,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               :width="getPanelLayout(item, 'w')"
               :height="getPanelLayout(item, 'h')"
               @updated:data-zoom="$emit('updated:data-zoom', $event)"
+              @onMovePanel="onMovePanel"
+              @refresh="refreshDashboard"
             >
             </PanelContainer>
           </div>
@@ -87,7 +97,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         />
       </q-card>
     </q-dialog>
-    <div v-if="!dashboardData.panels?.length">
+    <div v-if="!panels.length">
       <!-- if data not available show nodata component -->
       <NoPanel @update:Panel="addPanelData" :view-only="viewOnly" />
     </div>
@@ -96,7 +106,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <script lang="ts">
 // @ts-nocheck
-import { defineComponent, provide, ref, toRaw } from "vue";
+import { computed, defineComponent, onMounted, provide, ref, watch } from "vue";
 import { useStore } from "vuex";
 import { useQuasar } from "quasar";
 import { useI18n } from "vue-i18n";
@@ -109,17 +119,30 @@ import { updateDashboard } from "../../utils/commons";
 import NoPanel from "../../components/shared/grid/NoPanel.vue";
 import VariablesValueSelector from "../../components/dashboards/VariablesValueSelector.vue";
 import ViewPanel from "@/components/dashboards/viewPanel/ViewPanel.vue";
+import TabList from "@/components/dashboards/tabs/TabList.vue";
+import { inject } from "vue";
 
 export default defineComponent({
   name: "RenderDashboardCharts",
-  emits: ["onDeletePanel", "onViewPanel", "variablesData", "updated:data-zoom"],
-  props: [
-    "viewOnly",
-    "dashboardData",
-    "currentTimeObj",
-    "initialVariableValues",
-    "selectedDateForViewPanel",
+  emits: [
+    "onDeletePanel",
+    "onViewPanel",
+    "variablesData",
+    "updated:data-zoom",
+    "refresh",
+    "onMovePanel",
   ],
+  props: {
+    viewOnly: {},
+    dashboardData: {},
+    currentTimeObj: {},
+    initialVariableValues: {},
+    selectedDateForViewPanel: {},
+    showTabs: {
+      type: Boolean,
+      default: false,
+    },
+  },
 
   components: {
     GridLayout: VueGridLayout.GridLayout,
@@ -128,6 +151,7 @@ export default defineComponent({
     NoPanel,
     VariablesValueSelector,
     ViewPanel,
+    TabList,
   },
   setup(props: any, { emit }) {
     const { t } = useI18n();
@@ -140,6 +164,25 @@ export default defineComponent({
     const showViewPanel = ref(false);
     // holds the view panel id
     const viewPanelId = ref("");
+
+    // inject selected tab, default will be default tab
+    const selectedTabId = inject("selectedTabId", ref("default"));
+
+    const panels: any = computed(() => {
+      return selectedTabId.value !== null
+        ? props.dashboardData?.tabs?.find(
+            (it: any) => it.tabId === selectedTabId.value
+          )?.panels ?? []
+        : [];
+    });
+
+    const refreshDashboard = () => {
+      emit("refresh");
+    };
+
+    const onMovePanel = (panelId: any, newTabId: any) => {
+      emit("onMovePanel", panelId, newTabId);
+    };
 
     // variables data
     const variablesData = reactive({});
@@ -176,19 +219,30 @@ export default defineComponent({
 
     // save the dashboard value
     const saveDashboard = async () => {
-      await updateDashboard(
-        store,
-        store.state.selectedOrganization.identifier,
-        props.dashboardData.dashboardId,
-        props.dashboardData,
-        route.query.folder ?? "default"
-      );
+      try {
+        await updateDashboard(
+          store,
+          store.state.selectedOrganization.identifier,
+          props.dashboardData.dashboardId,
+          props.dashboardData,
+          route.query.folder ?? "default"
+        );
 
-      $q.notify({
-        type: "positive",
-        message: "Dashboard updated successfully.",
-        timeout: 5000,
-      });
+        $q.notify({
+          type: "positive",
+          message: "Dashboard updated successfully",
+          timeout: 5000,
+        });
+      } catch (error: any) {
+        $q.notify({
+          type: "negative",
+          message: error?.message ?? "Dashboard update failed",
+          timeout: 2000,
+        });
+
+        // refresh dashboard
+        refreshDashboard();
+      }
     };
 
     //add panel
@@ -198,22 +252,23 @@ export default defineComponent({
         query: {
           dashboard: route.query.dashboard,
           folder: route.query.folder ?? "default",
+          tab: route.query.tab ?? "default",
         },
       });
     };
 
-    const movedEvent = (i, newX, newY) => {
-      saveDashboard();
+    const movedEvent = async (i, newX, newY) => {
+      await saveDashboard();
     };
 
-    const resizedEvent = (i, newX, newY, newHPx, newWPx) => {
+    const resizedEvent = async (i, newX, newY, newHPx, newWPx) => {
       window.dispatchEvent(new Event("resize"));
-      saveDashboard();
+      await saveDashboard();
     };
 
-    const getDashboardLayout = (dashboardData) => {
+    const getDashboardLayout: any = (panels: any) => {
       //map on each panels and return array of layouts
-      return dashboardData.panels?.map((item) => item.layout) || [];
+      return panels?.map((item: any) => item.layout) || [];
     };
 
     const getPanelLayout = (panelData, position) => {
@@ -285,6 +340,10 @@ export default defineComponent({
       layoutUpdate,
       showViewPanel,
       viewPanelId,
+      selectedTabId,
+      panels,
+      refreshDashboard,
+      onMovePanel,
     };
   },
   methods: {

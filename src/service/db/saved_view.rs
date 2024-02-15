@@ -13,19 +13,18 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::common::{
-    infra::{db as infra_db, errors::Error},
-    meta::saved_view::{
-        CreateViewRequest, UpdateViewRequest, View, ViewWithoutData, ViewsWithoutData,
-    },
-    utils::json,
+use config::utils::json;
+use infra::{db as infra_db, errors::Error};
+
+use crate::common::meta::saved_view::{
+    CreateViewRequest, UpdateViewRequest, View, ViewWithoutData, ViewsWithoutData,
 };
 
 pub const SAVED_VIEWS_KEY_PREFIX: &str = "/organization/savedviews";
 
 pub async fn set_view(org_id: &str, view: &CreateViewRequest) -> Result<View, Error> {
     let db = &infra_db::get_db().await;
-    let view_id = uuid::Uuid::new_v4().to_string();
+    let view_id = config::ider::uuid();
     let view = View {
         org_id: org_id.into(),
         view_id: view_id.clone(),

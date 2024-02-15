@@ -210,6 +210,10 @@ export const convertPromQLData = (
           opacity: 0.5,
         },
       },
+      axisLabel: {
+        // hide axis label if overlaps
+        hideOverlap: true,
+      },
     },
     yAxis: {
       type: "value",
@@ -561,10 +565,6 @@ export const convertPromQLData = (
     panelSchema.type != "gauge" &&
     panelSchema.type != "metric"
   ) {
-    const maxValue = options.series
-      .map((it: any) => it.name)
-      .reduce((max: any, it: any) => (max.length < it.length ? it : max), "");
-
     let legendWidth;
 
     if (
@@ -581,6 +581,10 @@ export const convertPromQLData = (
         legendWidth = panelSchema.config.legend_width.value;
       }
     } else {
+      const maxValue = options.series.reduce((max: any, it: any) => {
+        return max.length < it?.name?.length ? it?.name : max;
+      }, "");
+
       // If legend_width is not provided or has invalid format, calculate it based on other criteria
       legendWidth =
         Math.min(
@@ -673,6 +677,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
       return {
         type: "bar",
         emphasis: { focus: "series" },
+        lineStyle: { width: 1.5 },
       };
     case "line":
       return {
@@ -680,6 +685,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
         emphasis: { focus: "series" },
         smooth: true,
         showSymbol: false,
+        lineStyle: { width: 1.5 },
       };
     case "scatter":
       return {
@@ -691,17 +697,20 @@ const getPropsByChartTypeForSeries = (type: string) => {
       return {
         type: "pie",
         emphasis: { focus: "series" },
+        lineStyle: { width: 1.5 },
       };
     case "donut":
       return {
         type: "pie",
         emphasis: { focus: "series" },
+        lineStyle: { width: 1.5 },
       };
     case "h-bar":
       return {
         type: "bar",
         orientation: "h",
         emphasis: { focus: "series" },
+        lineStyle: { width: 1.5 },
       };
     case "area":
       return {
@@ -710,11 +719,13 @@ const getPropsByChartTypeForSeries = (type: string) => {
         smooth: true,
         areaStyle: {},
         showSymbol: false,
+        lineStyle: { width: 1.5 },
       };
     case "stacked":
       return {
         type: "bar",
         emphasis: { focus: "series" },
+        lineStyle: { width: 1.5 },
       };
     case "area-stacked":
       return {
@@ -726,6 +737,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
         emphasis: {
           focus: "series",
         },
+        lineStyle: { width: 1.5 },
       };
     case "gauge":
       return {
@@ -755,6 +767,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
         type: "bar",
         emphasis: { focus: "series" },
         orientation: "h",
+        lineStyle: { width: 1.5 },
       };
     default:
       return {

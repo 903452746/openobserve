@@ -6,6 +6,7 @@
       :fields="conditions"
       @add="addField"
       @remove="removeField"
+      @input:update="(name, field) => emits('input:update', name, field)"
     />
   </div>
 </template>
@@ -13,18 +14,19 @@
 <script lang="ts" setup>
 import FieldsInput from "./FieldsInput.vue";
 
-const props = defineProps(["columns", "conditions"]);
+defineProps(["columns", "conditions"]);
 
-const emits = defineEmits(["field:add", "field:remove", "update:conditions"]);
+const emits = defineEmits(["field:add", "field:remove", "input:update"]);
 
 const addField = (field: any) => {
   emits("field:add", field);
+  emits("input:update", "conditions", field);
 };
 
 const removeField = (field: any) => {
   emits("field:remove", field);
+  emits("input:update", "conditions", field);
 };
-
 </script>
 
 <style lang="scss" scoped></style>

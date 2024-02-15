@@ -13,13 +13,16 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use config::CONFIG;
+use config::{
+    cluster::{is_compactor, LOCAL_NODE_ROLE},
+    CONFIG,
+};
 use tokio::time;
 
-use crate::{common::infra::cluster::is_compactor, service};
+use crate::service;
 
 pub async fn run() -> Result<(), anyhow::Error> {
-    if !is_compactor(&super::cluster::LOCAL_NODE_ROLE) {
+    if !is_compactor(&LOCAL_NODE_ROLE) {
         return Ok(());
     }
 
@@ -28,8 +31,8 @@ pub async fn run() -> Result<(), anyhow::Error> {
     }
 
     tokio::task::spawn(async move { run_merge().await });
-    tokio::task::spawn(async move { run_delete().await });
-    tokio::task::spawn(async move { run_delete_files().await });
+    tokio::task::spawn(async move { run_retention().await });
+    tokio::task::spawn(async move { run_delay_deletion().await });
     tokio::task::spawn(async move { run_sync_to_db().await });
 
     Ok(())
@@ -52,14 +55,14 @@ async fn run_merge() -> Result<(), anyhow::Error> {
 }
 
 /// Deletion for data retention
-async fn run_delete() -> Result<(), anyhow::Error> {
+async fn run_retention() -> Result<(), anyhow::Error> {
     let mut interval = time::interval(time::Duration::from_secs(CONFIG.compact.interval + 1));
     interval.tick().await; // trigger the first run
     loop {
         interval.tick().await;
         let locker = service::compact::QUEUE_LOCKER.clone();
         let locker = locker.lock().await;
-        let ret = service::compact::run_delete().await;
+        let ret = service::compact::run_retention().await;
         if ret.is_err() {
             log::error!("[COMPACTOR] run data delete error: {}", ret.err().unwrap());
         }
@@ -68,14 +71,14 @@ async fn run_delete() -> Result<(), anyhow::Error> {
 }
 
 /// Delete files based on the file_file_deleted in the database
-async fn run_delete_files() -> Result<(), anyhow::Error> {
+async fn run_delay_deletion() -> Result<(), anyhow::Error> {
     let mut interval = time::interval(time::Duration::from_secs(CONFIG.compact.interval + 2));
     interval.tick().await; // trigger the first run
     loop {
         interval.tick().await;
         let locker = service::compact::QUEUE_LOCKER.clone();
         let locker = locker.lock().await;
-        let ret = service::compact::run_delete_files().await;
+        let ret = service::compact::run_delay_deletion().await;
         if ret.is_err() {
             log::error!("[COMPACTOR] run files delete error: {}", ret.err().unwrap());
         }
@@ -90,14 +93,8 @@ async fn run_sync_to_db() -> Result<(), anyhow::Error> {
     interval.tick().await; // trigger the first run
     loop {
         interval.tick().await;
-        let ret = service::db::compact::files::sync_cache_to_db().await;
-        if ret.is_err() {
-            log::error!(
-                "[COMPACTOR] run offset sync cache to db error: {}",
-                ret.err().unwrap()
-            );
-        } else {
-            log::info!("[COMPACTOR] run offset sync cache to db done");
+        if let Err(e) = service::db::compact::files::sync_cache_to_db().await {
+            log::error!("[COMPACTOR] run offset sync cache to db error: {}", e);
         }
     }
 }

@@ -16,9 +16,16 @@
 use std::collections::HashMap;
 
 use actix_web::{http, web, HttpResponse};
+use anyhow::Result;
 use bytes::BytesMut;
 use chrono::{Duration, Utc};
-use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
+use config::{
+    cluster,
+    meta::{stream::StreamType, usage::UsageType},
+    metrics,
+    utils::{flatten, json, time::parse_timestamp_micro_from_value},
+    CONFIG, DISTINCT_FIELDS,
+};
 use datafusion::arrow::datatypes::Schema;
 use opentelemetry::trace::{SpanId, TraceId};
 use opentelemetry_proto::tonic::collector::logs::v1::{
@@ -28,16 +35,11 @@ use prost::Message;
 
 use super::StreamMeta;
 use crate::{
-    common::{
-        infra::cluster,
-        meta::{
-            alerts::Alert,
-            http::HttpResponse as MetaHttpResponse,
-            ingestion::{IngestionResponse, StreamStatus},
-            stream::{SchemaRecords, StreamParams},
-            usage::UsageType,
-        },
-        utils::{flatten, json, time::parse_timestamp_micro_from_value},
+    common::meta::{
+        alerts::Alert,
+        http::HttpResponse as MetaHttpResponse,
+        ingestion::{IngestionResponse, StreamStatus},
+        stream::{SchemaRecords, StreamParams},
     },
     service::{
         db, distinct_values, get_formatted_stream_name,
@@ -56,7 +58,7 @@ pub async fn usage_ingest(
     in_stream_name: &str,
     body: web::Bytes,
     thread_id: usize,
-) -> Result<IngestionResponse, anyhow::Error> {
+) -> Result<IngestionResponse> {
     let start = std::time::Instant::now();
     let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let mut distinct_values = Vec::with_capacity(16);
@@ -74,7 +76,7 @@ pub async fn usage_ingest(
     }
 
     // check if we are allowed to ingest
-    if db::compact::retention::is_deleting_stream(org_id, stream_name, StreamType::Logs, None) {
+    if db::compact::retention::is_deleting_stream(org_id, StreamType::Logs, stream_name, None) {
         return Err(anyhow::anyhow!("stream [{stream_name}] is being deleted"));
     }
 
@@ -84,7 +86,7 @@ pub async fn usage_ingest(
     let mut stream_alerts_map: HashMap<String, Vec<Alert>> = HashMap::new();
     let mut stream_status = StreamStatus::new(stream_name);
 
-    let mut trigger: TriggerAlertData = None;
+    let mut trigger: Option<TriggerAlertData> = None;
 
     let partition_det =
         crate::service::ingestion::get_stream_partition_keys(stream_name, &stream_schema_map).await;
@@ -108,7 +110,13 @@ pub async fn usage_ingest(
         let mut value = flatten::flatten(item)?;
 
         // get json object
-        let local_val = value.as_object_mut().unwrap();
+        let mut local_val = match value.take() {
+            json::Value::Object(v) => v,
+            _ => {
+                stream_status.status.failed += 1; // transform failed or dropped
+                continue;
+            }
+        };
 
         // handle timestamp
         let timestamp = match local_val.get(&CONFIG.common.column_timestamp) {
@@ -132,6 +140,23 @@ pub async fn usage_ingest(
             CONFIG.common.column_timestamp.clone(),
             json::Value::Number(timestamp.into()),
         );
+
+        let mut to_add_distinct_values = vec![];
+        // get distinct_value item
+        for field in DISTINCT_FIELDS.iter() {
+            if let Some(val) = local_val.get(field) {
+                if !val.is_null() {
+                    to_add_distinct_values.push(distinct_values::DvItem {
+                        stream_type: StreamType::Logs,
+                        stream_name: stream_name.to_string(),
+                        field_name: field.to_string(),
+                        field_value: val.as_str().unwrap().to_string(),
+                        filter_name: "".to_string(),
+                        filter_value: "".to_string(),
+                    });
+                }
+            }
+        }
 
         let local_trigger = match super::add_valid_record(
             &StreamMeta {
@@ -160,21 +185,8 @@ pub async fn usage_ingest(
             trigger = local_trigger;
         }
 
-        // get distinct_value item
-        for field in DISTINCT_FIELDS.iter() {
-            if let Some(val) = local_val.get(field) {
-                if !val.is_null() {
-                    distinct_values.push(distinct_values::DvItem {
-                        stream_type: StreamType::Logs,
-                        stream_name: stream_name.to_string(),
-                        field_name: field.to_string(),
-                        field_value: val.as_str().unwrap().to_string(),
-                        filter_name: "".to_string(),
-                        filter_value: "".to_string(),
-                    });
-                }
-            }
-        }
+        // add distinct values
+        distinct_values.extend(to_add_distinct_values);
     }
 
     // write data to wal
@@ -226,7 +238,8 @@ pub async fn handle_grpc_request(
     request: ExportLogsServiceRequest,
     is_grpc: bool,
     in_stream_name: Option<&str>,
-) -> Result<HttpResponse, anyhow::Error> {
+    user_email: &str,
+) -> Result<HttpResponse> {
     if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
         return Ok(
             HttpResponse::InternalServerError().json(MetaHttpResponse::error(
@@ -301,7 +314,7 @@ pub async fn handle_grpc_request(
     );
     // End Register Transforms for stream
 
-    let mut trigger: TriggerAlertData = None;
+    let mut trigger: Option<TriggerAlertData> = None;
 
     let mut data_buf: HashMap<String, SchemaRecords> = HashMap::new();
 
@@ -398,8 +411,29 @@ pub async fn handle_grpc_request(
                         &mut runtime,
                     )?;
                 }
+
                 // get json object
-                let local_val = rec.as_object_mut().unwrap();
+                let local_val = match rec.take() {
+                    json::Value::Object(v) => v,
+                    _ => unreachable!(),
+                };
+
+                let mut to_add_distinct_values = vec![];
+                // get distinct_value item
+                for field in DISTINCT_FIELDS.iter() {
+                    if let Some(val) = local_val.get(field) {
+                        if !val.is_null() {
+                            to_add_distinct_values.push(distinct_values::DvItem {
+                                stream_type: StreamType::Logs,
+                                stream_name: stream_name.to_string(),
+                                field_name: field.to_string(),
+                                field_value: val.as_str().unwrap().to_string(),
+                                filter_name: "".to_string(),
+                                filter_value: "".to_string(),
+                            });
+                        }
+                    }
+                }
 
                 let local_trigger = match super::add_valid_record(
                     &StreamMeta {
@@ -427,22 +461,7 @@ pub async fn handle_grpc_request(
                 if local_trigger.is_some() {
                     trigger = local_trigger;
                 }
-
-                // get distinct_value item
-                for field in DISTINCT_FIELDS.iter() {
-                    if let Some(val) = local_val.get(field) {
-                        if !val.is_null() {
-                            distinct_values.push(distinct_values::DvItem {
-                                stream_type: StreamType::Logs,
-                                stream_name: stream_name.to_string(),
-                                field_name: field.to_string(),
-                                field_value: val.as_str().unwrap().to_string(),
-                                filter_name: "".to_string(),
-                                filter_value: "".to_string(),
-                            });
-                        }
-                    }
-                }
+                distinct_values.extend(to_add_distinct_values);
             }
         }
     }
@@ -491,6 +510,7 @@ pub async fn handle_grpc_request(
         .inc();
 
     req_stats.response_time = start.elapsed().as_secs_f64();
+    req_stats.user_email = Some(user_email.to_string());
     // metric + data usage
     report_request_usage_stats(
         req_stats,
@@ -580,8 +600,15 @@ mod tests {
             resource_logs: vec![res_logs],
         };
 
-        let result =
-            handle_grpc_request(org_id, thread_id, request, true, Some("test_stream")).await;
+        let result = handle_grpc_request(
+            org_id,
+            thread_id,
+            request,
+            true,
+            Some("test_stream"),
+            "a@a.com",
+        )
+        .await;
         assert!(result.is_ok());
     }
 }

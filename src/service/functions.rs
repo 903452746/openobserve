@@ -25,11 +25,13 @@ use crate::{
     common::{
         infra::config::STREAM_FUNCTIONS,
         meta::{
+            authz::Authz,
             functions::{
                 FunctionList, StreamFunctionsList, StreamOrder, StreamTransform, Transform,
             },
             http::HttpResponse as MetaHttpResponse,
         },
+        utils::auth::{remove_ownership, set_ownership},
     },
     service::{db, ingestion::compile_vrl_function},
 };
@@ -55,14 +57,11 @@ pub async fn save_function(org_id: String, mut func: Transform) -> Result<HttpRe
             func.function = format!("{} \n .", func.function);
         }
         if func.trans_type.unwrap() == 0 {
-            match compile_vrl_function(func.function.as_str(), &org_id) {
-                Ok(_) => {}
-                Err(error) => {
-                    return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
-                        StatusCode::BAD_REQUEST.into(),
-                        error.to_string(),
-                    )));
-                }
+            if let Err(e) = compile_vrl_function(func.function.as_str(), &org_id) {
+                return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                    StatusCode::BAD_REQUEST.into(),
+                    e.to_string(),
+                )));
             }
         }
         extract_num_args(&mut func);
@@ -73,11 +72,13 @@ pub async fn save_function(org_id: String, mut func: Transform) -> Result<HttpRe
                     error.to_string(),
                 )),
             );
+        } else {
+            set_ownership(&org_id, "functions", Authz::new(&func.name)).await;
+            Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
+                http::StatusCode::OK.into(),
+                FN_SUCCESS.to_string(),
+            )))
         }
-        Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
-            http::StatusCode::OK.into(),
-            FN_SUCCESS.to_string(),
-        )))
     }
 }
 
@@ -108,14 +109,11 @@ pub async fn update_function(
         func.function = format!("{} \n .", func.function);
     }
     if func.trans_type.unwrap() == 0 {
-        match compile_vrl_function(&func.function, org_id) {
-            Ok(_) => {}
-            Err(error) => {
-                return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
-                    StatusCode::BAD_REQUEST.into(),
-                    error.to_string(),
-                )));
-            }
+        if let Err(e) = compile_vrl_function(&func.function, org_id) {
+            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                StatusCode::BAD_REQUEST.into(),
+                e.to_string(),
+            )));
         }
     }
     extract_num_args(&mut func);
@@ -157,21 +155,33 @@ pub async fn delete_function(org_id: String, fn_name: String) -> Result<HttpResp
         if !val.is_empty() {
             let names = val
                 .iter()
-                .map(|stream| stream.stream.clone())
+                .filter_map(|stream| {
+                    if !stream.is_removed {
+                        Some(stream.stream.to_owned())
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
-                StatusCode::BAD_REQUEST.into(),
-                format!("{} {}", FN_IN_USE, names),
-            )));
+            if !names.is_empty() {
+                return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
+                    StatusCode::BAD_REQUEST.into(),
+                    format!("{} {}", FN_IN_USE, fn_name),
+                )));
+            }
         }
     }
     let result = db::functions::delete(&org_id, &fn_name).await;
     match result {
-        Ok(_) => Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
-            http::StatusCode::OK.into(),
-            FN_DELETED.to_string(),
-        ))),
+        Ok(_) => {
+            remove_ownership(&org_id, "functions", Authz::new(&fn_name)).await;
+
+            Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
+                http::StatusCode::OK.into(),
+                FN_DELETED.to_string(),
+            )))
+        }
         Err(_) => Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
             StatusCode::NOT_FOUND.into(),
             FN_NOT_FOUND.to_string(),
@@ -210,15 +220,12 @@ pub async fn delete_stream_function(
         }
     };
 
-    if let Some(val) = existing_fn.streams {
-        if val.len() == 1 && val.first().unwrap().stream == stream_name {
-            existing_fn.streams = None;
-        } else {
-            existing_fn.streams = Some(
-                val.into_iter()
-                    .filter(|x| x.stream != stream_name)
-                    .collect::<Vec<StreamOrder>>(),
-            );
+    if let Some(ref mut val) = existing_fn.streams {
+        for stream in val.iter_mut() {
+            if stream.stream == stream_name {
+                stream.is_removed = true;
+                break;
+            }
         }
         if let Err(error) = db::functions::set(org_id, fn_name, &existing_fn).await {
             Ok(
@@ -332,7 +339,7 @@ fn remove_stream_fn_from_cache(key: &str, fn_name: &str) {
 mod tests {
     use super::*;
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_functions() {
         let mut trans = Transform {
             function: "function(row)  row.square = row[\"Year\"]*row[\"Year\"]  return row end"
@@ -354,6 +361,7 @@ mod tests {
                 stream: "test".to_owned(),
                 stream_type: StreamType::Logs,
                 order: 0,
+                is_removed: false,
             }]),
         };
 

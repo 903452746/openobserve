@@ -15,10 +15,10 @@
 
 use std::{str::FromStr, sync::Arc};
 
-use ahash::AHashMap as HashMap;
 use config::{
+    ider,
     meta::stream::{FileKey, FileMeta, StreamType},
-    utils::{parquet::new_parquet_writer, schema::infer_json_schema_from_values},
+    utils::{flatten, json, parquet::new_parquet_writer, schema::infer_json_schema_from_values},
     CONFIG, PARQUET_BATCH_SIZE,
 };
 use datafusion::{
@@ -44,6 +44,8 @@ use datafusion::{
     prelude::{cast, col, lit, Expr, SessionContext},
     scalar::ScalarValue,
 };
+use hashbrown::HashMap;
+use infra::cache::tmpfs;
 use once_cell::sync::Lazy;
 use parquet::arrow::ArrowWriter;
 use regex::Regex;
@@ -53,14 +55,10 @@ use super::{
     transform_udf::get_all_transform,
 };
 use crate::{
-    common::{
-        infra::cache::tmpfs,
-        meta::{
-            functions::VRLResultResolver,
-            search::{SearchType, Session as SearchSession},
-            sql,
-        },
-        utils::{flatten, json},
+    common::meta::{
+        functions::VRLResultResolver,
+        search::{SearchType, Session as SearchSession},
+        sql,
     },
     service::search::sql::Sql,
 };
@@ -97,7 +95,7 @@ pub async fn sql(
     let mut ctx = if !file_type.eq(&FileType::ARROW) {
         register_table(session, schema.clone(), "tbl", files, file_type.clone()).await?
     } else {
-        let ctx = prepare_datafusion_context(&session.search_type)?;
+        let ctx = prepare_datafusion_context(session.work_group.clone(), &session.search_type)?;
 
         let record_batches = in_records_batches.unwrap();
         let mem_table = Arc::new(MemTable::try_new(schema.clone(), vec![record_batches])?);
@@ -423,7 +421,12 @@ async fn get_fast_mode_ctx(
     file_type: FileType,
 ) -> Result<(SessionContext, Arc<Schema>)> {
     let mut files = files.to_vec();
-    files.sort_by(|a, b| a.meta.min_ts.cmp(&b.meta.min_ts));
+    let desc = sql.meta.order_by.is_empty() || sql.meta.order_by[0].1;
+    if desc {
+        files.sort_by(|a, b| a.meta.min_ts.cmp(&b.meta.min_ts));
+    } else {
+        files.sort_by(|a, b| b.meta.min_ts.cmp(&a.meta.min_ts));
+    };
 
     let mut loaded_records = 0;
     let mut new_files = Vec::new();
@@ -431,7 +434,7 @@ async fn get_fast_mode_ctx(
     for i in (0..files.len()).rev() {
         loaded_records += files.get(i).unwrap().meta.records as usize;
         new_files.push(files[i].clone());
-        if loaded_records >= needs {
+        if loaded_records >= needs && (desc || new_files.len() > 1) {
             break;
         }
     }
@@ -440,6 +443,7 @@ async fn get_fast_mode_ctx(
         id: format!("{}-fast", session.id),
         storage_type: session.storage_type.clone(),
         search_type: session.search_type.clone(),
+        work_group: session.work_group.clone(),
     };
     let mut ctx =
         register_table(&fast_session, schema.clone(), "tbl", &new_files, file_type).await?;
@@ -481,14 +485,8 @@ pub async fn merge(
         return Ok(batches.to_owned());
     }
 
-    // let start = std::time::Instant::now();
-
     // write temp file
     let (schema, work_dir) = merge_write_recordbatch(batches)?;
-    // log::info!(
-    //     "merge_write_recordbatch took {:.3} seconds.",
-    //     start.elapsed().as_secs_f64()
-    // );
     if schema.fields().is_empty() {
         return Ok(vec![]);
     }
@@ -513,13 +511,8 @@ pub async fn merge(
         }
     };
 
-    // log::info!(
-    //     "merge_rewrite_sql took {:.3} seconds.",
-    //     start.elapsed().as_secs_f64()
-    // );
-
     // query data
-    let mut ctx = prepare_datafusion_context(&SearchType::Normal)?;
+    let mut ctx = prepare_datafusion_context(None, &SearchType::Normal)?;
     // Configure listing options
     let file_format = ParquetFormat::default();
     let listing_options = ListingOptions::new(Arc::new(file_format))
@@ -569,8 +562,6 @@ pub async fn merge(
     }
     ctx.deregister_table("tbl")?;
 
-    // log::info!("Merge took {:.3} seconds.", start.elapsed().as_secs_f64());
-
     // clear temp file
     tmpfs::delete(&work_dir, true).unwrap();
 
@@ -579,7 +570,7 @@ pub async fn merge(
 
 fn merge_write_recordbatch(batches: &[RecordBatch]) -> Result<(Arc<Schema>, String)> {
     let mut i = 0;
-    let work_dir = format!("/tmp/merge/{}/", chrono::Utc::now().timestamp_micros());
+    let work_dir = format!("/tmp/merge/{}/", ider::generate());
     let mut schema = Schema::empty();
     for row in batches.iter() {
         if row.num_rows() == 0 {
@@ -846,7 +837,7 @@ pub async fn convert_parquet_file(
 ) -> Result<()> {
     let start = std::time::Instant::now();
     // query data
-    let ctx = prepare_datafusion_context(&SearchType::Normal)?;
+    let ctx = prepare_datafusion_context(None, &SearchType::Normal)?;
 
     // Configure listing options
     let listing_options = match file_type {
@@ -928,9 +919,9 @@ pub async fn convert_parquet_file(
     let file_meta = FileMeta::default();
     let mut writer = new_parquet_writer(buf, &schema, bloom_filter_fields, &file_meta);
     for batch in batches {
-        writer.write(&batch)?;
+        writer.write(&batch).await?;
     }
-    writer.close().unwrap();
+    writer.close().await?;
     ctx.deregister_table("tbl")?;
     drop(ctx);
 
@@ -950,7 +941,7 @@ pub async fn merge_parquet_files(
     original_size: i64,
 ) -> Result<FileMeta> {
     // query data
-    let runtime_env = create_runtime_env()?;
+    let runtime_env = create_runtime_env(None)?;
     let session_config = create_session_config(&SearchType::Normal)?;
     let ctx = SessionContext::new_with_config_rt(session_config, Arc::new(runtime_env));
 
@@ -1001,9 +992,9 @@ pub async fn merge_parquet_files(
 
     let mut writer = new_parquet_writer(buf, &schema, bloom_filter_fields, &file_meta);
     for batch in batches {
-        writer.write(&batch)?;
+        writer.write(&batch).await?;
     }
-    writer.close().unwrap();
+    writer.close().await?;
     ctx.deregister_table("tbl")?;
     drop(ctx);
 
@@ -1014,6 +1005,10 @@ pub fn create_session_config(search_type: &SearchType) -> Result<SessionConfig> 
     let mut config = SessionConfig::from_env()?
         .with_batch_size(PARQUET_BATCH_SIZE)
         .with_information_schema(true);
+    config = config.set_bool(
+        "datafusion.execution.listing_table_ignore_subdirectory",
+        false,
+    );
     if search_type == &SearchType::Normal {
         config = config.set_bool("datafusion.execution.parquet.pushdown_filters", true);
         config = config.set_bool("datafusion.execution.parquet.reorder_filters", true);
@@ -1027,7 +1022,7 @@ pub fn create_session_config(search_type: &SearchType) -> Result<SessionConfig> 
     Ok(config)
 }
 
-pub fn create_runtime_env() -> Result<RuntimeEnv> {
+pub fn create_runtime_env(_work_group: Option<String>) -> Result<RuntimeEnv> {
     let object_store_registry = DefaultObjectStoreRegistry::new();
 
     let memory = super::storage::memory::FS::new();
@@ -1041,17 +1036,30 @@ pub fn create_runtime_env() -> Result<RuntimeEnv> {
     let rn_config =
         RuntimeConfig::new().with_object_store_registry(Arc::new(object_store_registry));
     let rn_config = if CONFIG.memory_cache.datafusion_max_size > 0 {
+        #[cfg(not(feature = "enterprise"))]
+        let memory_size = CONFIG.memory_cache.datafusion_max_size;
+        #[cfg(feature = "enterprise")]
+        let mut memory_size = CONFIG.memory_cache.datafusion_max_size;
+        #[cfg(feature = "enterprise")]
+        if let Some(wg) = _work_group {
+            use o2_enterprise::enterprise::search::WorkGroup;
+            if let Ok(wg) = WorkGroup::from_str(&wg) {
+                let (_cpu, mem) = wg.get_resource();
+                memory_size = memory_size * mem as usize / 100;
+                log::debug!("group:{} memory pool size: {}", wg, memory_size);
+            }
+        }
         let mem_pool = super::MemoryPoolType::from_str(&CONFIG.memory_cache.datafusion_memory_pool)
             .map_err(|e| {
                 DataFusionError::Execution(format!("Invalid datafusion memory pool type: {}", e))
             })?;
         match mem_pool {
-            super::MemoryPoolType::Greedy => rn_config.with_memory_pool(Arc::new(
-                GreedyMemoryPool::new(CONFIG.memory_cache.datafusion_max_size),
-            )),
-            super::MemoryPoolType::Fair => rn_config.with_memory_pool(Arc::new(
-                FairSpillPool::new(CONFIG.memory_cache.datafusion_max_size),
-            )),
+            super::MemoryPoolType::Greedy => {
+                rn_config.with_memory_pool(Arc::new(GreedyMemoryPool::new(memory_size)))
+            }
+            super::MemoryPoolType::Fair => {
+                rn_config.with_memory_pool(Arc::new(FairSpillPool::new(memory_size)))
+            }
             super::MemoryPoolType::None => rn_config,
         }
     } else {
@@ -1061,10 +1069,11 @@ pub fn create_runtime_env() -> Result<RuntimeEnv> {
 }
 
 pub fn prepare_datafusion_context(
+    work_group: Option<String>,
     search_type: &SearchType,
 ) -> Result<SessionContext, DataFusionError> {
     let session_config = create_session_config(search_type)?;
-    let runtime_env = create_runtime_env()?;
+    let runtime_env = create_runtime_env(work_group)?;
     Ok(SessionContext::new_with_config_rt(
         session_config,
         Arc::new(runtime_env),
@@ -1094,7 +1103,7 @@ pub async fn register_table(
     files: &[FileKey],
     file_type: FileType,
 ) -> Result<SessionContext> {
-    let ctx = prepare_datafusion_context(&session.search_type)?;
+    let ctx = prepare_datafusion_context(session.work_group.clone(), &session.search_type)?;
     // Configure listing options
     let listing_options = match file_type {
         FileType::PARQUET => {
@@ -1238,14 +1247,14 @@ mod tests {
 
     use super::*;
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_register_udf() {
         let mut ctx = SessionContext::new();
         let _ = register_udf(&mut ctx, "nexus").await;
         // assert!(res)
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_merge_write_recordbatch() {
         // define a schema.
         let schema1 = Arc::new(Schema::new(vec![
@@ -1280,7 +1289,7 @@ mod tests {
         assert!(!res.1.is_empty())
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_merge() {
         // define a schema.
         let schema = Arc::new(Schema::new(vec![Field::new("f", DataType::Int32, false)]));

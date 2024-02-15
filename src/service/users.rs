@@ -15,11 +15,8 @@
 
 use std::io::Error;
 
-use actix_web::{
-    http::{self, StatusCode},
-    HttpResponse,
-};
-use uuid::Uuid;
+use actix_web::{http, HttpResponse};
+use config::{ider, utils::rand::generate_random_string};
 
 use crate::{
     common::{
@@ -31,10 +28,7 @@ use crate::{
                 DBUser, UpdateUser, User, UserList, UserOrg, UserRequest, UserResponse, UserRole,
             },
         },
-        utils::{
-            auth::{get_hash, is_root_user},
-            rand::generate_random_string,
-        },
+        utils::auth::{get_hash, is_root_user},
     },
     service::db,
 };
@@ -44,13 +38,11 @@ pub async fn post_user(
     usr_req: UserRequest,
     initiator_id: &str,
 ) -> Result<HttpResponse, Error> {
+    let initiator_user = db::user::get(Some(org_id), initiator_id).await;
     if is_root_user(initiator_id)
-        || db::user::get(Some(org_id), initiator_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .role
-            .eq(&UserRole::Admin)
+        || (initiator_user.is_ok()
+            && initiator_user.as_ref().unwrap().is_some()
+            && initiator_user.unwrap().unwrap().role.eq(&UserRole::Admin))
     {
         let existing_user = if is_root_user(&usr_req.email) {
             db::user::get(None, &usr_req.email).await
@@ -58,7 +50,7 @@ pub async fn post_user(
             db::user::get(Some(org_id), &usr_req.email).await
         };
         if existing_user.is_err() {
-            let salt = Uuid::new_v4().to_string();
+            let salt = ider::uuid();
             let password = get_hash(&usr_req.password, &salt);
             let token = generate_random_string(16);
             let rum_token = format!("rum{}", generate_random_string(16));
@@ -71,6 +63,29 @@ pub async fn post_user(
                 usr_req.is_external,
             );
             db::user::set(user).await.unwrap();
+            // Update OFGA
+            #[cfg(feature = "enterprise")]
+            {
+                use o2_enterprise::enterprise::openfga::authorizer::authz::{
+                    get_user_role_tuple, update_tuples,
+                };
+
+                let mut tuples = vec![];
+                get_user_role_tuple(
+                    &usr_req.role.to_string(),
+                    &usr_req.email,
+                    &org_id.replace(' ', "_"),
+                    &mut tuples,
+                );
+                match update_tuples(tuples, vec![]).await {
+                    Ok(_) => {
+                        log::info!("Orgs updated to the openfga");
+                    }
+                    Err(e) => {
+                        log::error!("Error updating orgs to the openfga: {}", e);
+                    }
+                }
+            }
             Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
                 http::StatusCode::OK.into(),
                 "User saved successfully".to_string(),
@@ -78,12 +93,12 @@ pub async fn post_user(
         } else {
             Ok(HttpResponse::BadRequest().json(MetaHttpResponse::message(
                 http::StatusCode::BAD_REQUEST.into(),
-                "Unable to process your request".to_string(),
+                "User already exists".to_string(),
             )))
         }
     } else {
         Ok(HttpResponse::Unauthorized().json(MetaHttpResponse::error(
-            StatusCode::UNAUTHORIZED.into(),
+            http::StatusCode::UNAUTHORIZED.into(),
             "Not Allowed".to_string(),
         )))
     }
@@ -91,7 +106,7 @@ pub async fn post_user(
 
 pub async fn update_db_user(mut db_user: DBUser) -> Result<(), anyhow::Error> {
     if db_user.password.is_empty() {
-        let salt = Uuid::new_v4().to_string();
+        let salt = ider::uuid();
         let password = get_hash(&db_user.password, &salt);
         db_user.password = password;
         db_user.salt = salt;
@@ -123,6 +138,9 @@ pub async fn update_user(
     } else {
         db::user::get(Some(org_id), email).await
     };
+
+    let mut old_role = None;
+    let mut new_role = None;
 
     if existing_user.is_ok() {
         let mut new_user;
@@ -195,7 +213,9 @@ pub async fn update_user(
                         || (local_user.role.eq(&UserRole::Admin)
                             || local_user.role.eq(&UserRole::Root)))
                 {
+                    old_role = Some(new_user.role);
                     new_user.role = user.role.unwrap();
+                    new_role = Some(new_user.role.clone());
                     is_org_updated = true;
                 }
                 if user.token.is_some() {
@@ -232,13 +252,34 @@ pub async fn update_user(
                             }
 
                             db::user::set(db_user).await.unwrap();
+
+                            #[cfg(feature = "enterprise")]
+                            {
+                                use o2_enterprise::enterprise::openfga::authorizer::authz::update_user_role;
+                                if old_role.is_some() && new_role.is_some() {
+                                    let old = old_role.unwrap();
+                                    let new = new_role.unwrap();
+                                    if !old.eq(&new) {
+                                        update_user_role(
+                                            &old.to_string(),
+                                            &new.to_string(),
+                                            email,
+                                            org_id,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+
+                            #[cfg(not(feature = "enterprise"))]
+                            log::debug!("Role chnaged from {:?} to {:?}", old_role, new_role);
                             Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
                                 http::StatusCode::OK.into(),
                                 "User updated successfully".to_string(),
                             )))
                         }
                         Err(_) => Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-                            StatusCode::NOT_FOUND.into(),
+                            http::StatusCode::NOT_FOUND.into(),
                             "User not found".to_string(),
                         ))),
                     }
@@ -253,13 +294,13 @@ pub async fn update_user(
                 }
             }
             None => Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-                StatusCode::NOT_FOUND.into(),
+                http::StatusCode::NOT_FOUND.into(),
                 "User not found".to_string(),
             ))),
         }
     } else {
         Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-            StatusCode::NOT_FOUND.into(),
+            http::StatusCode::NOT_FOUND.into(),
             "User not found".to_string(),
         )))
     }
@@ -295,7 +336,7 @@ pub async fn add_user_to_org(
                     name: local_org.to_string(),
                     token,
                     rum_token: Some(rum_token),
-                    role,
+                    role: role.clone(),
                 }]
             } else {
                 orgs.retain(|org| !org.name.eq(&local_org));
@@ -303,25 +344,44 @@ pub async fn add_user_to_org(
                     name: local_org.to_string(),
                     token,
                     rum_token: Some(rum_token),
-                    role,
+                    role: role.clone(),
                 });
                 orgs
             };
             db_user.organizations = new_orgs;
             db::user::set(db_user).await.unwrap();
+
+            // Update OFGA
+            #[cfg(feature = "enterprise")]
+            {
+                use o2_enterprise::enterprise::openfga::authorizer::authz::{
+                    get_user_role_tuple, update_tuples,
+                };
+
+                let mut tuples = vec![];
+                get_user_role_tuple(&role.to_string(), email, org_id, &mut tuples);
+                match update_tuples(tuples, vec![]).await {
+                    Ok(_) => {
+                        log::info!("Orgs updated to the openfga");
+                    }
+                    Err(e) => {
+                        log::error!("Error updating orgs to the openfga: {}", e);
+                    }
+                }
+            }
             Ok(HttpResponse::Ok().json(MetaHttpResponse::message(
                 http::StatusCode::OK.into(),
                 "User added to org successfully".to_string(),
             )))
         } else {
             Ok(HttpResponse::Unauthorized().json(MetaHttpResponse::error(
-                StatusCode::UNAUTHORIZED.into(),
+                http::StatusCode::UNAUTHORIZED.into(),
                 "Not Allowed".to_string(),
             )))
         }
     } else {
         Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-            StatusCode::NOT_FOUND.into(),
+            http::StatusCode::NOT_FOUND.into(),
             "User not found".to_string(),
         )))
     }
@@ -380,6 +440,21 @@ pub async fn list_users(org_id: &str) -> Result<HttpResponse, Error> {
         }
     }
 
+    #[cfg(feature = "enterprise")]
+    {
+        if !org_id.eq(DEFAULT_ORG) {
+            let root = ROOT_USER.get("root").unwrap();
+            let root_user = root.value();
+            user_list.push(UserResponse {
+                email: root_user.email.clone(),
+                role: root_user.role.clone(),
+                first_name: root_user.first_name.clone(),
+                last_name: root_user.last_name.clone(),
+                is_external: root_user.is_external,
+            })
+        }
+    }
+
     Ok(HttpResponse::Ok().json(UserList { data: user_list }))
 }
 
@@ -419,19 +494,19 @@ pub async fn remove_user_from_org(
                     )))
                 } else {
                     Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-                        StatusCode::NOT_FOUND.into(),
+                        http::StatusCode::NOT_FOUND.into(),
                         "User for the organization not found".to_string(),
                     )))
                 }
             }
             Err(_) => Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-                StatusCode::NOT_FOUND.into(),
+                http::StatusCode::NOT_FOUND.into(),
                 "User for the organization not found".to_string(),
             ))),
         }
     } else {
         Ok(HttpResponse::Unauthorized().json(MetaHttpResponse::error(
-            StatusCode::UNAUTHORIZED.into(),
+            http::StatusCode::UNAUTHORIZED.into(),
             "Not Allowed".to_string(),
         )))
     }
@@ -445,7 +520,7 @@ pub async fn delete_user(email_id: &str) -> Result<HttpResponse, Error> {
             "User deleted".to_string(),
         ))),
         Err(e) => Ok(HttpResponse::NotFound().json(MetaHttpResponse::error(
-            StatusCode::NOT_FOUND.into(),
+            http::StatusCode::NOT_FOUND.into(),
             e.to_string(),
         ))),
     }
@@ -475,7 +550,7 @@ pub fn is_user_from_org(orgs: Vec<UserOrg>, org_id: &str) -> (bool, UserOrg) {
 }
 
 pub(crate) async fn create_root_user(org_id: &str, usr_req: UserRequest) -> Result<(), Error> {
-    let salt = Uuid::new_v4().to_string();
+    let salt = ider::uuid();
     let password = get_hash(&usr_req.password, &salt);
     let token = generate_random_string(16);
     let rum_token = format!("rum{}", generate_random_string(16));
@@ -493,8 +568,9 @@ pub(crate) async fn create_root_user(org_id: &str, usr_req: UserRequest) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use infra::db as infra_db;
+
     use super::*;
-    use crate::common::infra::db as infra_db;
 
     async fn set_up() {
         USERS.insert(
@@ -514,25 +590,25 @@ mod tests {
         );
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_list_users() {
         set_up().await;
         assert!(list_users("dummy").await.is_ok())
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_root_user_exists() {
         set_up().await;
         assert!(!root_user_exists().await);
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_get_user() {
         set_up().await;
         assert!(get_user(Some("dummy"), "admin@zo.dev").await.is_some())
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_post_user() {
         infra_db::create_table().await.unwrap();
         set_up().await;
@@ -554,7 +630,7 @@ mod tests {
         assert!(resp.is_ok());
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_user() {
         infra_db::create_table().await.unwrap();
         set_up().await;

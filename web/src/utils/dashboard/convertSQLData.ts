@@ -177,10 +177,10 @@ export const convertSQLData = (
       bottom:
         legendConfig.orient === "horizontal" && panelSchema.config?.show_legends
           ? panelSchema.config?.axis_width == null
-            ? 40
+            ? 50
             : 60
           : panelSchema.config?.axis_width == null
-          ? 20
+          ? 35
           : "40",
     },
     tooltip: {
@@ -323,6 +323,8 @@ export const convertSQLData = (
                     return arr.includes(i);
                   },
             overflow: index == xAxisKeys.length - 1 ? "none" : "truncate",
+            // hide axis label if overlaps
+            hideOverlap: true,
             width: 100,
             margin: 18 * (xAxisKeys.length - index - 1) + 5,
           },
@@ -1443,10 +1445,6 @@ export const convertSQLData = (
     panelSchema.type != "gauge" &&
     panelSchema.type != "metric"
   ) {
-    const maxValue = options.series
-      .map((it: any) => it.name)
-      .reduce((max: any, it: any) => (max.length < it.length ? it : max));
-
     let legendWidth;
 
     if (
@@ -1463,6 +1461,17 @@ export const convertSQLData = (
         legendWidth = panelSchema.config.legend_width.value;
       }
     } else {
+      let maxValue: string;
+      if (panelSchema.type === "pie" || panelSchema.type === "donut") {
+        maxValue = options.series[0].data.reduce((max: any, it: any) => {
+          return max.length < it?.name?.length ? it?.name : max;
+        }, "");
+      } else {
+        maxValue = options.series.reduce((max: any, it: any) => {
+          return max.length < it?.name?.length ? it?.name : max;
+        }, "");
+      }
+
       // If legend_width is not provided or has invalid format, calculate it based on other criteria
       legendWidth =
         Math.min(
@@ -1579,6 +1588,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
       return {
         type: "bar",
         emphasis: { focus: "series" },
+        lineStyle: { width: 1.5 },
       };
     case "line":
       return {
@@ -1587,6 +1597,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
         smooth: true,
         showSymbol: false,
         areaStyle: null,
+        lineStyle: { width: 1.5 },
       };
     case "scatter":
       return {
@@ -1612,6 +1623,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
           show: true,
         },
         radius: "80%",
+        lineStyle: { width: 1.5 },
       };
     case "donut":
       return {
@@ -1632,11 +1644,13 @@ const getPropsByChartTypeForSeries = (type: string) => {
         labelLine: {
           show: false,
         },
+        lineStyle: { width: 1.5 },
       };
     case "h-bar":
       return {
         type: "bar",
         emphasis: { focus: "series" },
+        lineStyle: { width: 1.5 },
       };
     case "area":
       return {
@@ -1645,6 +1659,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
         emphasis: { focus: "series" },
         areaStyle: {},
         showSymbol: false,
+        lineStyle: { width: 1.5 },
       };
     case "stacked":
       return {
@@ -1653,6 +1668,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
         emphasis: {
           focus: "series",
         },
+        lineStyle: { width: 1.5 },
       };
     case "heatmap":
       return {
@@ -1666,6 +1682,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
             shadowColor: "rgba(0, 0, 0, 0.5)",
           },
         },
+        lineStyle: { width: 1.5 },
       };
     case "area-stacked":
       return {
@@ -1677,6 +1694,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
           focus: "series",
         },
         showSymbol: false,
+        lineStyle: { width: 1.5 },
       };
     case "metric":
       return {
@@ -1690,6 +1708,7 @@ const getPropsByChartTypeForSeries = (type: string) => {
         emphasis: {
           focus: "series",
         },
+        lineStyle: { width: 1.5 },
       };
     case "gauge":
       return {

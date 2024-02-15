@@ -23,29 +23,67 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       ref="searchListContainer"
       style="width: 100%"
     >
-      <div class="text-center">
-        {{ noOfRecordsTitle }}
+      <div class="row">
+        <div class="col-6 text-left q-pl-lg q-mt-xs">
+          {{ noOfRecordsTitle }}
+        </div>
+        <div class="col-6 text-right q-pr-md q-gutter-xs pagination-block">
+          <q-pagination
+            v-model="pageNumberInput"
+            :key="
+              searchObj.data.queryResults.total +
+              '-' +
+              searchObj.data.resultGrid.currentPage
+            "
+            :max="
+              Math.max(
+                1,
+                Math.ceil(
+                  searchObj.data.queryResults.total /
+                    searchObj.meta.resultGrid.rowsPerPage
+                )
+              )
+            "
+            :input="false"
+            direction-links
+            :boundary-numbers="false"
+            :max-pages="5"
+            :ellipses="false"
+            icon-first="skip_previous"
+            icon-last="skip_next"
+            icon-prev="fast_rewind"
+            icon-next="fast_forward"
+            class="float-right paginator-section"
+            @update:model-value="getPageData('pageChange')"
+            rowsPerPageLabel="Rows per page"
+            :rows-per-page-options="rowsPerPageOptions"
+            :rows-per-page="searchObj.meta.resultGrid.rowsPerPage"
+            style="line-height: 30px; max-height: 30px"
+            data-test="logs-search-result-pagination"
+          />
+          <q-select
+            data-test="logs-search-result-records-per-page"
+            v-model="searchObj.meta.resultGrid.rowsPerPage"
+            :options="rowsPerPageOptions"
+            class="float-right select-pagination"
+            size="sm"
+            dense
+            @update:model-value="getPageData('recordsPerPage')"
+            style="line-height: 20px"
+          ></q-select>
+        </div>
       </div>
       <ChartRenderer
+        v-if="searchObj.meta.showHistogram && !searchObj.meta.sqlMode"
         data-test="logs-search-result-bar-chart"
         :data="plotChart"
-        v-show="
-          searchObj.meta.showHistogram &&
-          !searchObj.meta.sqlMode &&
-          searchObj.data.stream.streamType !== 'enrichment_tables'
-        "
         style="max-height: 100px"
         @updated:dataZoom="onChartUpdate"
       />
       <div
         class="q-pb-lg"
-        v-if="
-          searchObj.meta.showHistogram &&
-          !searchObj.meta.sqlMode &&
-          searchObj.data.stream.streamType !== 'enrichment_tables' &&
-          searchObj.data.histogram.xData.length === 0
-        "
         style="top: 50px; position: absolute; left: 45%"
+        v-if="searchObj.loadingHistogram == true"
       >
         <q-spinner-hourglass
           color="primary"
@@ -62,10 +100,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         :virtual-scroll-item-size="25"
         :virtual-scroll-sticky-size-start="0"
         :virtual-scroll-sticky-size-end="0"
-        :virtual-scroll-slice-size="300"
-        :virtual-scroll-slice-ratio-before="10"
+        :virtual-scroll-slice-size="100"
+        :virtual-scroll-slice-ratio-before="100"
         :items="searchObj.data.queryResults.hits"
-        @virtual-scroll="onScroll"
         :wrap-cells="
           searchObj.meta.toggleSourceWrap && searchObj.meta.flagWrapContent
             ? true
@@ -75,8 +112,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           wordBreak: 'break-word',
           height:
             !searchObj.meta.showHistogram || searchObj.meta.sqlMode
-              ? 'calc(100% - 0px)'
-              : 'calc(100% - 100px)',
+              ? 'calc(100% - 40px)'
+              : 'calc(100% - 140px)',
         }"
       >
         <template v-slot:before>
@@ -107,7 +144,58 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 </span>
               </th>
             </tr>
+            <tr v-if="searchObj.loading == true">
+              <td
+                :colspan="searchObj.data.resultGrid.columns.length"
+                class="text-bold"
+                style="opacity: 0.7"
+              >
+                <div class="text-subtitle2 text-weight-bold">
+                  <q-spinner-hourglass size="20px" />
+                  {{ t("confirmDialog.loading") }}
+                </div>
+              </td>
+            </tr>
           </thead>
+          <tr
+            data-test="log-search-result-function-error"
+            v-if="searchObj.data.functionError != ''"
+          >
+            <td
+              :colspan="searchObj.data.resultGrid.columns.length"
+              class="text-bold"
+              style="opacity: 0.6"
+            >
+              <div class="text-subtitle2 text-weight-bold bg-warning">
+                <q-btn
+                  :icon="
+                    expandedLogs['-1']
+                      ? 'expand_more'
+                      : 'chevron_right'
+                  "
+                  dense
+                  size="xs"
+                  flat
+                  class="q-mr-xs"
+                  data-test="table-row-expand-menu"
+                  @click.stop="expandLog('function_error', -1)"
+                ></q-btn
+                ><b>
+                  <q-icon name="warning" size="15px"></q-icon>
+                  {{ t("search.functionErrorLabel") }}</b
+                >
+              </div>
+            </td>
+          </tr>
+          <q-tr v-if="expandedLogs['-1']">
+            <td
+              :colspan="searchObj.data.resultGrid.columns.length"
+              class="bg-warning"
+              style="opacity: 0.7"
+            >
+              <pre>{{ searchObj.data.functionError }}</pre>
+            </td>
+          </q-tr>
         </template>
         <template v-slot="{ item: row, index }">
           <q-tr
@@ -128,6 +216,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <q-td
               v-for="column in searchObj.data.resultGrid.columns"
               :key="index + '-' + column.name"
+              :data-test="'log-table-column-' + index + '-' + column.name"
               class="field_list"
               style="cursor: pointer"
             >
@@ -146,7 +235,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   data-test="table-row-expand-menu"
                   @click.stop="expandLog(row, index)"
                 ></q-btn>
-                <high-light
+                <!-- <high-light
                   :content="
                     column.name == 'source'
                       ? column.prop(row)
@@ -169,7 +258,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                       ? column.prop(row, column.name)
                       : ''
                   "
-                ></high-light>
+                ></high-light> -->
+                {{ column.prop(row, column.name) }}
               </div>
               <div
                 v-if="column.closable && row[column.name]"
@@ -266,7 +356,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 </template>
 
 <script lang="ts">
-import { computed, defineComponent, ref, onMounted } from "vue";
+import { computed, defineComponent, ref, onMounted, onUpdated, onRenderTracked } from "vue";
 import { copyToClipboard, useQuasar } from "quasar";
 import { useStore } from "vuex";
 import { useI18n } from "vue-i18n";
@@ -306,6 +396,58 @@ export default defineComponent({
     },
   },
   methods: {
+    getPageData(actionType: string) {
+      if (actionType == "prev") {
+        if (this.searchObj.data.resultGrid.currentPage > 1) {
+          this.searchObj.data.resultGrid.currentPage =
+            this.searchObj.data.resultGrid.currentPage - 1;
+          this.pageNumberInput = this.searchObj.data.resultGrid.currentPage;
+          this.$emit("update:scroll");
+          this.searchTableRef.scrollTo(0);
+        }
+      } else if (actionType == "next") {
+        if (
+          this.searchObj.data.resultGrid.currentPage <=
+          Math.round(
+            this.searchObj.data.queryResults.total /
+              this.searchObj.meta.resultGrid.rowsPerPage
+          )
+        ) {
+          this.searchObj.data.resultGrid.currentPage =
+            this.searchObj.data.resultGrid.currentPage + 1;
+          this.pageNumberInput = this.searchObj.data.resultGrid.currentPage;
+          this.$emit("update:scroll");
+          this.searchTableRef.scrollTo(0);
+        }
+      } else if (actionType == "recordsPerPage") {
+        this.searchObj.data.resultGrid.currentPage = 1;
+        this.pageNumberInput = this.searchObj.data.resultGrid.currentPage;
+        this.refreshPartitionPagination();
+        this.$emit("update:scroll");
+        this.searchTableRef.scrollTo(0);
+      } else if (actionType == "pageChange") {
+        if (
+          this.pageNumberInput >
+          Math.ceil(
+            this.searchObj.data.queryResults.total /
+              this.searchObj.meta.resultGrid.rowsPerPage
+          )
+        ) {
+          this.$q.notify({
+            type: "negative",
+            message:
+              "Page number is out of range. Please provide valid page number.",
+            timeout: 1000,
+          });
+          this.pageNumberInput = this.searchObj.data.resultGrid.currentPage;
+          return false;
+        }
+
+        this.searchObj.data.resultGrid.currentPage = this.pageNumberInput;
+        this.$emit("update:scroll");
+        this.searchTableRef.scrollTo(0);
+      }
+    },
     closeColumn(col: any) {
       const RGIndex = this.searchObj.data.resultGrid.columns.indexOf(col.name);
       this.searchObj.data.resultGrid.columns.splice(RGIndex, 1);
@@ -323,18 +465,6 @@ export default defineComponent({
       this.searchObj.meta.showDetailTab = false;
       this.$emit("update:datetime", { start, end });
     },
-    onScroll(info: any) {
-      this.searchObj.meta.scrollInfo = info;
-      if (
-        info.ref.items.length / info.index <= 1.3 &&
-        this.searchObj.loading == false &&
-        this.searchObj.data.resultGrid.currentPage <=
-          this.searchObj.data.queryResults.hits.length /
-            this.searchObj.meta.resultGrid.rowsPerPage
-      ) {
-        this.$emit("update:scroll");
-      }
-    },
     onTimeBoxed(obj: any) {
       this.searchObj.meta.showDetailTab = false;
       this.searchObj.data.searchAround.indexTimestamp = obj.key;
@@ -350,6 +480,8 @@ export default defineComponent({
     const $q = useQuasar();
     const searchListContainer = ref(null);
     const noOfRecordsTitle = ref("");
+    const scrollPosition = ref(0);
+    const rowsPerPageOptions = [10, 25, 50, 100, 250, 500];
 
     const {
       searchObj,
@@ -357,7 +489,9 @@ export default defineComponent({
       searchAroundData,
       extractFTSFields,
       evaluateWrapContentFlag,
+      refreshPartitionPagination,
     } = useLogs();
+    const pageNumberInput = ref(1);
     const totalHeight = ref(0);
 
     const searchTableRef: any = ref(null);
@@ -366,6 +500,10 @@ export default defineComponent({
 
     onMounted(() => {
       reDrawChart();
+    });
+
+    onUpdated(() => {
+      pageNumberInput.value = searchObj.data.resultGrid.currentPage;
     });
 
     const reDrawChart = () => {
@@ -480,6 +618,10 @@ export default defineComponent({
       evaluateWrapContentFlag,
       useLocalWrapContent,
       noOfRecordsTitle,
+      scrollPosition,
+      rowsPerPageOptions,
+      pageNumberInput,
+      refreshPartitionPagination,
     };
   },
   computed: {
@@ -491,7 +633,7 @@ export default defineComponent({
     },
     updateTitle() {
       return this.searchObj.data.histogram.chartParams.title;
-    }
+    },
   },
   watch: {
     toggleWrapFlag() {
@@ -503,7 +645,7 @@ export default defineComponent({
     },
     updateTitle() {
       this.noOfRecordsTitle = this.searchObj.data.histogram.chartParams.title;
-    }
+    },
   },
 });
 </script>
@@ -511,6 +653,18 @@ export default defineComponent({
 <style lang="scss" scoped>
 .max-result {
   width: 170px;
+}
+
+.pagination-block {
+  .q-field--dense .q-field__control,
+  .q-field--dense .q-field__marginal {
+    height: 30px !important;
+  }
+
+  .select-pagination {
+    position: relative;
+    top: -5px;
+  }
 }
 
 .search-list {
@@ -717,6 +871,13 @@ export default defineComponent({
     .q-btn .q-icon {
       font-size: 12px !important;
     }
+  }
+
+  .q-pagination__content input {
+    border: 1px solid lightgrey;
+    top: 7px;
+    position: relative;
+    height: 30px;
   }
 }
 </style>

@@ -36,7 +36,40 @@
     <div class="text-subtitle1 q-pl-xs q-mt-md">
       Install OpenObserve collector
     </div>
-    <ContentCopy class="q-mt-sm" :content="collectorCmd" />
+    <div v-if="config.isCloud == 'true'">
+      <ContentCopy class="q-mt-sm" :content="collectorCmd" />
+    </div>
+    <div v-else>
+      <q-tabs v-model="tab" horizontal
+align="left" no-caps>
+        <q-tab data-test="kubernetes-default-tab" name="external" :label="t('ingestion.external')" />
+        <q-tab data-test="kubernetes-this-tab" name="internal"
+:label="t('ingestion.internal')"
+          ><q-tooltip>
+            {{ t("ingestion.internalLabel") }}
+          </q-tooltip></q-tab
+        >
+      </q-tabs>
+      <q-separator />
+      <q-tab-panels
+        v-model="tab"
+        animated
+        swipeable
+        vertical
+        transition-prev="jump-up"
+        transition-next="jump-up"
+      >
+        <q-tab-panel name="internal" data-test="kubernetes-tab-panels-this">
+          <ContentCopy class="q-mt-sm" :content="collectorCmdThisCluster" />
+          <pre>Format of the URL is: http://&lt;helm-release-name&gt;-openobserve-router.&lt;namespace&gt;.svc.cluster.local 
+Make changes accordingly to the above URL.</pre>
+        </q-tab-panel>
+
+        <q-tab-panel name="external" data-test="kubernetes-tab-panels-default">
+          <ContentCopy class="q-mt-sm" :content="collectorCmd" />
+        </q-tab-panel>
+      </q-tab-panels>
+    </div>
     <br />
     <hr />
     <div class="text-subtitle1 q-pl-xs q-mt-md">
@@ -100,6 +133,8 @@ import type { Endpoint } from "@/ts/interfaces";
 import ContentCopy from "@/components/CopyContent.vue";
 import { useStore } from "vuex";
 import { b64EncodeUnicode } from "../../../utils/zincutils";
+import config from "@/aws-exports";
+import { useI18n } from "vue-i18n";
 
 const store = useStore();
 
@@ -121,6 +156,8 @@ const endpoint: any = ref({
 });
 
 const url = new URL(store.state.API_ENDPOINT);
+const tab = ref("external");
+const { t } = useI18n();
 
 endpoint.value = {
   url: store.state.API_ENDPOINT,
@@ -143,6 +180,16 @@ const collectorCmd = computed(() => {
   --set exporters."otlphttp/openobserve".headers.Authorization="Basic [BASIC_PASSCODE]"  \\
   --set exporters."otlphttp/openobserve_k8s_events".endpoint=${endpoint.value.url}/api/${props.currOrgIdentifier}/  \\
   --set exporters."otlphttp/openobserve_k8s_events".headers.Authorization="Basic [BASIC_PASSCODE]"`;
+});
+
+const collectorCmdThisCluster = computed(() => {
+  return `helm --namespace openobserve-collector \\
+  install o2c openobserve/openobserve-collector \\
+  --set exporters."otlphttp/openobserve".endpoint=http://o2-openobserve-router.openobserve.svc.cluster.local:5080/api/${props.currOrgIdentifier}/  \\
+  --set exporters."otlphttp/openobserve".headers.Authorization="Basic [BASIC_PASSCODE]"  \\
+  --set exporters."otlphttp/openobserve_k8s_events".endpoint=http://o2-openobserve-router.openobserve.svc.cluster.local:5080/api/${props.currOrgIdentifier}/  \\
+  --set exporters."otlphttp/openobserve_k8s_events".headers.Authorization="Basic [BASIC_PASSCODE]" \\
+  --create-namespace`;
 });
 </script>
 

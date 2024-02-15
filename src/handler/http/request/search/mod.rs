@@ -13,25 +13,32 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-pub mod saved_view;
 use std::{collections::HashMap, io::Error};
 
 use actix_web::{get, http::StatusCode, post, web, HttpRequest, HttpResponse};
 use chrono::Duration;
-use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
+use config::{
+    ider,
+    meta::{
+        stream::StreamType,
+        usage::{RequestStats, UsageType},
+    },
+    metrics,
+    utils::{base64, json},
+    CONFIG, DISTINCT_FIELDS,
+};
+use infra::errors;
 
 use crate::{
     common::{
-        infra::{config::STREAM_SCHEMAS, errors},
-        meta::{
-            self,
-            http::HttpResponse as MetaHttpResponse,
-            usage::{RequestStats, UsageType},
-        },
-        utils::{base64, functions, http::get_stream_type_from_request, json},
+        infra::config::STREAM_SCHEMAS,
+        meta::{self, http::HttpResponse as MetaHttpResponse},
+        utils::{functions, http::get_stream_type_from_request},
     },
     service::{search as SearchService, usage::report_request_usage_stats},
 };
+
+pub mod saved_view;
 
 /// SearchStreamData
 #[utoipa::path(
@@ -105,7 +112,7 @@ pub async fn search(
     body: web::Bytes,
 ) -> Result<HttpResponse, Error> {
     let start = std::time::Instant::now();
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = ider::uuid();
 
     let org_id = org_id.into_inner();
     let query = web::Query::<HashMap<String, String>>::from_query(in_req.query_string()).unwrap();
@@ -121,6 +128,60 @@ pub async fn search(
     };
     if let Err(e) = req.decode() {
         return Ok(MetaHttpResponse::bad_request(e));
+    }
+
+    let user_id = in_req.headers().get("user_id").unwrap();
+    let mut rpc_req: crate::handler::grpc::cluster_rpc::SearchRequest = req.to_owned().into();
+    rpc_req.org_id = org_id.to_string();
+    rpc_req.stream_type = stream_type.to_string();
+    let resp: SearchService::sql::Sql = match crate::service::search::sql::Sql::new(&rpc_req).await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(match e {
+                errors::Error::ErrorCode(code) => HttpResponse::InternalServerError()
+                    .json(meta::http::HttpResponse::error_code(code)),
+                _ => HttpResponse::InternalServerError().json(meta::http::HttpResponse::error(
+                    StatusCode::INTERNAL_SERVER_ERROR.into(),
+                    e.to_string(),
+                )),
+            });
+        }
+    };
+
+    // Check permissions on stream
+    #[cfg(feature = "enterprise")]
+    {
+        use crate::common::{
+            infra::config::USERS,
+            utils::auth::{is_root_user, AuthExtractor},
+        };
+
+        if !is_root_user(user_id.to_str().unwrap()) {
+            let user: meta::user::User = USERS
+                .get(&format!("{org_id}/{}", user_id.to_str().unwrap()))
+                .unwrap()
+                .clone();
+
+            if user.is_external
+                && !crate::handler::http::auth::validator::check_permissions(
+                    user_id.to_str().unwrap(),
+                    AuthExtractor {
+                        auth: "".to_string(),
+                        method: "GET".to_string(),
+                        o2_type: format!("{}:{}", stream_type, resp.stream_name),
+                        org_id: org_id.clone(),
+                        bypass_check: false,
+                        parent_id: "".to_string(),
+                    },
+                    Some(user.role),
+                )
+                .await
+            {
+                return Ok(MetaHttpResponse::forbidden("Unauthorized Access"));
+            }
+        }
+        // Check permissions on stream ends
     }
 
     let mut query_fn = req.query.query_fn.and_then(|v| base64::decode(&v).ok());
@@ -140,12 +201,18 @@ pub async fn search(
     }
 
     // get a local search queue lock
+    #[cfg(not(feature = "enterprise"))]
     let locker = SearchService::QUEUE_LOCKER.clone();
+    #[cfg(not(feature = "enterprise"))]
     let locker = locker.lock().await;
+    #[cfg(not(feature = "enterprise"))]
     if !CONFIG.common.feature_query_queue_enabled {
         drop(locker);
     }
+    #[cfg(not(feature = "enterprise"))]
     let took_wait = start.elapsed().as_millis() as usize;
+    #[cfg(feature = "enterprise")]
+    let took_wait = 0;
 
     // do search
     match SearchService::search(&session_id, &org_id, stream_type, &req).await {
@@ -177,13 +244,14 @@ pub async fn search(
                 response_time: time,
                 size: res.scan_size as f64,
                 request_body: Some(req.query.sql),
+                user_email: Some(user_id.to_str().unwrap().to_string()),
                 ..Default::default()
             };
             let num_fn = req.query.query_fn.is_some() as u16;
             report_request_usage_stats(
                 req_stats,
                 &org_id,
-                "", // TODO see if we can steam name
+                &resp.stream_name,
                 StreamType::Logs,
                 UsageType::Search,
                 num_fn,
@@ -274,7 +342,7 @@ pub async fn around(
     in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
     let start = std::time::Instant::now();
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = ider::uuid();
 
     let mut uses_fn = false;
     let (org_id, stream_name) = path.into_inner();
@@ -582,7 +650,7 @@ async fn values_v1(
     query: &web::Query<HashMap<String, String>>,
 ) -> Result<HttpResponse, Error> {
     let start = std::time::Instant::now();
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = ider::uuid();
 
     let mut uses_fn = false;
     let fields = match query.get("fields") {
@@ -635,11 +703,11 @@ async fn values_v1(
     if start_time == 0 {
         return Ok(MetaHttpResponse::bad_request("start_time is empty"));
     }
-    let mut end_time = query
+    let end_time = query
         .get("end_time")
         .map_or(0, |v| v.parse::<i64>().unwrap_or(0));
     if end_time == 0 {
-        end_time = chrono::Utc::now().timestamp_micros();
+        return Ok(MetaHttpResponse::bad_request("end_time is empty"));
     }
 
     let timeout = query
@@ -673,11 +741,13 @@ async fn values_v1(
 
     // skip fields which arent part of the schema
     let key = format!("{org_id}/{stream_type}/{stream_name}");
-    let schema = if let Some(schema) = STREAM_SCHEMAS.get(&key) {
-        schema.value().last().unwrap().clone()
+    let r = STREAM_SCHEMAS.read().await;
+    let schema = if let Some(schema) = r.get(&key) {
+        schema.last().unwrap().clone()
     } else {
         arrow_schema::Schema::empty()
     };
+    drop(r);
 
     for field in &fields {
         // skip values for field which aren't part of the schema
@@ -790,7 +860,7 @@ async fn values_v2(
     query: &web::Query<HashMap<String, String>>,
 ) -> Result<HttpResponse, Error> {
     let start = std::time::Instant::now();
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = ider::uuid();
 
     let mut query_sql = format!(
         "SELECT field_value AS zo_sql_key, SUM(count) as zo_sql_num FROM distinct_values WHERE stream_type='{}' AND stream_name='{}' AND field_name='{}'",
@@ -819,11 +889,11 @@ async fn values_v2(
     if start_time == 0 {
         return Ok(MetaHttpResponse::bad_request("start_time is empty"));
     }
-    let mut end_time = query
+    let end_time = query
         .get("end_time")
         .map_or(0, |v| v.parse::<i64>().unwrap_or(0));
     if end_time == 0 {
-        end_time = chrono::Utc::now().timestamp_micros();
+        return Ok(MetaHttpResponse::bad_request("end_time is empty"));
     }
 
     let timeout = query
@@ -937,4 +1007,113 @@ async fn values_v2(
     .await;
 
     Ok(HttpResponse::Ok().json(resp))
+}
+
+/// SearchStreamPartition
+#[utoipa::path(
+    context_path = "/api",
+    tag = "Search",
+    operation_id = "SearchPartition",
+    security(
+        ("Authorization"= [])
+    ),
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+    ),
+    request_body(content = SearchRequest, description = "Search query", content_type = "application/json", example = json!({
+        "sql": "select * from k8s ",
+        "start_time": 1675182660872049i64,
+        "end_time": 1675185660872049i64
+    })),
+    responses(
+        (status = 200, description = "Success", content_type = "application/json", body = SearchResponse, example = json!({
+            "took": 155,
+            "file_num": 10,
+            "original_size": 10240,
+            "compressed_size": 1024,
+            "partitions": [
+                [1674213225158000i64, 1674213225158000i64],
+                [1674213225158000i64, 1674213225158000i64],
+            ]
+        })),
+        (status = 400, description = "Failure", content_type = "application/json", body = HttpResponse),
+        (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
+    )
+)]
+#[post("/{org_id}/_search_partition")]
+pub async fn search_partition(
+    org_id: web::Path<String>,
+    in_req: HttpRequest,
+    body: web::Bytes,
+) -> Result<HttpResponse, Error> {
+    let start = std::time::Instant::now();
+    let session_id = ider::uuid();
+
+    let org_id = org_id.into_inner();
+    let query = web::Query::<HashMap<String, String>>::from_query(in_req.query_string()).unwrap();
+    let stream_type = match get_stream_type_from_request(&query) {
+        Ok(v) => v.unwrap_or(StreamType::Logs),
+        Err(e) => return Ok(MetaHttpResponse::bad_request(e)),
+    };
+
+    let req: meta::search::SearchPartitionRequest = match json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return Ok(MetaHttpResponse::bad_request(e)),
+    };
+
+    // do search
+    match SearchService::search_partition(&session_id, &org_id, stream_type, &req).await {
+        Ok(res) => {
+            let time = start.elapsed().as_secs_f64();
+            metrics::HTTP_RESPONSE_TIME
+                .with_label_values(&[
+                    "/api/org/_search_partition",
+                    "200",
+                    &org_id,
+                    "",
+                    stream_type.to_string().as_str(),
+                ])
+                .observe(time);
+            metrics::HTTP_INCOMING_REQUESTS
+                .with_label_values(&[
+                    "/api/org/_search_partition",
+                    "200",
+                    &org_id,
+                    "",
+                    stream_type.to_string().as_str(),
+                ])
+                .inc();
+            Ok(HttpResponse::Ok().json(res))
+        }
+        Err(err) => {
+            let time = start.elapsed().as_secs_f64();
+            metrics::HTTP_RESPONSE_TIME
+                .with_label_values(&[
+                    "/api/org/_search_partition",
+                    "500",
+                    &org_id,
+                    "",
+                    stream_type.to_string().as_str(),
+                ])
+                .observe(time);
+            metrics::HTTP_INCOMING_REQUESTS
+                .with_label_values(&[
+                    "/api/org/_search_partition",
+                    "500",
+                    &org_id,
+                    "",
+                    stream_type.to_string().as_str(),
+                ])
+                .inc();
+            log::error!("search error: {:?}", err);
+            Ok(match err {
+                errors::Error::ErrorCode(code) => HttpResponse::InternalServerError()
+                    .json(meta::http::HttpResponse::error_code(code)),
+                _ => HttpResponse::InternalServerError().json(meta::http::HttpResponse::error(
+                    StatusCode::INTERNAL_SERVER_ERROR.into(),
+                    err.to_string(),
+                )),
+            })
+        }
+    }
 }

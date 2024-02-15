@@ -20,21 +20,16 @@ use actix_web::{
     web, Error,
 };
 use actix_web_httpauth::extractors::basic::BasicAuth;
-use config::CONFIG;
+use config::{utils::base64, CONFIG};
 
-#[cfg(not(feature = "enterprise"))]
-use crate::common::meta::user::DBUser;
 use crate::{
     common::{
         meta::{
             ingestion::INGESTION_EP,
             proxy::QueryParamProxyURL,
-            user::{TokenValidationResponse, UserRole},
+            user::{DBUser, TokenValidationResponse, UserRole},
         },
-        utils::{
-            auth::{get_hash, is_root_user, AuthExtractor},
-            base64,
-        },
+        utils::auth::{get_hash, is_root_user, AuthExtractor},
     },
     service::{db, users},
 };
@@ -47,6 +42,7 @@ pub async fn validator(
     req: ServiceRequest,
     user_id: &str,
     password: &str,
+    auth_info: AuthExtractor,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let path = match req
         .request()
@@ -67,12 +63,18 @@ pub async fn validator(
                         header::HeaderValue::from_static("application/x-www-form-urlencoded"),
                     );
                 }
-
                 req.headers_mut().insert(
                     header::HeaderName::from_static("user_id"),
                     header::HeaderValue::from_str(&res.user_email).unwrap(),
                 );
-                Ok(req)
+
+                if auth_info.bypass_check
+                    || check_permissions(user_id, auth_info, res.user_role).await
+                {
+                    Ok(req)
+                } else {
+                    Err((ErrorForbidden("Unauthorized Access"), req))
+                }
             } else {
                 Err((ErrorUnauthorized("Unauthorized Access"), req))
             }
@@ -114,6 +116,8 @@ pub async fn validate_credentials(
             return Ok(TokenValidationResponse {
                 is_valid: false,
                 user_email: "".to_string(),
+                is_internal_user: false,
+                user_role: None,
             });
         }
     } else if path_columns.last().unwrap_or(&"").eq(&"organizations") {
@@ -143,6 +147,8 @@ pub async fn validate_credentials(
         return Ok(TokenValidationResponse {
             is_valid: false,
             user_email: "".to_string(),
+            is_internal_user: false,
+            user_role: None,
         });
     }
     let user = user.unwrap();
@@ -153,6 +159,8 @@ pub async fn validate_credentials(
         return Ok(TokenValidationResponse {
             is_valid: true,
             user_email: user.email,
+            is_internal_user: !user.is_external,
+            user_role: Some(user.role),
         });
     }
 
@@ -161,6 +169,8 @@ pub async fn validate_credentials(
         return Ok(TokenValidationResponse {
             is_valid: false,
             user_email: "".to_string(),
+            is_internal_user: false,
+            user_role: None,
         });
     }
     if !path.contains("/user")
@@ -172,13 +182,14 @@ pub async fn validate_credentials(
         Ok(TokenValidationResponse {
             is_valid: true,
             user_email: user.email,
+            is_internal_user: !user.is_external,
+            user_role: Some(user.role),
         })
     } else {
         Err(ErrorForbidden("Not allowed"))
     }
 }
 
-#[cfg(not(feature = "enterprise"))]
 async fn validate_user_from_db(
     db_user: Result<DBUser, anyhow::Error>,
     user_password: &str,
@@ -191,6 +202,8 @@ async fn validate_user_from_db(
                 Ok(TokenValidationResponse {
                     is_valid: true,
                     user_email: user.email,
+                    is_internal_user: !user.is_external,
+                    user_role: None,
                 })
             } else {
                 Err(ErrorForbidden("Not allowed"))
@@ -200,17 +213,6 @@ async fn validate_user_from_db(
     }
 }
 
-#[cfg(feature = "enterprise")]
-pub async fn validate_user(
-    _user_id: &str,
-    _user_password: &str,
-) -> Result<TokenValidationResponse, Error> {
-    use actix_web::error::ErrorNotFound;
-    log::warn!("Not supported in enterprise version");
-    Err(ErrorNotFound("Not supported in enterprise version"))
-}
-
-#[cfg(not(feature = "enterprise"))]
 pub async fn validate_user(
     user_id: &str,
     user_password: &str,
@@ -244,6 +246,11 @@ pub async fn validator_aws(
                 match validate_credentials(&creds[0], &creds[1], path).await {
                     Ok(res) => {
                         if res.is_valid {
+                            let mut req = req;
+                            req.headers_mut().insert(
+                                header::HeaderName::from_static("user_id"),
+                                header::HeaderValue::from_str(&res.user_email).unwrap(),
+                            );
                             Ok(req)
                         } else {
                             Err((ErrorUnauthorized("Unauthorized Access"), req))
@@ -282,6 +289,11 @@ pub async fn validator_gcp(
             match validate_credentials(&creds[0], &creds[1], path).await {
                 Ok(res) => {
                     if res.is_valid {
+                        let mut req = req;
+                        req.headers_mut().insert(
+                            header::HeaderName::from_static("user_id"),
+                            header::HeaderValue::from_str(&res.user_email).unwrap(),
+                        );
                         Ok(req)
                     } else {
                         Err((ErrorUnauthorized("Unauthorized Access"), req))
@@ -363,10 +375,10 @@ pub async fn validator_rum(
 
 pub async fn oo_validator(
     req: ServiceRequest,
-    auth_header: AuthExtractor,
+    auth_info: AuthExtractor,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    if auth_header.auth.starts_with("Basic") {
-        let decoded = base64::decode(auth_header.auth.strip_prefix("Basic").unwrap().trim())
+    if auth_info.auth.starts_with("Basic") {
+        let decoded = base64::decode(auth_info.auth.strip_prefix("Basic").unwrap().trim())
             .expect("Failed to decode base64 string");
         let credentials = String::from_utf8(decoded.into())
             .map_err(|_| ())
@@ -378,52 +390,112 @@ pub async fn oo_validator(
         let (username, password) = (parts[0], parts[1]);
         let username = username.to_owned();
         let password = password.to_owned();
-        validator(req, &username, &password).await
-    } else if auth_header.auth.starts_with("Bearer") {
-        super::token::token_validator(req, &auth_header.auth).await
+        validator(req, &username, &password, auth_info).await
+    } else if auth_info.auth.starts_with("Bearer") {
+        super::token::token_validator(req, auth_info).await
     } else {
         Err((ErrorUnauthorized("Unauthorized Access"), req))
     }
 }
+#[cfg(feature = "enterprise")]
+pub(crate) async fn check_permissions(
+    user_id: &str,
+    auth_info: AuthExtractor,
+    role: Option<UserRole>,
+) -> bool {
+    use o2_enterprise::enterprise::common::infra::config::O2_CONFIG;
+
+    if !O2_CONFIG.openfga.enabled {
+        return true;
+    }
+
+    let object_str = auth_info.o2_type;
+    let obj_str = if object_str.contains("##user_id##") {
+        object_str.replace("##user_id##", user_id)
+    } else {
+        object_str
+    };
+    let role = match role {
+        Some(role) => {
+            if role.eq(&UserRole::Root) {
+                "admin".to_string()
+            } else {
+                format!("{role}")
+            }
+        }
+        None => "".to_string(),
+    };
+    let org_id = if auth_info.org_id.eq("organizations") {
+        user_id
+    } else {
+        &auth_info.org_id
+    };
+
+    o2_enterprise::enterprise::openfga::authorizer::authz::is_allowed(
+        org_id,
+        user_id,
+        &auth_info.method,
+        &obj_str,
+        &auth_info.parent_id,
+        &role,
+    )
+    .await
+}
+
+#[cfg(not(feature = "enterprise"))]
+pub(crate) async fn check_permissions(
+    _user_id: &str,
+    _auth_info: AuthExtractor,
+    _role: Option<UserRole>,
+) -> bool {
+    true
+}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::common::{infra::db as infra_db, meta::user::UserRequest};
+    use infra::db as infra_db;
 
-    #[actix_web::test]
+    use super::*;
+    use crate::common::meta::user::UserRequest;
+
+    #[tokio::test]
     async fn test_validate() {
+        let org_id = "default";
+        let user_id = "user1@example.com";
+        let init_user = "root@example.com";
+        let pwd = "Complexpass#123";
+
         infra_db::create_table().await.unwrap();
-        let _ = users::post_user(
-            "default",
+        users::create_root_user(
+            org_id,
             UserRequest {
-                email: "root@example.com".to_string(),
-                password: "Complexpass#123".to_string(),
+                email: init_user.to_string(),
+                password: pwd.to_string(),
                 role: crate::common::meta::user::UserRole::Root,
                 first_name: "root".to_owned(),
                 last_name: "".to_owned(),
                 is_external: false,
             },
-            "root@example.com",
         )
-        .await;
-        let _ = users::post_user(
-            "default",
+        .await
+        .unwrap();
+        users::post_user(
+            org_id,
             UserRequest {
-                email: "user1@example.com".to_string(),
-                password: "Complexpass#123".to_string(),
+                email: user_id.to_string(),
+                password: pwd.to_string(),
                 role: crate::common::meta::user::UserRole::Member,
                 first_name: "root".to_owned(),
                 last_name: "".to_owned(),
-                is_external: false,
+                is_external: true,
             },
-            "root@example.com",
+            init_user,
         )
-        .await;
+        .await
+        .unwrap();
 
-        let pwd = "Complexpass#123";
         assert!(
-            validate_credentials("root@example.com", pwd, "default/_bulk")
+            validate_credentials(init_user, pwd, "default/_bulk")
                 .await
                 .unwrap()
                 .is_valid
@@ -436,28 +508,23 @@ mod tests {
         );
         assert!(!validate_credentials("", pwd, "/").await.unwrap().is_valid);
         assert!(
-            !validate_credentials("user1@example.com", pwd, "/")
+            !validate_credentials(user_id, pwd, "/")
                 .await
                 .unwrap()
                 .is_valid
         );
         assert!(
-            validate_credentials("user1@example.com", pwd, "default/user")
+            validate_credentials(user_id, pwd, "default/user")
                 .await
                 .unwrap()
                 .is_valid
         );
         assert!(
-            !validate_credentials("user1@example.com", "x", "default/user")
+            !validate_credentials(user_id, "x", "default/user")
                 .await
                 .unwrap()
                 .is_valid
         );
-        assert!(
-            validate_user("root@example.com", pwd)
-                .await
-                .unwrap()
-                .is_valid
-        );
+        assert!(validate_user(init_user, pwd).await.unwrap().is_valid);
     }
 }

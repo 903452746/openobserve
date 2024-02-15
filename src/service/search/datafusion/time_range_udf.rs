@@ -15,6 +15,7 @@
 
 use std::{iter::zip, sync::Arc};
 
+use config::utils::{str, time};
 use datafusion::{
     arrow::{
         array::{ArrayRef, BooleanArray, Int64Array, StringArray},
@@ -27,8 +28,6 @@ use datafusion::{
     sql::sqlparser::parser::ParserError,
 };
 use once_cell::sync::Lazy;
-
-use crate::common::utils::{str, time};
 
 /// The name of the time_range UDF given to DataFusion.
 pub const TIME_RANGE_UDF_NAME: &str = "time_range";
@@ -50,9 +49,12 @@ pub(crate) static TIME_RANGE_UDF: Lazy<ScalarUDF> = Lazy::new(|| {
 pub fn time_range_expr_impl() -> ScalarFunctionImplementation {
     let func = move |args: &[ArrayRef]| -> datafusion::error::Result<ArrayRef> {
         if args.len() != 3 {
-            return Err(DataFusionError::SQL(ParserError::ParserError(
-                "UDF params should be: time_range(field, start, end)".to_string(),
-            )));
+            return Err(DataFusionError::SQL(
+                ParserError::ParserError(
+                    "UDF params should be: time_range(field, start, end)".to_string(),
+                ),
+                None,
+            ));
         }
 
         // 1. cast both arguments to Union. These casts MUST be aligned with the signature or this

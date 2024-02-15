@@ -2,6 +2,7 @@
   <div class="scheduled-alerts">
     <div class="scheduled-alert-tabs q-mb-lg">
       <q-tabs
+        data-test="scheduled-alert-tabs"
         v-model="tab"
         no-caps
         outside-arrows
@@ -10,8 +11,22 @@
         class="bg-white text-primary"
         @update:model-value="updateTab"
       >
-        <q-tab name="custom" :label="t('alerts.custom')" />
-        <q-tab name="sql" :label="t('alerts.sql')" />
+        <q-tab
+          data-test="scheduled-alert-custom-tab"
+          name="custom"
+          :label="t('alerts.custom')"
+        />
+        <q-tab
+          data-test="scheduled-alert-sql-tab"
+          name="sql"
+          :label="t('alerts.sql')"
+        />
+        <q-tab
+          data-test="scheduled-alert-metrics-tab"
+          v-if="alertData.stream_type === 'metrics'"
+          name="promql"
+          :label="t('alerts.promql')"
+        />
       </q-tabs>
     </div>
     <template v-if="tab === 'custom'">
@@ -21,28 +36,95 @@
         :fields="conditions"
         @add="addField"
         @remove="removeField"
+        @input:update="(name, field) => emits('input:update', name, field)"
       />
     </template>
     <template v-else>
-      <div class="text-bold q-mr-sm q-my-sm">SQL</div>
-      <query-editor
-        ref="queryEditorRef"
-        editor-id="alerts-query-editor"
-        class="monaco-editor q-mb-md"
-        v-model:query="query"
-        @update:query="updateQueryValue"
-      />
+      <div class="text-bold q-mr-sm q-my-sm">
+        {{ tab === "promql" ? "Promql" : "SQL" }}
+      </div>
+      <template v-if="tab === 'sql'">
+        <query-editor
+          data-test="scheduled-alert-sql-editor"
+          ref="queryEditorRef"
+          editor-id="alerts-query-editor"
+          class="monaco-editor q-mb-md"
+          v-model:query="query"
+          @update:query="updateQueryValue"
+        />
+      </template>
+      <template v-if="tab === 'promql'">
+        <query-editor
+          data-test="scheduled-alert-promql-editor"
+          ref="queryEditorRef"
+          editor-id="alerts-query-editor"
+          class="monaco-editor q-mb-md"
+          v-model:query="promqlQuery"
+          @update:query="updateQueryValue"
+        />
+      </template>
     </template>
 
     <div class="q-mt-sm">
-      <div class="flex justify-start items-center text-bold q-mb-sm">
-        <div style="width: 172px">Aggregation</div>
+      <div
+        v-if="
+          alertData.stream_type === 'metrics' &&
+          tab === 'promql' &&
+          promqlCondition
+        "
+        class="flex justify-start items-center text-bold q-mb-lg o2-input"
+      >
+        <div style="width: 180px">Trigger if the value is</div>
+        <div class="flex justify-start items-center">
+          <div data-test="scheduled-alert-promlq-condition-operator-select">
+            <q-select
+              v-model="promqlCondition.operator"
+              :options="triggerOperators"
+              color="input-border"
+              bg-color="input-bg"
+              class="no-case q-py-none q-mr-xs"
+              filled
+              borderless
+              dense
+              use-input
+              hide-selected
+              fill-input
+              style="width: 88px; border-right: none"
+              @update:model-value="updatePromqlCondition"
+            />
+          </div>
+          <div
+            data-test="scheduled-alert-promlq-condition-value"
+            style="width: 160px; margin-left: 0 !important"
+            class="silence-notification-input o2-input"
+          >
+            <q-input
+              v-model="promqlCondition.value"
+              type="number"
+              dense
+              filled
+              min="0"
+              style="background: none"
+              placeholder="Value"
+              @update:model-value="updatePromqlCondition"
+            />
+          </div>
+        </div>
+      </div>
+      <div
+        v-if="tab === 'custom'"
+        class="flex justify-start items-center text-bold q-mb-lg"
+      >
+        <div data-test="scheduled-alert-aggregation-title" style="width: 172px">
+          Aggregation
+        </div>
         <q-toggle
+          data-test="scheduled-alert-aggregation-toggle"
           v-model="_isAggregationEnabled"
           size="sm"
           color="primary"
           class="text-bold q-pl-0"
-          :disable="tab === 'sql'"
+          :disable="tab === 'sql' || tab === 'promql'"
           @update:model-value="updateAggregation"
         />
       </div>
@@ -50,7 +132,11 @@
         v-if="_isAggregationEnabled && aggregationData"
         class="flex items-center no-wrap q-mr-sm q-mb-sm"
       >
-        <div class="text-bold" style="width: 180px">
+        <div
+          data-test="scheduled-alert-group-by-title"
+          class="text-bold"
+          style="width: 180px"
+        >
           {{ t("alerts.groupBy") }}
         </div>
         <div
@@ -61,29 +147,34 @@
             v-for="(group, index) in aggregationData.group_by"
             :key="group"
           >
-            <div class="flex justify-start items-center no-wrap">
-              <q-select
-                data-test="add-alert-stream-select"
-                v-model="aggregationData.group_by[index]"
-                :options="filteredFields"
-                color="input-border"
-                bg-color="input-bg"
-                class="showLabelOnTop no-case q-py-none q-mb-sm"
-                filled
-                borderless
-                dense
-                use-input
-                emit-value
-                hide-selected
-                placeholder="Select column"
-                fill-input
-                :input-debounce="400"
-                @filter="filterColumns"
-                :rules="[(val: any) => !!val || 'Field is required!']"
-                style="width: 200px; border: 1px solid rgba(0, 0, 0, 0.05)"
-                @update:model-value="updateTrigger"
-              />
+            <div
+              :data-test="`scheduled-alert-group-by-${index + 1}`"
+              class="flex justify-start items-center no-wrap o2-input"
+            >
+              <div data-test="scheduled-alert-group-by-column-select">
+                <q-select
+                  v-model="aggregationData.group_by[index]"
+                  :options="filteredFields"
+                  color="input-border"
+                  bg-color="input-bg"
+                  class="no-case q-py-none q-mb-sm"
+                  filled
+                  borderless
+                  dense
+                  use-input
+                  emit-value
+                  hide-selected
+                  placeholder="Select column"
+                  fill-input
+                  :input-debounce="400"
+                  @filter="filterColumns"
+                  :rules="[(val: any) => !!val || 'Field is required!']"
+                  style="width: 200px"
+                  @update:model-value="updateTrigger"
+                />
+              </div>
               <q-btn
+                data-test="scheduled-alert-group-by-delete-btn"
                 :icon="outlinedDelete"
                 class="iconHoverBtn q-mb-sm q-ml-xs q-mr-sm"
                 :class="store.state?.theme === 'dark' ? 'icon-dark' : ''"
@@ -99,6 +190,7 @@
             </div>
           </template>
           <q-btn
+            data-test="scheduled-alert-group-by-add-btn"
             icon="add"
             class="iconHoverBtn q-mb-sm q-ml-xs q-mr-sm"
             :class="store.state?.theme === 'dark' ? 'icon-dark' : ''"
@@ -113,39 +205,47 @@
           />
         </div>
       </div>
-      <div class="flex justify-start items-center q-mb-xs">
-        <div class="text-bold" style="width: 180px">
+      <div class="flex justify-start items-center q-mb-xs no-wrap q-pb-md">
+        <div
+          data-test="scheduled-alert-threshold-title"
+          class="text-bold"
+          style="width: 180px"
+        >
           {{ t("alerts.threshold") + " *" }}
         </div>
-        <div style="min-height: 58px">
+        <div style="width: calc(100% - 180px)" class="position-relative">
           <template v-if="_isAggregationEnabled && aggregationData">
             <div class="flex justify-start items-center">
-              <div class="threshould-input q-mr-xs">
+              <div
+                data-test="scheduled-alert-threshold-function-select"
+                class="threshould-input q-mr-xs o2-input"
+              >
                 <q-select
-                  data-test="add-alert-stream-select"
                   v-model="aggregationData.function"
                   :options="aggFunctions"
                   color="input-border"
                   bg-color="input-bg"
-                  class="showLabelOnTop no-case q-py-none"
+                  class="no-case q-py-none"
                   filled
                   borderless
                   dense
                   use-input
                   hide-selected
                   fill-input
-                  style="width: 88px; border: 1px solid rgba(0, 0, 0, 0.05)"
-                  @update:model-value="updateTrigger"
+                  style="width: 120px"
+                  @update:model-value="updateAggregation"
                 />
               </div>
-              <div class="threshould-input q-mr-xs">
+              <div
+                class="threshould-input q-mr-xs o2-input"
+                data-test="scheduled-alert-threshold-column-select"
+              >
                 <q-select
-                  data-test="add-alert-stream-select"
                   v-model="aggregationData.having.column"
                   :options="filteredNumericColumns"
                   color="input-border"
                   bg-color="input-bg"
-                  class="showLabelOnTop no-case q-py-none"
+                  class="no-case q-py-none"
                   filled
                   borderless
                   dense
@@ -154,38 +254,37 @@
                   hide-selected
                   fill-input
                   @filter="filterNumericColumns"
-                  style="width: 250px; border: 1px solid rgba(0, 0, 0, 0.05)"
-                  @update:model-value="updateTrigger"
+                  style="width: 250px"
+                  @update:model-value="updateAggregation"
                 />
               </div>
-              <div class="threshould-input q-mr-xs">
+              <div
+                data-test="scheduled-alert-threshold-operator-select"
+                class="threshould-input q-mr-xs o2-input q-mt-sm"
+              >
                 <q-select
-                  data-test="add-alert-stream-select"
                   v-model="aggregationData.having.operator"
                   :options="triggerOperators"
                   color="input-border"
                   bg-color="input-bg"
-                  class="showLabelOnTop no-case q-py-none"
+                  class="no-case q-py-none"
                   filled
                   borderless
                   dense
                   use-input
                   hide-selected
                   fill-input
-                  style="width: 88px; border: 1px solid rgba(0, 0, 0, 0.05)"
-                  @update:model-value="updateTrigger"
+                  style="width: 120px"
+                  @update:model-value="updateAggregation"
                 />
               </div>
-              <div
-                class="flex items-center"
-                style="border: 1px solid rgba(0, 0, 0, 0.05)"
-              >
+              <div class="flex items-center q-mt-sm">
                 <div
-                  style="width: 150px; margin-left: 0 !important"
-                  class="silence-notification-input"
+                  data-test="scheduled-alert-threshold-value-input"
+                  style="width: 250px; margin-left: 0 !important"
+                  class="silence-notification-input o2-input"
                 >
                   <q-input
-                    data-test="add-alert-delay-input"
                     v-model="aggregationData.having.value"
                     type="number"
                     dense
@@ -193,19 +292,20 @@
                     min="0"
                     style="background: none"
                     placeholder="Value"
-                    @update:model-value="updateTrigger"
+                    @update:model-value="updateAggregation"
                   />
                 </div>
               </div>
             </div>
             <div
+              data-test="scheduled-alert-threshold-error-text"
               v-if="
                 !aggregationData.function ||
                 !aggregationData.having.column ||
                 !aggregationData.having.operator ||
                 !aggregationData.having.value.toString().trim().length
               "
-              class="text-red-8 q-pt-xs"
+              class="text-red-8 q-pt-xs absolute"
               style="font-size: 11px; line-height: 12px"
             >
               Field is required!
@@ -213,9 +313,11 @@
           </template>
           <template v-else>
             <div class="flex justify-start items-center">
-              <div class="threshould-input">
+              <div
+                class="threshould-input"
+                data-test="scheduled-alert-threshold-operator-select"
+              >
                 <q-select
-                  data-test="add-alert-stream-select"
                   v-model="triggerData.operator"
                   :options="triggerOperators"
                   color="input-border"
@@ -239,19 +341,20 @@
                 <div
                   style="width: 89px; margin-left: 0 !important"
                   class="silence-notification-input"
+                  data-test="scheduled-alert-threshold-value-input"
                 >
                   <q-input
-                    data-test="add-alert-delay-input"
                     v-model="triggerData.threshold"
                     type="number"
                     dense
                     filled
-                    min="0"
+                    min="1"
                     style="background: none"
                     @update:model-value="updateTrigger"
                   />
                 </div>
                 <div
+                  data-test="scheduled-alert-threshold-unit"
                   style="
                     min-width: 90px;
                     margin-left: 0 !important;
@@ -268,8 +371,9 @@
               </div>
             </div>
             <div
+              data-test="scheduled-alert-threshold-error-text"
               v-if="!triggerData.operator || !Number(triggerData.threshold)"
-              class="text-red-8 q-pt-xs"
+              class="text-red-8 q-pt-xs absolute"
               style="font-size: 11px; line-height: 12px"
             >
               Field is required!
@@ -278,7 +382,11 @@
         </div>
       </div>
       <div class="flex items-center q-mr-sm">
-        <div class="text-bold" style="width: 180px">
+        <div
+          data-test="scheduled-alert-period-title"
+          class="text-bold"
+          style="width: 180px"
+        >
           {{ t("alerts.period") + " *" }}
         </div>
         <div style="min-height: 58px">
@@ -287,11 +395,11 @@
             style="border: 1px solid rgba(0, 0, 0, 0.05); width: fit-content"
           >
             <div
+              data-test="scheduled-alert-period-input"
               style="width: 87px; margin-left: 0 !important"
               class="silence-notification-input"
             >
               <q-input
-                data-test="add-alert-delay-input"
                 v-model="triggerData.period"
                 type="number"
                 dense
@@ -302,6 +410,7 @@
               />
             </div>
             <div
+              data-test="scheduled-alert-period-unit"
               style="
                 min-width: 90px;
                 margin-left: 0 !important;
@@ -315,6 +424,7 @@
             </div>
           </div>
           <div
+            data-test="scheduled-alert-period-error-text"
             v-if="!Number(triggerData.period)"
             class="text-red-8 q-pt-xs"
             style="font-size: 11px; line-height: 12px"
@@ -343,6 +453,9 @@ const props = defineProps([
   "query_type",
   "aggregation",
   "isAggregationEnabled",
+  "alertData",
+  "promql",
+  "promql_condition",
 ]);
 
 const emits = defineEmits([
@@ -353,6 +466,9 @@ const emits = defineEmits([
   "update:sql",
   "update:aggregation",
   "update:isAggregationEnabled",
+  "input:update",
+  "update:promql",
+  "update:promql_condition",
 ]);
 
 const { t } = useI18n();
@@ -361,37 +477,40 @@ const triggerData = ref(props.trigger);
 
 const query = ref(props.sql);
 
+const promqlQuery = ref(props.promql);
+
 const tab = ref(props.query_type || "custom");
 
 const store = useStore();
 
-const aggFunctions = ["avg", "max", "min", "count"];
+const metricFunctions = ["p50", "p75", "p90", "p95", "p99"];
+const regularFunctions = ["avg", "max", "min", "sum", "count"];
 
-const _isAggregationEnabled = ref(props.isAggregationEnabled);
+const aggFunctions = computed(() =>
+  props.alertData.stream_type === "metrics"
+    ? [...regularFunctions, ...metricFunctions]
+    : [...regularFunctions]
+);
+
+const _isAggregationEnabled = ref(
+  tab.value === "custom" && props.isAggregationEnabled
+);
+
+const promqlCondition = ref(props.promql_condition);
 
 const aggregationData = ref(props.aggregation);
 
 const filteredFields = ref(props.columns);
 
 const getNumericColumns = computed(() => {
-  return props.columns.filter((column: any) => {
-    return (
-      column.type !== "Utf8" &&
-      column.value !== store.state.zoConfig.timestamp_column
-    );
-  });
+  if (aggregationData.value.function === "count") return props.columns;
+  else
+    return props.columns.filter((column: any) => {
+      return column.type !== "Utf8";
+    });
 });
 
 const filteredNumericColumns = ref(getNumericColumns.value);
-
-watch(
-  () => props.isAggregationEnabled,
-  (val) => {
-    if (val) {
-      _isAggregationEnabled.value = val;
-    }
-  }
-);
 
 const addField = () => {
   emits("field:add");
@@ -405,32 +524,63 @@ const removeField = (field: any) => {
 
 const updateQueryValue = (value: string) => {
   query.value = value;
-  emits("update:sql", value);
+
+  if (tab.value === "sql") emits("update:sql", value);
+  if (tab.value === "promql") emits("update:promql", value);
+
+  emits("input:update", "query", value);
 };
 
 const updateTrigger = () => {
   emits("update:trigger", triggerData.value);
+  emits("input:update", "period", triggerData.value);
 };
 
 const updateTab = () => {
-  _isAggregationEnabled.value = false;
+  updateQuery();
+  updateAggregationToggle();
   emits("update:query_type", tab.value);
+  emits("input:update", "query_type", tab.value);
 };
 
-defineExpose({
-  tab,
-});
+const getDefaultPromqlCondition = () => {
+  return {
+    column: "value",
+    operator: ">=",
+    value: 0,
+  };
+};
+
+const updateQuery = () => {
+  if (tab.value === "promql") {
+    const condition = !props.promql_condition
+      ? getDefaultPromqlCondition()
+      : props.promql_condition;
+    promqlCondition.value = condition;
+    emits("update:promql_condition", condition);
+    promqlQuery.value = props.promql;
+  }
+
+  if (tab.value === "sql") query.value = props.sql;
+};
+
+const updatePromqlCondition = () => {
+  emits("update:promql_condition", promqlCondition.value);
+  emits("input:update", "promql_condition", promqlCondition.value);
+};
 
 const addGroupByColumn = () => {
   const aggregationDataCopy = { ...aggregationData.value };
   aggregationDataCopy.group_by.push("");
   emits("update:aggregation", aggregationDataCopy);
+  emits("input:update", "aggregation", aggregationDataCopy);
 };
 
 const deleteGroupByColumn = (index: number) => {
   const aggregationDataCopy = { ...aggregationData.value };
   aggregationDataCopy.group_by.splice(index, 1);
   emits("update:aggregation", aggregationDataCopy);
+  emits("input:update", "aggregation", aggregationDataCopy);
 };
 
 const updateAggregation = () => {
@@ -447,6 +597,7 @@ const updateAggregation = () => {
   }
   emits("update:aggregation", aggregationData.value);
   emits("update:isAggregationEnabled", _isAggregationEnabled.value);
+  emits("input:update", "aggregation", aggregationData.value);
 };
 
 const filterColumns = (val: string, update: Function) => {
@@ -476,12 +627,20 @@ const filterNumericColumns = (val: string, update: Function) => {
     );
   });
 };
+
+const updateAggregationToggle = () => {
+  _isAggregationEnabled.value =
+    tab.value === "custom" && props.isAggregationEnabled;
+};
+defineExpose({
+  tab,
+});
 </script>
 
 <style lang="scss" scoped>
 .scheduled-alert-tabs {
   border: 1px solid $primary;
-  width: 210px;
+  width: 300px;
   border-radius: 4px;
   overflow: hidden;
 }

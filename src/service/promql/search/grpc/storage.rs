@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use config::{
     is_local_disk_storage,
-    meta::stream::{FileKey, StreamType},
+    meta::stream::{FileKey, PartitionTimeLevel, StreamType},
     CONFIG,
 };
 use datafusion::{
@@ -26,15 +26,14 @@ use datafusion::{
     error::{DataFusionError, Result},
     prelude::SessionContext,
 };
+use hashbrown::HashMap;
+use infra::cache::file_data;
 use tokio::sync::Semaphore;
 
 use crate::{
-    common::{
-        infra::cache::file_data,
-        meta::{
-            search::{SearchType, Session as SearchSession},
-            stream::{PartitionTimeLevel, ScanStats, StreamParams},
-        },
+    common::meta::{
+        search::{SearchType, Session as SearchSession},
+        stream::{ScanStats, StreamParams, StreamPartition},
     },
     service::{
         db, file_list,
@@ -52,10 +51,10 @@ pub(crate) async fn create_context(
     org_id: &str,
     stream_name: &str,
     time_range: (i64, i64),
-    filters: &[(&str, Vec<&str>)],
+    filters: &mut [(&str, Vec<String>)],
 ) -> Result<(SessionContext, Arc<Schema>, ScanStats)> {
     // check if we are allowed to search
-    if db::compact::retention::is_deleting_stream(org_id, stream_name, StreamType::Metrics, None) {
+    if db::compact::retention::is_deleting_stream(org_id, StreamType::Metrics, stream_name, None) {
         log::error!("stream [{}] is being deleted", stream_name);
         return Ok((
             SessionContext::new(),
@@ -78,6 +77,20 @@ pub(crate) async fn create_context(
     let stream_settings = stream::stream_settings(&schema).unwrap_or_default();
     let partition_time_level =
         stream::unwrap_partition_time_level(stream_settings.partition_time_level, stream_type);
+
+    // rewrite partition filters
+    let partition_keys: HashMap<&str, &StreamPartition> = stream_settings
+        .partition_keys
+        .iter()
+        .map(|v| (v.field.as_str(), v))
+        .collect();
+    for entry in filters.iter_mut() {
+        if let Some(partition_key) = partition_keys.get(entry.0) {
+            for val in entry.1.iter_mut() {
+                *val = partition_key.get_partition_value(val);
+            }
+        }
+    }
 
     // get file list
     let mut files = get_file_list(
@@ -136,6 +149,7 @@ pub(crate) async fn create_context(
         id: session_id.to_string(),
         storage_type: StorageType::Memory,
         search_type: SearchType::Normal,
+        work_group: None,
     };
 
     let ctx = register_table(
@@ -160,7 +174,7 @@ async fn get_file_list(
     stream_name: &str,
     time_level: PartitionTimeLevel,
     time_range: (i64, i64),
-    filters: &[(&str, Vec<&str>)],
+    filters: &[(&str, Vec<String>)],
 ) -> Result<Vec<FileKey>> {
     let (time_min, time_max) = time_range;
     let results = match file_list::query(
@@ -231,7 +245,9 @@ async fn cache_parquet_files(
         let task: tokio::task::JoinHandle<Option<String>> = tokio::task::spawn(async move {
             let ret = match cache_type {
                 file_data::CacheType::Memory => {
-                    if !file_data::memory::exist(&file_name).await {
+                    if !file_data::memory::exist(&file_name).await
+                        && !file_data::disk::exist(&file_name).await
+                    {
                         file_data::memory::download(session_id, &file_name)
                             .await
                             .err()
@@ -251,8 +267,11 @@ async fn cache_parquet_files(
                 _ => None,
             };
             let ret = if let Some(e) = ret {
-                if e.to_string().to_lowercase().contains("not found") {
+                if e.to_string().to_lowercase().contains("not found")
+                    || e.to_string().to_lowercase().contains("data size is zero")
+                {
                     // delete file from file list
+                    log::warn!("found invalid file: {}", file_name);
                     if let Err(e) = file_list::delete_parquet_file(&file_name, true).await {
                         log::error!("promql->search->storage: delete from file_list err: {}", e);
                     }

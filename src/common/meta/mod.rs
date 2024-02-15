@@ -14,12 +14,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 pub mod alerts;
+pub mod authz;
 pub mod dashboards;
 pub mod functions;
 pub mod http;
 pub mod ingestion;
 pub mod maxmind;
-pub mod meta_store;
 pub mod middleware_data;
 pub mod organization;
 pub mod prom;
@@ -32,5 +32,4 @@ pub mod stream;
 pub mod syslog;
 pub mod telemetry;
 pub mod traces;
-pub mod usage;
 pub mod user;

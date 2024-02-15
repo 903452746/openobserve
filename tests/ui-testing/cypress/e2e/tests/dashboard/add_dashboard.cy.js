@@ -73,7 +73,7 @@ describe("Create a new dashboard", () => {
         cy.wait('@dashboards')
         cy.contains("New Dashboard").click()
         cy.wait(1000)
-        cy.get('[data-test="dashboard-name"]').type(dashboardName);
+        cy.get('[data-test="add-dashboard-name"]').type(dashboardName);
         cy.get('[data-test="dashboard-add-submit"]').click();
         cy.url().should("include", dashboardData.ViewDashboardUrl);
     });
@@ -86,10 +86,11 @@ describe("Create a new dashboard", () => {
         cy.wait('@dashboards')
         cy.contains("New Dashboard").click()
         cy.wait(1000)
-        cy.get('[data-test="dashboard-name"]').type(dashboardName);
+        cy.get('[data-test="add-dashboard-name"]').type(dashboardName);
         cy.get('[data-test="dashboard-add-submit"]').click({force:true});
         cy.url().should("include", dashboardData.ViewDashboardUrl);
-        cy.get('.q-pa-sm > :nth-child(1) > .q-btn > .q-btn__content > .q-icon').click({force:true})
+        cy.wait(300)
+        cy.get('.flex.justify-between > :nth-child(1) > .q-btn > .q-btn__content > .q-icon').click({force:true})
         
         // find the dashboard name and click on the delete dashboard button. We can see that confirm dialog and click on cancel button
 
@@ -151,7 +152,7 @@ describe("Create a new dashboard", () => {
         cy.wait('@dashboards')
         cy.contains("New Dashboard").click({force:true})
         cy.wait(2000)
-        cy.get('[data-test="dashboard-name"]').type('     ');
+        cy.get('[data-test="add-dashboard-name"]').type('     ');
         cy.get('[data-test="dashboard-add-submit"]').should('be.disabled');
     });
         

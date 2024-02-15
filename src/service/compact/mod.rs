@@ -16,15 +16,17 @@
 use std::sync::Arc;
 
 use chrono::{Datelike, Duration, TimeZone, Timelike, Utc};
-use config::{meta::stream::StreamType, CONFIG};
+use config::{
+    cluster::LOCAL_NODE_UUID,
+    meta::{cluster::Role, stream::StreamType},
+    CONFIG,
+};
+use infra::dist_lock;
 use once_cell::sync::Lazy;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
-    common::infra::{
-        cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-        dist_lock,
-    },
+    common::infra::cluster::{get_node_by_uuid, get_node_from_consistent_hash},
     service::db,
 };
 
@@ -37,15 +39,15 @@ pub mod stats;
 pub(crate) static QUEUE_LOCKER: Lazy<Arc<Mutex<bool>>> =
     Lazy::new(|| Arc::new(Mutex::const_new(false)));
 
-/// compactor delete run steps:
-pub async fn run_delete() -> Result<(), anyhow::Error> {
+/// compactor retention run steps:
+pub async fn run_retention() -> Result<(), anyhow::Error> {
     // check data retention
     if CONFIG.compact.data_retention_days > 0 {
         let now = Utc::now();
         let date = now - Duration::days(CONFIG.compact.data_retention_days);
         let data_lifecycle_end = date.format("%Y-%m-%d").to_string();
 
-        let orgs = db::schema::list_organizations_from_cache();
+        let orgs = db::schema::list_organizations_from_cache().await;
         let stream_types = [
             StreamType::Logs,
             StreamType::Metrics,
@@ -57,7 +59,9 @@ pub async fn run_delete() -> Result<(), anyhow::Error> {
             // get the working node for the organization
             let (_, node) = db::compact::organization::get_offset(&org_id, "retention").await;
             if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-                log::warn!("[COMPACT] organization {org_id} is processing by {node}");
+                log::debug!(
+                    "[COMPACT] run retention: organization {org_id} is processing by {node}"
+                );
                 continue;
             }
 
@@ -68,25 +72,30 @@ pub async fn run_delete() -> Result<(), anyhow::Error> {
             // first
             let (_, node) = db::compact::organization::get_offset(&org_id, "retention").await;
             if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-                log::warn!("[COMPACT] organization {org_id} is processing by {node}");
+                log::debug!(
+                    "[COMPACT] run retention: organization {org_id} is processing by {node}"
+                );
                 dist_lock::unlock(&locker).await?;
                 continue;
             }
-            if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
+            let ret = if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
                 db::compact::organization::set_offset(
                     &org_id,
                     "retention",
                     0,
                     Some(&LOCAL_NODE_UUID.clone()),
                 )
-                .await?;
-            }
+                .await
+            } else {
+                Ok(())
+            };
             // already bind to this node, we can unlock now
             dist_lock::unlock(&locker).await?;
             drop(locker);
+            ret?;
 
             for stream_type in stream_types {
-                let streams = db::schema::list_streams_from_cache(&org_id, stream_type);
+                let streams = db::schema::list_streams_from_cache(&org_id, stream_type).await;
                 for stream_name in streams {
                     let schema = db::schema::get(&org_id, &stream_name, stream_type).await?;
                     let stream = super::stream::stream_res(&stream_name, stream_type, schema, None);
@@ -99,8 +108,8 @@ pub async fn run_delete() -> Result<(), anyhow::Error> {
                     if let Err(e) = retention::delete_by_stream(
                         &stream_data_retention_end,
                         &org_id,
-                        &stream_name,
                         stream_type,
+                        &stream_name,
                     )
                     .await
                     {
@@ -128,13 +137,13 @@ pub async fn run_delete() -> Result<(), anyhow::Error> {
         tokio::task::yield_now().await; // yield to other tasks
 
         let ret = if retention.eq("all") {
-            retention::delete_all(org_id, stream_name, stream_type).await
+            retention::delete_all(org_id, stream_type, stream_name).await
         } else {
             let date_range = retention.split(',').collect::<Vec<&str>>();
             retention::delete_by_date(
                 org_id,
-                stream_name,
                 stream_type,
+                stream_name,
                 (date_range[0], date_range[1]),
             )
             .await
@@ -169,7 +178,7 @@ pub async fn run_delete() -> Result<(), anyhow::Error> {
 /// 12. compact file list from storage
 pub async fn run_merge() -> Result<(), anyhow::Error> {
     let semaphore = std::sync::Arc::new(Semaphore::new(CONFIG.limit.file_move_thread_num));
-    let orgs = db::schema::list_organizations_from_cache();
+    let orgs = db::schema::list_organizations_from_cache().await;
     let stream_types = [
         StreamType::Logs,
         StreamType::Metrics,
@@ -178,46 +187,48 @@ pub async fn run_merge() -> Result<(), anyhow::Error> {
         StreamType::Metadata,
     ];
     for org_id in orgs {
-        // get the working node for the organization
-        let (_, node) = db::compact::organization::get_offset(&org_id, "merge").await;
-        if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::warn!("[COMPACT] organization {org_id} is processing by {node}");
+        // check backlist
+        if !db::file_list::BLOCKED_ORGS.is_empty()
+            && db::file_list::BLOCKED_ORGS.contains(&org_id.as_str())
+        {
             continue;
         }
-
-        // before start processing, set current node to lock the organization
-        let lock_key = format!("compact/organization/{org_id}");
-        let locker = dist_lock::lock(&lock_key, CONFIG.etcd.command_timeout).await?;
-        // check the working node for the organization again, maybe other node locked it
-        // first
-        let (_, node) = db::compact::organization::get_offset(&org_id, "merge").await;
-        if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::warn!("[COMPACT] organization {org_id} is processing by {node}");
-            dist_lock::unlock(&locker).await?;
-            continue;
-        }
-        if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
-            db::compact::organization::set_offset(
-                &org_id,
-                "merge",
-                0,
-                Some(&LOCAL_NODE_UUID.clone()),
-            )
-            .await?;
-        }
-        // already bind to this node, we can unlock now
-        dist_lock::unlock(&locker).await?;
-        drop(locker);
-
         for stream_type in stream_types {
-            let streams = db::schema::list_streams_from_cache(&org_id, stream_type);
+            let streams = db::schema::list_streams_from_cache(&org_id, stream_type).await;
             let mut tasks = Vec::with_capacity(streams.len());
             for stream_name in streams {
+                let Some(node) =
+                    get_node_from_consistent_hash(&stream_name, &Role::Compactor).await
+                else {
+                    continue; // no compactor node
+                };
+                if LOCAL_NODE_UUID.ne(&node) {
+                    // Check if this node holds the stream
+                    if let Some((offset, _)) = db::compact::files::get_offset_from_cache(
+                        &org_id,
+                        stream_type,
+                        &stream_name,
+                    )
+                    .await
+                    {
+                        // release the stream
+                        db::compact::files::set_offset(
+                            &org_id,
+                            stream_type,
+                            &stream_name,
+                            offset,
+                            None,
+                        )
+                        .await?;
+                    }
+                    continue; // not this node
+                }
+
                 // check if we are allowed to merge or just skip
                 if db::compact::retention::is_deleting_stream(
                     &org_id,
-                    &stream_name,
                     stream_type,
+                    &stream_name,
                     None,
                 ) {
                     log::warn!(
@@ -232,7 +243,7 @@ pub async fn run_merge() -> Result<(), anyhow::Error> {
                 let org_id = org_id.clone();
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let task = tokio::task::spawn(async move {
-                    if let Err(e) = merge::merge_by_stream(&org_id, &stream_name, stream_type).await
+                    if let Err(e) = merge::merge_by_stream(&org_id, stream_type, &stream_name).await
                     {
                         log::error!(
                             "[COMPACTOR] merge_by_stream [{}:{}:{}] error: {}",
@@ -263,10 +274,10 @@ pub async fn run_merge() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// compactor delete files run steps:
+/// compactor delay delete files run steps:
 /// 1. get pending deleted files from file_list_deleted table, created_at > 2 hours
 /// 2. delete files from storage
-pub async fn run_delete_files() -> Result<(), anyhow::Error> {
+pub async fn run_delay_deletion() -> Result<(), anyhow::Error> {
     let now = Utc::now();
     let time_max = now - Duration::hours(CONFIG.compact.delete_files_delay_hours);
     let time_max = Utc
@@ -280,12 +291,14 @@ pub async fn run_delete_files() -> Result<(), anyhow::Error> {
         )
         .unwrap();
     let time_max = time_max.timestamp_micros();
-    let orgs = db::schema::list_organizations_from_cache();
+    let orgs = db::schema::list_organizations_from_cache().await;
     for org_id in orgs {
         // get the working node for the organization
         let (_, node) = db::compact::organization::get_offset(&org_id, "file_list_deleted").await;
         if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::warn!("[COMPACT] organization {org_id} is processing by {node}");
+            log::debug!(
+                "[COMPACT] run delay_deletion: organization {org_id} is processing by {node}"
+            );
             continue;
         }
 
@@ -297,32 +310,37 @@ pub async fn run_delete_files() -> Result<(), anyhow::Error> {
         let (offset, node) =
             db::compact::organization::get_offset(&org_id, "file_list_deleted").await;
         if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::warn!("[COMPACT] organization {org_id} is processing by {node}");
+            log::debug!(
+                "[COMPACT] run delay_deletion organization {org_id} is processing by {node}"
+            );
             dist_lock::unlock(&locker).await?;
             continue;
         }
-        if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
+        let ret = if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
             db::compact::organization::set_offset(
                 &org_id,
                 "file_list_deleted",
                 offset,
                 Some(&LOCAL_NODE_UUID.clone()),
             )
-            .await?;
-        }
+            .await
+        } else {
+            Ok(())
+        };
         // already bind to this node, we can unlock now
         dist_lock::unlock(&locker).await?;
         drop(locker);
+        ret?;
 
         let batch_size = 10000;
         loop {
             match file_list_deleted::delete(&org_id, offset, time_max, batch_size).await {
                 Ok(affected) => {
-                    if CONFIG.common.print_key_event {
-                        log::info!("[COMPACTOR] deleted from file_list_deleted {affected} files");
-                    }
                     if affected == 0 {
                         break;
+                    }
+                    if CONFIG.common.print_key_event {
+                        log::info!("[COMPACTOR] deleted from file_list_deleted {affected} files");
                     }
                 }
                 Err(e) => {

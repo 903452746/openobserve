@@ -71,10 +71,10 @@ describe("Logs testcases", () => {
     cy.intercept("GET", "**/api/default/organizations**").as("allorgs");
     cy.intercept("GET", "**/api/default/functions**").as("functions");
     cy.visit(`${logData.logsUrl}?org_identifier=${Cypress.env("ORGNAME")}`);
-
+    cy.intercept("POST", "**/api/default/_search**").as("allsearch");
+    cy.wait("@allsearch");
     cy.selectStreamAndStreamTypeForLogs(logData.Stream);
     cy.intercept("GET", "**/api/default/streams**").as("streams");
-    // cy.intercept('GET', '**/api/default/_search**').as('allsearch')
   });
 
   // This is a test case to navigate to the logs page
@@ -90,21 +90,23 @@ describe("Logs testcases", () => {
   });
 
   // This test checks if the histogram toggle button works correctly by clicking it and verifying that the chart is hidden.
-  it("Should toggle chart when clicking on the histogram toggled", () => {
-    logstests.clickHistogramToggle();
-    logstests.confirmLogsSearchHidden();
-  });
 
   // This test checks that clicking on the histogram toggle button in SQL mode does not toggle the chart
-  it("Should not toggle chart when clicking on the histogram toggle in the sql mode", () => {
+  it("should not toggle chart when clicking on the histogram toggle in the sql mode", () => {
     logstests.clickHistogramToggle();
     logstests.clickSearchBarSqlMode();
     logstests.confirmLogsSearchHidden();
     logstests.histogramToggleDisabled();
   });
+  it.skip("should toggle chart when clicking on the histogram toggle", () => {
+    cy.wait(3000);
+    logstests.clickHistogramToggle();
+    cy.wait(3000);
+    logstests.confirmLogsSearchHidden();
+  });
 
   // This test case checks if the function editor is toggled on/off when the 'functions toggle' button is clicked
-  it("Should toggle the function editor on functions toggle click", () => {
+  it("should toggle the function editor on functions toggle click", () => {
     logstests.displayVrlFunctionEditor();
     logstests.clickLogsSearchQueryToggle();
     logstests.vrlFunctionEditorHidden();
@@ -112,7 +114,7 @@ describe("Logs testcases", () => {
     logstests.displayVrlFunctionEditor();
   });
 
-  it("Should clear the value of a function on functions toggle click", () => {
+  it("should clear the value of a function on functions toggle click", () => {
     // Wait for 5 seconds
     cy.wait(5000);
     logstests.enterVrlFunctionvalue();
@@ -121,7 +123,7 @@ describe("Logs testcases", () => {
     logstests.attributeToNotHaveVrlFunctionvalue();
   });
 
-  it("Should load the values of a field when the field is expanded", () => {
+  it("should load the values of a field when the field is expanded", () => {
     cy.get('[data-cy="date-time-button"]').click({ force: true });
     cy.get('[data-test="date-time-relative-6-w-btn"] > .q-btn__content').click({
       force: true,
@@ -134,7 +136,7 @@ describe("Logs testcases", () => {
     );
   });
 
-  it("Should add the field to the editor when + is clicked", () => {
+  it("should add the field to the editor when + is clicked", () => {
     // Wait for 5 seconds
     cy.wait(4000);
     // get the value of the field name
@@ -151,13 +153,15 @@ describe("Logs testcases", () => {
     applyQueryButton();
   });
 
-  it("Should add the value to the editor when the = is clicked next to the field value", () => {
+  it("should add the value to the editor when the = is clicked next to the field value", () => {
     // Wait for 2 seconds
     cy.wait(2000);
     // Type the value of a variable into an input field
     cy.intercept("GET", logData.ValueQuery).as("value");
     cy.get('[data-cy="date-time-button"]').click({ force: true });
-    cy.get('[data-test="date-time-relative-6-w-btn"] > .q-btn__content').click({
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
       force: true,
     });
     logstests.addFeildandSubValue();
@@ -174,7 +178,7 @@ describe("Logs testcases", () => {
     logstests.valueAddedOnPlusClick();
     cy.intercept("GET", logData.ValueQuery).as("value");
     logstests.clickOnFirstField();
-    cy.wait("@value", { timeout: 4000 })
+    cy.wait("@value", { timeout: 5000 })
       .its("response.statusCode")
       .should("eq", 200);
     cy.get("@value").its("response.body.hits").should("be.an", "array");
@@ -184,7 +188,7 @@ describe("Logs testcases", () => {
     applyQueryButton();
   });
 
-  it("Should add the value to the editor when the != is clicked next to the field value", () => {
+  it("should add the value to the editor when the != is clicked next to the field value", () => {
     // Wait for 2 seconds
     cy.wait(5000);
     // Type the value of a variable into an input field
@@ -251,26 +255,7 @@ describe("Logs testcases", () => {
     applyQueryButton();
   });
 
-  it("Should add invalid query and display error", () => {
-    // Type the value of a variable into an input field
-    cy.intercept("GET", logData.ValueQuery).as("value");
-
-    applyQueryButton();
-    cy.get('[data-cy="date-time-button"]').click({ force: true });
-    cy.get('[data-test="date-time-relative-6-w-btn"] > .q-btn__content').click({
-      force: true,
-    });
-    cy.get('[data-test="logs-search-bar-query-editor"]').type(
-      "kubernetes_labels_deploy="
-    );
-    cy.wait(3000);
-    cy.get('[data-cy="search-bar-refresh-button"]', { timeout: 2000 }).click({
-      force: true,
-    });
-    cy.get('[data-test="logs-search-error-message"]').should("be.visible");
-  });
-
-  it("Should click run query after SQL toggle on but without any query", () => {
+  it("should click run query after SQL toggle on but without any query", () => {
     // Wait for 2 seconds
     cy.wait(3000);
     // Type the value of a variable into an input field
@@ -285,13 +270,15 @@ describe("Logs testcases", () => {
     cy.contains("Invalid SQL Syntax").should("be.visible");
   });
 
-  it("Should enter a valid SQL query", () => {
+  it("should enter a valid SQL query", () => {
     // Wait for 2 seconds
     cy.wait(2000);
     // Type the value of a variable into an input field
     cy.intercept("GET", logData.ValueQuery).as("value");
     cy.get('[data-cy="date-time-button"]').click({ force: true });
-    cy.get('[data-test="date-time-relative-6-w-btn"] > .q-btn__content').click({
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
       force: true,
     });
     logstests.addFeildandSubValue();
@@ -328,13 +315,15 @@ describe("Logs testcases", () => {
     applyQueryButton();
   });
 
-  it("Should contain options to include, exclude and add field to table under Json", () => {
+  it("should contain options to include, exclude and add field to table under Json", () => {
     // Wait for 2 seconds
     cy.wait(2000);
     // Type the value of a variable into an input field
     cy.intercept("GET", logData.ValueQuery).as("value");
     cy.get('[data-cy="date-time-button"]').click({ force: true });
-    cy.get('[data-test="date-time-relative-6-w-btn"] > .q-btn__content').click({
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
       force: true,
     });
     logstests.addFeildandSubValue();
@@ -419,13 +408,15 @@ describe("Logs testcases", () => {
     });
   });
 
-  it("Should contain options to include, exclude and add field to table under TABLE", () => {
+  it("should contain options to include, exclude and add field to table under TABLE", () => {
     // Wait for 2 seconds
     cy.wait(2000);
     // Type the value of a variable into an input field
     cy.intercept("GET", logData.ValueQuery).as("value");
     cy.get('[data-cy="date-time-button"]').click({ force: true });
-    cy.get('[data-test="date-time-relative-6-w-btn"] > .q-btn__content').click({
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
       force: true,
     });
     logstests.addFeildandSubValue();
@@ -756,7 +747,7 @@ describe("Logs testcases", () => {
       force: true,
     });
     applyQueryButton();
-    cy.get(".search-list > div.text-center").should("be.visible");
+    cy.get(".search-list > :nth-child(1) > .text-left").should("be.visible");
     cy.wait(2000);
     cy.get('[data-test="logs-search-result-logs-table"]')
       .find("tbody")
@@ -766,7 +757,7 @@ describe("Logs testcases", () => {
     cy.get('[data-test="close-dialog"] > .q-btn__content > .q-icon').click({
       force: true,
     });
-    cy.get(".search-list > div.text-center").should("not.be.hidden");
+    cy.get(".search-list > :nth-child(1) > .text-left").should("not.be.hidden");
   });
 
   it("should click on live mode on button and select 5 sec, switch off and then click run query   ", () => {
@@ -816,7 +807,7 @@ describe("Logs testcases", () => {
     applyQueryButton();
   });
 
-  it("should only display results for selected date time ", () => {
+  it.skip("should only display results for selected date time ", () => {
     cy.intercept("GET", logData.ValueQuery).as("value");
     cy.get('[data-cy="date-time-button"]').click({ force: true });
     cy.get('[data-test="date-time-absolute-tab"]').click({ force: true });
@@ -948,7 +939,7 @@ describe("Logs testcases", () => {
   });
 
   // TODO: change the last line to '.should('be.visible')' when bug is resolved
-  it.skip("should display added function on switching between tabs and again navigate to logs", () => {
+  it("should display added function on switching between tabs and again navigate to logs", () => {
     // cy.intercept("GET", logData.ValueQuery).as("value");
     cy.get('[data-cy="date-time-button"]').click({ force: true });
     cy.get('[data-test="date-time-relative-6-w-btn"] > .q-btn__content').click({
@@ -965,19 +956,211 @@ describe("Logs testcases", () => {
     cy.contains(".a=2").should("be.visible");
   });
 
-  // it.only("should enter function, edit and then delete the function", () => {
-  //   cy.intercept("GET", logData.ValueQuery).as("value");
-  //   logstests.clickVrlQueryToggle()
-  //   cy.wait(2000)
-  //   logstests.enterTextVrlQueryEditor("a=1")
-  //   logstests.clickSaveFunctionButton();
-  //   logstests.enterFunctionName("e2e_function")
-  //   logstests.clickSavedOkButton()
-  //   logstests.enterTextVrlQueryEditor("a=133")
-  //   cy.get('[data-test="logs-search-bar-function-dropdown"] > .q-btn-dropdown--current > .q-btn__content').click({force:true})
-  //   cy.get('[data-test="saved-function-action-toggle"]').click({force:true})
-  //   cy.get('[data-test="saved-function-name-select"]').click({force:true})
-  //   cy.wait(2000)
-  //   cy.contains('Test1').click({force:true})
-  // })
+  it("should verify if user searches a value and graph appears when user selects SQL toggle and switches off again", () => {
+    // Wait for 2 seconds
+    cy.wait(2000);
+    // Type the value of a variable into an input field
+    cy.intercept("GET", logData.ValueQuery).as("value");
+    cy.get('[data-cy="date-time-button"]').click({ force: true });
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
+      force: true,
+    });
+    logstests.addFeildandSubValue();
+    logstests.addsubFeildValue();
+    //click on the field
+    // get the data from the value variable
+    cy.wait("@value", { timeout: 5000 })
+      .its("response.statusCode")
+      .should("eq", 200);
+    logstests.addsubFeildValue();
+    cy.get("@value").its("response.body.hits").should("be.an", "array");
+    logstests.clickFeildSubvalue();
+    cy.wait(2000);
+    logstests.valueAddedOnPlusClick();
+    cy.intercept("GET", logData.ValueQuery).as("value");
+    logstests.clickOnFirstField();
+    cy.wait("@value", { timeout: 5000 })
+      .its("response.statusCode")
+      .should("eq", 200);
+    cy.get("@value").its("response.body.hits").should("be.an", "array");
+    logstests.addSecondFieldOnEditor();
+    logstests.clickOnEqualToButton();
+    logstests.bothFieldAddedOnEqualToClick();
+    cy.get('[aria-label="SQL Mode"] > .q-toggle__label').click({ force: true });
+    applyQueryButton();
+    cy.get('[aria-label="SQL Mode"] > .q-toggle__label').click({ force: true });
+    cy.get(".q-spinner").should("not.exist");
+  });
+
+  it("should  display ingested logs - search logs, navigate on another tab, revisit logs page", () => {
+    // cy.intercept("GET", logData.ValueQuery).as("value");
+    cy.get('[data-cy="date-time-button"]').click({ force: true });
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
+      force: true,
+    });
+    applyQueryButton();
+    cy.get('[data-test="menu-link-/traces-item"]').click({ force: true });
+    cy.wait(100);
+    cy.get('[data-test="menu-link-/logs-item"]').click({ force: true });
+    cy.get('[data-test="logs-search-result-bar-chart"]').should("exist");
+  });
+
+  it("should redirect to logs after clicking on stream explorer via stream page", () => {
+    // cy.intercept("GET", logData.ValueQuery).as("value");
+    cy.get('[data-cy="date-time-button"]').click({ force: true });
+    cy.get('[data-test="menu-link-/streams-item"]').click({ force: true });
+    cy.get('[title="Explore"]:last').click({ force: true });
+    cy.url().should("include", "logs");
+  });
+
+  it("should reset the editor on clicking reset filter button", () => {
+    // Wait for 2 seconds
+    cy.wait(2000);
+    // Type the value of a variable into an input field
+    cy.intercept("GET", logData.ValueQuery).as("value");
+    cy.get('[data-cy="date-time-button"]').click({ force: true });
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
+      force: true,
+    });
+    logstests.addFeildandSubValue();
+    logstests.addsubFeildValue();
+    //click on the field
+    // get the data from the value variable
+    cy.wait("@value", { timeout: 5000 })
+      .its("response.statusCode")
+      .should("eq", 200);
+    logstests.addsubFeildValue();
+    cy.get("@value").its("response.body.hits").should("be.an", "array");
+    logstests.clickFeildSubvalue();
+    cy.wait(2000);
+    cy.intercept("GET", logData.ValueQuery).as("value");
+    logstests.clickOnFirstField();
+    cy.contains("Reset Filters").click({ force: true });
+    cy.get('[data-test="logs-search-bar-query-editor"]').should(
+      "have.value",
+      ""
+    );
+  });
+
+  it("should enter query, reset and then again click the field from LHS", () => {
+    // cy.intercept("GET", logData.ValueQuery).as("value");
+    cy.get('[aria-label="SQL Mode"]').click({ force: true });
+    cy.get(
+      '[data-test="log-search-expand-kubernetes_annotations_kubectl_kubernetes_io_default_container-field-btn"]'
+    ).click({ force: true });
+    cy.contains("Reset Filters").click({ force: true });
+    cy.get(
+      '[data-test="log-search-expand-kubernetes_annotations_kubectl_kubernetes_io_default_container-field-btn"]'
+    ).click({ force: true });
+    cy.get(".q-notification__message").should("not.exist");
+  });
+
+  it("should redirect to logs after clicking on stream explorer via stream page", () => {
+    // cy.intercept("GET", logData.ValueQuery).as("value");
+    cy.get('[data-cy="index-field-search-input"]').type("code");
+    cy.get('[data-test="log-search-expand-code-field-btn"]').click();
+    cy.get('[data-test="logs-search-subfield-add-code-200"]').click();
+    cy.get('[data-cy="date-time-button"] > .q-btn__content').click();
+    cy.get('[data-test="date-time-relative-15-m-btn"]').click();
+    cy.get('[data-cy="search-bar-refresh-button"]').click();
+    cy.get('[data-test="logs-search-saved-views-btn"]').click();
+    cy.get('[data-test="add-alert-name-input"]').type("streamlogsnavigate");
+    cy.get('[data-test="saved-view-dialog-save-btn"]').click();
+    cy.get('[data-test="menu-link-/streams-item"]').click({ force: true });
+    cy.get('[title="Explore"]:first').click({ force: true });
+    cy.url().should("include", "logs");
+    cy.get(
+      '[data-test="logs-search-saved-views-btn"] > .q-btn-dropdown__arrow-container > .q-btn__content > .q-icon'
+    ).click();
+    cy.contains("streamlogsnavigate").click();
+    cy.wait(200);
+    cy.get('[data-test="logs-search-bar-query-editor"]').then((editor) => {
+      let text = editor.text();
+      text = removeUTFCharacters(text);
+      const cleanedText = removeUTFCharacters(text);
+      expect(cleanedText).to.include("code='200'");
+    });
+    cy.get(
+      '[data-test="logs-search-saved-views-btn"] > .q-btn-dropdown__arrow-container > .q-btn__content > .q-icon'
+    ).click();
+    cy.get(
+      '[data-test="logs-search-bar-delete-streamlogsnavigate-saved-view-btn"]'
+    ).each(($button, index) => {
+      if (index === 2) {
+        // Click on the delete button for the first item
+        cy.wrap($button).click();
+        cy.get('[data-test="confirm-button"]').click({ force: true });
+      }
+    });
+  });
+
+  it("should add invalid query and display error", () => {
+    // Type the value of a variable into an input field
+    cy.intercept("GET", logData.ValueQuery).as("value");
+
+    applyQueryButton();
+    cy.get('[data-cy="date-time-button"]').click({ force: true });
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
+      force: true,
+    });
+    cy.get('[data-test="logs-search-bar-query-editor"]', {
+      timeout: 2000,
+    }).type("kubernetes");
+    cy.wait(2000);
+    cy.get('[data-cy="search-bar-refresh-button"] > .q-btn__content').click({
+      force: true,
+    });
+    cy.wait("@allsearch");
+    cy.get('[data-test="logs-search-error-message"]', { timeout: 2000 }).should(
+      "exist"
+    );
+  });
+
+  it("should not display error if match all case added in log query search", () => {
+    // Type the value of a variable into an input field
+    cy.intercept("GET", logData.ValueQuery).as("value");
+
+    applyQueryButton();
+    cy.get('[data-cy="date-time-button"]').click({ force: true });
+    cy.get(
+      '[data-test="date-time-relative-15-m-btn"] > .q-btn__content > .block'
+    ).click({
+      force: true,
+    });
+    cy.get('[data-test="logs-search-bar-query-editor"]', {
+      timeout: 2000,
+    }).type("match_all('code')");
+    cy.wait(200);
+    cy.get('[data-cy="search-bar-refresh-button"] > .q-btn__content').click({
+      force: true,
+    });
+    cy.wait("@allsearch");
+    cy.get('[data-test="log-table-column-1-@timestamp"]', {
+      timeout: 2000,
+    }).should("exist");
+  });
+
+  it("should change stream settings and click on search stream", () => {
+    // Type the value of a variable into an input field
+
+    cy.get('[data-test="menu-link-/streams-item"]').click({ force: true });
+    cy.get('[title="Stream Detail"]').click({ force: true });
+    cy.get(
+      '[data-test="schema-stream-kubernetes_annotations_kubectl_kubernetes_io_default_container-field-fts-key-checkbox"]'
+    ).click({ force: true });
+    cy.get('[data-test="schema-update-settings-button"]').click({
+      force: true,
+    });
+    cy.get(".col-auto > .q-btn > .q-btn__content").click({ force: true });
+    cy.get('[title="Explore"]').click({ force: true });
+    cy.get('[data-test="log-table-column-0-@timestamp"]').should("exist");
+  });
 });

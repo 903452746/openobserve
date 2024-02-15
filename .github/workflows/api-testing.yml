@@ -19,7 +19,8 @@ env:
   ZO_BASE_URL: http://localhost:5080/
 
 jobs:
-  build:
+  api_integration_tests:
+    name: api_integration_tests
     runs-on: ubuntu-latest
     steps:
       - name: Remove unused tools
@@ -43,7 +44,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install Protoc
-        uses: arduino/setup-protoc@v2
+        uses: arduino/setup-protoc@v3
         with:
           version: "21.12"
 
@@ -60,7 +61,7 @@ jobs:
         with:
           enable-cache: true
           working-directory: 'tests/api-testing/'
-          version: '0.16.0'
+          version: '0.21.0'
 
       - name: Start OpenObserve
         run: target/debug/openobserve &

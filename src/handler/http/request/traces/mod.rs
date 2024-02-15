@@ -16,16 +16,12 @@
 use std::{collections::HashMap, io::Error};
 
 use actix_web::{get, http, post, web, HttpRequest, HttpResponse};
-use ahash::AHashMap;
-use config::{meta::stream::StreamType, metrics, CONFIG};
+use config::{ider, meta::stream::StreamType, metrics, utils::json, CONFIG};
+use infra::errors;
 use serde::Serialize;
 
 use crate::{
-    common::{
-        infra::errors,
-        meta::{self, http::HttpResponse as MetaHttpResponse},
-        utils::json,
-    },
+    common::meta::{self, http::HttpResponse as MetaHttpResponse},
     handler::http::request::{CONTENT_TYPE_JSON, CONTENT_TYPE_PROTO},
     service::{search as SearchService, traces::otlp_http},
 };
@@ -100,6 +96,7 @@ async fn handle_req(
     ),
     params(
         ("org_id" = String, Path, description = "Organization name"),
+        ("stream_name" = String, Path, description = "Stream name"),
         ("filter" = Option<String>, Query, description = "filter, eg: a=b AND c=d"),
         ("from" = i64, Query, description = "from"), // topN
         ("size" = i64, Query, description = "size"), // topN
@@ -126,16 +123,52 @@ async fn handle_req(
         (status = 500, description = "Failure", content_type = "application/json", body = HttpResponse),
     )
 )]
-#[get("/{org_id}/traces/latest")]
+#[get("/{org_id}/{stream_name}/traces/latest")]
 pub async fn get_latest_traces(
-    org_id: web::Path<String>,
+    path: web::Path<(String, String)>,
     in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
     let start = std::time::Instant::now();
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = ider::uuid();
 
-    let org_id = org_id.into_inner();
-    let query = web::Query::<AHashMap<String, String>>::from_query(in_req.query_string()).unwrap();
+    let (org_id, stream_name) = path.into_inner();
+    let query = web::Query::<HashMap<String, String>>::from_query(in_req.query_string()).unwrap();
+
+    // Check permissions on stream
+
+    #[cfg(feature = "enterprise")]
+    {
+        use crate::common::{
+            infra::config::USERS,
+            utils::auth::{is_root_user, AuthExtractor},
+        };
+        let user_id = in_req.headers().get("user_id").unwrap();
+        if !is_root_user(user_id.to_str().unwrap()) {
+            let user: meta::user::User = USERS
+                .get(&format!("{org_id}/{}", user_id.to_str().unwrap()))
+                .unwrap()
+                .clone();
+
+            if user.is_external
+                && !crate::handler::http::auth::validator::check_permissions(
+                    user_id.to_str().unwrap(),
+                    AuthExtractor {
+                        auth: "".to_string(),
+                        method: "GET".to_string(),
+                        o2_type: format!("{}:{}", StreamType::Traces, stream_name),
+                        org_id: org_id.clone(),
+                        bypass_check: false,
+                        parent_id: "".to_string(),
+                    },
+                    Some(user.role),
+                )
+                .await
+            {
+                return Ok(MetaHttpResponse::forbidden("Unauthorized Access"));
+            }
+        }
+        // Check permissions on stream ends
+    }
 
     let filter = match query.get("filter") {
         Some(v) => v.to_string(),
@@ -157,7 +190,7 @@ pub async fn get_latest_traces(
         .get("end_time")
         .map_or(0, |v| v.parse::<i64>().unwrap_or(0));
     if end_time == 0 {
-        end_time = chrono::Utc::now().timestamp_micros();
+        return Ok(MetaHttpResponse::bad_request("end_time is empty"));
     }
 
     let timeout = query
@@ -170,7 +203,7 @@ pub async fn get_latest_traces(
 
     // search
     let query_sql = format!(
-        "SELECT trace_id, min({}) as zo_sql_timestamp, min(start_time) as trace_start_time, max(end_time) as trace_end_time FROM default",
+        "SELECT trace_id, min({}) as zo_sql_timestamp, min(start_time) as trace_start_time, max(end_time) as trace_end_time FROM {stream_name}",
         CONFIG.common.column_timestamp
     );
     let query_sql = if filter.is_empty() {
@@ -268,7 +301,7 @@ pub async fn get_latest_traces(
         .collect::<Vec<String>>()
         .join("','");
     let query_sql = format!(
-        "SELECT {}, trace_id, start_time, end_time, duration, service_name, operation_name, span_status FROM default WHERE trace_id IN ('{}') ORDER BY {} ASC",
+        "SELECT {}, trace_id, start_time, end_time, duration, service_name, operation_name, span_status FROM {stream_name} WHERE trace_id IN ('{}') ORDER BY {} ASC",
         CONFIG.common.column_timestamp, trace_ids, CONFIG.common.column_timestamp,
     );
     req.query.from = 0;
@@ -289,7 +322,7 @@ pub async fn get_latest_traces(
                         "/api/org/traces/latest",
                         "500",
                         &org_id,
-                        "default",
+                        &stream_name,
                         stream_type.to_string().as_str(),
                     ])
                     .observe(time);
@@ -298,7 +331,7 @@ pub async fn get_latest_traces(
                         "/api/org/traces/latest",
                         "500",
                         &org_id,
-                        "default",
+                        &stream_name,
                         stream_type.to_string().as_str(),
                     ])
                     .inc();
@@ -376,7 +409,7 @@ pub async fn get_latest_traces(
             "/api/org/traces/latest",
             "200",
             &org_id,
-            "default",
+            &stream_name,
             stream_type.to_string().as_str(),
         ])
         .observe(time);
@@ -385,7 +418,7 @@ pub async fn get_latest_traces(
             "/api/org/traces/latest",
             "200",
             &org_id,
-            "default",
+            &stream_name,
             stream_type.to_string().as_str(),
         ])
         .inc();

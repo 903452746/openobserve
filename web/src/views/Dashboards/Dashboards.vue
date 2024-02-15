@@ -35,6 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         dense
         class="q-ml-auto"
         :placeholder="t('dashboard.search')"
+        data-test="dashboard-search"
       >
         <template #prepend>
           <q-icon name="search" />
@@ -47,6 +48,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         no-caps
         :label="t(`dashboard.import`)"
         @click="importDashboard"
+        data-test="dashboard-import"
       />
       <!-- add dashboard button -->
       <q-btn
@@ -64,6 +66,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       unit="px"
       :limits="[200, 500]"
       style="height: calc(100vh - 122px)"
+      data-test="dashboard-splitter"
     >
       <template v-slot:before>
         <div class="text-bold q-px-md q-pt-sm">
@@ -152,7 +155,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           <template #body-cell-description="props">
             <q-td :props="props">
               <div :title="props.value">
-                {{ (props.value && props.value.length > 45) ? props.value.slice(0, 45) + '...' : props.value }}
+                {{
+                  props.value && props.value.length > 45
+                    ? props.value.slice(0, 45) + "..."
+                    : props.value
+                }}
               </div>
             </q-td>
           </template>
@@ -232,6 +239,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           position="right"
           full-height
           maximized
+          data-test="dashboard-add-dialog"
         >
           <AddDashboard
             @updated="updateDashboardList"
@@ -245,6 +253,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           position="right"
           full-height
           maximized
+          data-test="dashboard-folder-dialog"
         >
           <AddFolder
             @update:modelValue="updateFolderList"
@@ -259,6 +268,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           position="right"
           full-height
           maximized
+          data-test="dashboard-move-to-another-folder-dialog"
         >
           <MoveDashboardToAnotherFolder
             @updated="handleDashboardMoved"
@@ -280,6 +290,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <!-- delete folder dialog -->
         <ConfirmDialog
           title="Delete Folder"
+          data-test="dashboard-confirm-delete-folder-dialog"
           message="Are you sure you want to delete this Folder?"
           @update:ok="deleteFolder"
           @update:cancel="confirmDeleteFolderDialog = false"
@@ -528,9 +539,7 @@ export default defineComponent({
       } catch (err) {
         $q.notify({
           type: "negative",
-          message: err?.response?.data["error"]
-            ? JSON.stringify(err?.response?.data["error"])
-            : "Dashboard duplication failed",
+          message: err?.message ?? "Dashboard duplication failed",
         });
       }
 
@@ -544,6 +553,7 @@ export default defineComponent({
           org_identifier: store.state.selectedOrganization.identifier,
           dashboard: row.id,
           folder: activeFolderId.value || "default",
+          tab: "default",
         },
       });
     };
@@ -598,7 +608,7 @@ export default defineComponent({
         } catch (err) {
           $q.notify({
             type: "negative",
-            message: "Dashboard deletion failed",
+            message: err?.message ?? "Dashboard deletion failed",
             timeout: 2000,
           });
         }
@@ -648,13 +658,13 @@ export default defineComponent({
 
           $q.notify({
             type: "positive",
-            message: `Folder deleted successfully.`,
+            message: `Folder deleted successfully`,
             timeout: 2000,
           });
         } catch (err) {
           $q.notify({
             type: "negative",
-            message: err.response.data.message || "Folder deletion failed",
+            message: err?.message ?? "Folder deletion failed",
             timeout: 2000,
           });
         } finally {
@@ -727,17 +737,13 @@ export default defineComponent({
     async updateDashboardList(dashboardId: any, folderId: any) {
       this.showAddDashboardDialog = false;
 
-      this.$q.notify({
-        type: "positive",
-        message: `Dashboard added successfully.`,
-      });
-
       this.$router.push({
         path: "/dashboards/view/",
         query: {
           org_identifier: this.store.state.selectedOrganization.identifier,
           dashboard: dashboardId,
           folder: folderId,
+          tab: "default",
         },
       });
     },

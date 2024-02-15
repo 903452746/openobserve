@@ -15,23 +15,24 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use config::{meta::stream::StreamType, CONFIG};
+use config::{
+    cluster::LOCAL_NODE_UUID,
+    meta::{
+        stream::StreamType,
+        usage::{Stats, UsageEvent, STATS_STREAM, USAGE_STREAM},
+    },
+    utils::json,
+    CONFIG,
+};
+use infra::{db as infra_db, dist_lock};
 use once_cell::sync::Lazy;
 use reqwest::Client;
 
 use super::ingestion_service;
 use crate::{
     common::{
-        infra::{
-            cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-            db as infra_db, dist_lock,
-        },
-        meta::{
-            self,
-            search::Request,
-            usage::{Stats, UsageEvent, STATS_STREAM, USAGE_STREAM},
-        },
-        utils::json,
+        infra::cluster::get_node_by_uuid,
+        meta::{self, search::Request},
     },
     handler::grpc::cluster_rpc,
     service::{db, search as SearchService},
@@ -40,28 +41,36 @@ use crate::{
 pub static CLIENT: Lazy<Arc<Client>> = Lazy::new(|| Arc::new(Client::new()));
 
 pub async fn publish_stats() -> Result<(), anyhow::Error> {
-    let mut orgs = db::schema::list_organizations_from_cache();
+    let mut orgs = db::schema::list_organizations_from_cache().await;
     orgs.retain(|org: &String| org != &CONFIG.common.usage_org);
 
     for org_id in orgs {
         // get the working node for the organization
         let (_offset, node) = get_last_stats_offset(&org_id).await;
         if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::warn!("[STATS] for organization {org_id} are being calculated by {node}");
+            log::debug!("[STATS] for organization {org_id} are being calculated by {node}");
             continue;
         }
 
         // get lock
         let locker = dist_lock::lock(&format!("/stats/publish_stats/org/{org_id}"), 0).await?;
-
         let (last_query_ts, node) = get_last_stats_offset(&org_id).await;
         if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-            log::warn!("[STATS] for organization {org_id} are being calculated by {node}");
+            log::debug!("[STATS] for organization {org_id} are being calculated by {node}");
+            dist_lock::unlock(&locker).await?;
             continue;
         }
+        // set current node to lock the organization
+        let ret = if !node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
+            set_last_stats_offset(&org_id, last_query_ts, Some(&LOCAL_NODE_UUID.clone())).await
+        } else {
+            Ok(())
+        };
         // release lock
         dist_lock::unlock(&locker).await?;
         drop(locker);
+        ret?;
+
         let current_ts = chrono::Utc::now().timestamp_micros();
 
         let sql = if CONFIG.common.usage_report_compressed_size {
@@ -123,14 +132,6 @@ pub async fn publish_stats() -> Result<(), anyhow::Error> {
             }
         }
     }
-    // set cache expiry
-    //  let expiry_ts = chrono::Utc::now()
-    // + chrono::Duration::minutes(
-    // (CONFIG.limit.calculate_stats_interval - 2)
-    // .try_into()
-    // .unwrap(),
-    // );
-    // set_cache_expiry(expiry_ts.timestamp_micros()).await;
     Ok(())
 }
 
@@ -164,9 +165,9 @@ async fn get_last_stats(
     match SearchService::search("", &CONFIG.common.usage_org, StreamType::Logs, &req).await {
         Ok(res) => Ok(res.hits),
         Err(err) => match &err {
-            crate::common::infra::errors::Error::ErrorCode(
-                crate::common::infra::errors::ErrorCodes::SearchStreamNotFound(_),
-            ) => Ok(vec![]),
+            infra::errors::Error::ErrorCode(infra::errors::ErrorCodes::SearchStreamNotFound(_)) => {
+                Ok(vec![])
+            }
             _ => Err(err.into()),
         },
     }

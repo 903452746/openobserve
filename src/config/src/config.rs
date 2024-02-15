@@ -13,12 +13,11 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
-use ahash::{AHashMap, AHashSet};
-use dashmap::{DashMap, DashSet};
 use dotenv_config::EnvConfig;
 use dotenvy::dotenv;
+use hashbrown::{HashMap, HashSet};
 use itertools::chain;
 use once_cell::sync::Lazy;
 use reqwest::Client;
@@ -31,10 +30,11 @@ use crate::{
 
 pub type FxIndexMap<K, V> = indexmap::IndexMap<K, V, ahash::RandomState>;
 pub type FxIndexSet<K> = indexmap::IndexSet<K, ahash::RandomState>;
-pub type RwHashMap<K, V> = DashMap<K, V, ahash::RandomState>;
-pub type RwHashSet<K> = DashSet<K, ahash::RandomState>;
-pub type RwAHashMap<K, V> = tokio::sync::RwLock<AHashMap<K, V>>;
-pub type RwAHashSet<K> = tokio::sync::RwLock<AHashSet<K>>;
+pub type RwHashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
+pub type RwHashSet<K> = dashmap::DashSet<K, ahash::RandomState>;
+pub type RwAHashMap<K, V> = tokio::sync::RwLock<HashMap<K, V>>;
+pub type RwAHashSet<K> = tokio::sync::RwLock<HashSet<K>>;
+pub type RwBTreeMap<K, V> = tokio::sync::RwLock<BTreeMap<K, V>>;
 
 pub const MMDB_CITY_FILE_NAME: &str = "GeoLite2-City.mmdb";
 pub const MMDB_ASN_FILE_NAME: &str = "GeoLite2-ASN.mmdb";
@@ -42,9 +42,11 @@ pub const GEO_IP_CITY_ENRICHMENT_TABLE: &str = "maxmind_city";
 pub const GEO_IP_ASN_ENRICHMENT_TABLE: &str = "maxmind_asn";
 
 pub const SIZE_IN_MB: f64 = 1024.0 * 1024.0;
+pub const SIZE_IN_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 pub const PARQUET_BATCH_SIZE: usize = 8 * 1024;
 pub const PARQUET_PAGE_SIZE: usize = 1024 * 1024;
 pub const PARQUET_MAX_ROW_GROUP_SIZE: usize = 1024 * 1024;
+pub const PARQUET_WRITE_BUFFER_SIZE: usize = 4096;
 
 pub const HAS_FUNCTIONS: bool = true;
 pub const FILE_EXT_JSON: &str = ".json";
@@ -230,6 +232,10 @@ pub struct Common {
     pub cluster_name: String,
     #[env_config(name = "ZO_INSTANCE_NAME", default = "")]
     pub instance_name: String,
+    #[env_config(name = "ZO_WEB_URL", default = "")] // http://localhost:5080
+    pub web_url: String,
+    #[env_config(name = "ZO_BASE_URI", default = "")] // /abc
+    pub base_uri: String,
     #[env_config(name = "ZO_INGESTER_SIDECAR_ENABLED", default = false)]
     pub ingester_sidecar_enabled: bool,
     #[env_config(name = "ZO_INGESTER_SIDECAR_QUERIER", default = false)]
@@ -244,8 +250,6 @@ pub struct Common {
     pub data_db_dir: String,
     #[env_config(name = "ZO_DATA_CACHE_DIR", default = "")] // ./data/openobserve/cache/
     pub data_cache_dir: String,
-    #[env_config(name = "ZO_BASE_URI", default = "")]
-    pub base_uri: String,
     #[env_config(name = "ZO_WAL_MEMORY_MODE_ENABLED", default = false)]
     pub wal_memory_mode_enabled: bool,
     #[env_config(name = "ZO_WAL_LINE_MODE_ENABLED", default = true)]
@@ -367,12 +371,14 @@ pub struct Limit {
     pub req_payload_limit: usize,
     #[env_config(name = "ZO_MAX_FILE_RETENTION_TIME", default = 600)] // seconds
     pub max_file_retention_time: u64,
-    #[env_config(name = "ZO_MAX_FILE_SIZE_ON_DISK", default = 64)] // MB, per log file size on disk
+    // MB, per log file size limit on disk
+    #[env_config(name = "ZO_MAX_FILE_SIZE_ON_DISK", default = 64)]
     pub max_file_size_on_disk: usize,
-    #[env_config(name = "ZO_MEM_FILE_MAX_SIZE", default = 256)] // MB, per log file size in memory
-    pub mem_file_max_size: usize,
+    // MB, per data file size limit in memory
+    #[env_config(name = "ZO_MAX_FILE_SIZE_IN_MEMORY", default = 256)]
+    pub max_file_size_in_memory: usize,
     #[env_config(name = "ZO_MEM_TABLE_MAX_SIZE", default = 0)]
-    // MB, total file size in memory, default is 50% of system memory
+    // MB, total data size in memory, default is 50% of system memory
     pub mem_table_max_size: usize,
     #[env_config(name = "ZO_MEM_PERSIST_INTERVAL", default = 5)] // seconds
     pub mem_persist_interval: u64,
@@ -384,6 +390,12 @@ pub struct Limit {
     pub query_thread_num: usize,
     #[env_config(name = "ZO_QUERY_TIMEOUT", default = 600)]
     pub query_timeout: u64,
+    #[env_config(name = "ZO_QUERY_PARTITION_BY_SECS", default = 10)] // seconds
+    pub query_partition_by_secs: usize,
+    #[env_config(name = "ZO_QUERY_PARTITION_MIN_SECS", default = 600)] // seconds
+    pub query_partition_min_secs: i64,
+    #[env_config(name = "ZO_QUERY_GROUP_BASE_SPEED", default = 1024)] // MB/s/core
+    pub query_group_base_speed: usize,
     #[env_config(name = "ZO_INGEST_ALLOWED_UPTO", default = 5)] // in hours - in past
     pub ingest_allowed_upto: i64,
     #[env_config(name = "ZO_IGNORE_FILE_RETENTION_BY_STREAM", default = false)]
@@ -414,6 +426,8 @@ pub struct Limit {
     pub request_timeout: u64,
     #[env_config(name = "ZO_ACTIX_KEEP_ALIVE", default = 30)] // in second
     pub keep_alive: u64,
+    #[env_config(name = "ZO_ALERT_SCHEDULE_INTERVAL", default = 60)] // in second
+    pub alert_schedule_interval: i64,
 }
 
 #[derive(EnvConfig)]
@@ -427,7 +441,7 @@ pub struct Compact {
     #[env_config(name = "ZO_COMPACT_SYNC_TO_DB_INTERVAL", default = 1800)] // seconds
     pub sync_to_db_interval: u64,
     #[env_config(name = "ZO_COMPACT_MAX_FILE_SIZE", default = 256)] // MB
-    pub max_file_size: u64,
+    pub max_file_size: usize,
     #[env_config(name = "ZO_COMPACT_DATA_RETENTION_DAYS", default = 3650)] // days
     pub data_retention_days: i64,
     #[env_config(name = "ZO_COMPACT_DELETE_FILES_DELAY_HOURS", default = 2)] // hours
@@ -513,7 +527,7 @@ pub struct Etcd {
     pub prefix: String,
     #[env_config(name = "ZO_ETCD_CONNECT_TIMEOUT", default = 5)]
     pub connect_timeout: u64,
-    #[env_config(name = "ZO_ETCD_COMMAND_TIMEOUT", default = 5)]
+    #[env_config(name = "ZO_ETCD_COMMAND_TIMEOUT", default = 10)]
     pub command_timeout: u64,
     #[env_config(name = "ZO_ETCD_LOCK_WAIT_TIMEOUT", default = 3600)]
     pub lock_wait_timeout: u64,
@@ -533,7 +547,7 @@ pub struct Etcd {
     pub domain_name: String,
     #[env_config(name = "ZO_ETCD_LOAD_PAGE_SIZE", default = 1000)]
     pub load_page_size: i64,
-    #[env_config(name = "ZO_ETCD_NODE_HEARTBEAT_TTL", default = 10)]
+    #[env_config(name = "ZO_ETCD_NODE_HEARTBEAT_TTL", default = 30)]
     pub node_heartbeat_ttl: i64,
 }
 
@@ -670,10 +684,21 @@ fn check_common_config(cfg: &mut Config) -> Result<(), anyhow::Error> {
     if cfg.limit.file_push_interval == 0 {
         cfg.limit.file_push_interval = 60;
     }
-    // check max_file_size_on_disk to MB
-    cfg.limit.max_file_size_on_disk *= 1024 * 1024;
     if cfg.limit.req_cols_per_record_limit == 0 {
         cfg.limit.req_cols_per_record_limit = 1000;
+    }
+
+    // check max_file_size_on_disk to MB
+    if cfg.limit.max_file_size_on_disk == 0 {
+        cfg.limit.max_file_size_on_disk = 64 * 1024 * 1024; // 64MB
+    } else {
+        cfg.limit.max_file_size_on_disk *= 1024 * 1024;
+    }
+    // check max_file_size_in_memory to MB
+    if cfg.limit.max_file_size_in_memory == 0 {
+        cfg.limit.max_file_size_in_memory = 256 * 1024 * 1024; // 256MB
+    } else {
+        cfg.limit.max_file_size_in_memory *= 1024 * 1024;
     }
 
     // HACK instance_name
@@ -756,6 +781,14 @@ fn check_common_config(cfg: &mut Config) -> Result<(), anyhow::Error> {
 }
 
 fn check_path_config(cfg: &mut Config) -> Result<(), anyhow::Error> {
+    // for web
+    if cfg.common.web_url.ends_with('/') {
+        cfg.common.web_url = cfg.common.web_url.trim_end_matches('/').to_string();
+    }
+    if cfg.common.base_uri.ends_with('/') {
+        cfg.common.base_uri = cfg.common.base_uri.trim_end_matches('/').to_string();
+    }
+    // for data
     if cfg.common.data_dir.is_empty() {
         cfg.common.data_dir = "./data/openobserve/".to_string();
     }
@@ -785,9 +818,6 @@ fn check_path_config(cfg: &mut Config) -> Result<(), anyhow::Error> {
     }
     if !cfg.common.data_cache_dir.ends_with('/') {
         cfg.common.data_cache_dir = format!("{}/", cfg.common.data_cache_dir);
-    }
-    if cfg.common.base_uri.ends_with('/') {
-        cfg.common.base_uri = cfg.common.base_uri.trim_end_matches('/').to_string();
     }
     if cfg.sled.data_dir.is_empty() {
         cfg.sled.data_dir = format!("{}db/", cfg.common.data_dir);
@@ -880,11 +910,23 @@ fn check_memory_config(cfg: &mut Config) -> Result<(), anyhow::Error> {
     }
 
     // for memtable limit check
-    cfg.limit.mem_file_max_size *= 1024 * 1024;
     if cfg.limit.mem_table_max_size == 0 {
         cfg.limit.mem_table_max_size = mem_total / 2; // 50%
     } else {
         cfg.limit.mem_table_max_size *= 1024 * 1024;
+    }
+
+    // check query settings
+    if cfg.limit.query_group_base_speed == 0 {
+        cfg.limit.query_group_base_speed = SIZE_IN_GB as usize;
+    } else {
+        cfg.limit.query_group_base_speed *= 1024 * 1024;
+    }
+    if cfg.limit.query_partition_by_secs == 0 {
+        cfg.limit.query_partition_by_secs = 30;
+    }
+    if cfg.limit.query_partition_min_secs == 0 {
+        cfg.limit.query_partition_min_secs = 600;
     }
     Ok(())
 }

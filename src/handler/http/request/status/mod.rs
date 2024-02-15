@@ -15,17 +15,22 @@
 
 use std::io::Error;
 
-use actix_web::{get, HttpResponse};
-use ahash::AHashMap as HashMap;
-use config::{CONFIG, HAS_FUNCTIONS, INSTANCE_ID, SQL_FULL_TEXT_SEARCH_FIELDS};
+use actix_web::{get, put, web, HttpRequest, HttpResponse};
+use config::{
+    cluster::{is_ingester, LOCAL_NODE_ROLE, LOCAL_NODE_UUID},
+    utils::json,
+    CONFIG, HAS_FUNCTIONS, INSTANCE_ID, SQL_FULL_TEXT_SEARCH_FIELDS,
+};
 use datafusion::arrow::datatypes::{Field, Schema};
+use hashbrown::HashMap;
+use infra::{cache, file_list};
 use serde::Serialize;
 use utoipa::ToSchema;
 #[cfg(feature = "enterprise")]
 use {
-    crate::common::utils::jwt::{process_token, verify_decode_token},
-    crate::handler::http::auth::validator::PKCE_STATE_ORG,
-    actix_web::{http::header, web, HttpRequest},
+    crate::common::utils::jwt::verify_decode_token,
+    crate::handler::http::auth::{jwt::process_token, validator::PKCE_STATE_ORG},
+    actix_web::http::header,
     o2_enterprise::enterprise::{
         common::infra::config::O2_CONFIG,
         dex::service::auth::{exchange_code, get_dex_login, get_jwks, refresh_token},
@@ -35,9 +40,8 @@ use {
 
 use crate::{
     common::{
-        infra::{cache, cluster, config::*, file_list},
-        meta::functions::ZoFunction,
-        utils::json,
+        infra::{cluster, config::*},
+        meta::{functions::ZoFunction, http::HttpResponse as MetaHttpResponse},
     },
     service::{db, search::datafusion::DEFAULT_FUNCTIONS},
 };
@@ -64,6 +68,7 @@ struct ConfigResponse<'a> {
     data_retention_days: i64,
     restricted_routes_on_empty_data: bool,
     dex_enabled: bool,
+    native_login_enabled: bool,
 }
 
 /// Healthz
@@ -87,6 +92,10 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
     let dex_enabled = O2_CONFIG.dex.dex_enabled;
     #[cfg(not(feature = "enterprise"))]
     let dex_enabled = false;
+    #[cfg(feature = "enterprise")]
+    let native_login_enabled = O2_CONFIG.dex.native_login_enabled;
+    #[cfg(not(feature = "enterprise"))]
+    let native_login_enabled = true;
 
     Ok(HttpResponse::Ok().json(ConfigResponse {
         version: VERSION.to_string(),
@@ -107,22 +116,20 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
         data_retention_days: CONFIG.compact.data_retention_days,
         restricted_routes_on_empty_data: CONFIG.common.restricted_routes_on_empty_data,
         dex_enabled,
+        native_login_enabled,
     }))
 }
 
 #[get("/cache/status")]
 pub async fn cache_status() -> Result<HttpResponse, Error> {
     let mut stats: HashMap<&str, json::Value> = HashMap::default();
-    stats.insert(
-        "LOCAL_NODE_UUID",
-        json::json!(cluster::LOCAL_NODE_UUID.clone()),
-    );
+    stats.insert("LOCAL_NODE_UUID", json::json!(LOCAL_NODE_UUID.clone()));
     stats.insert("LOCAL_NODE_NAME", json::json!(&CONFIG.common.instance_name));
     stats.insert("LOCAL_NODE_ROLE", json::json!(&CONFIG.common.node_role));
     let nodes = cluster::get_cached_online_nodes();
     stats.insert("NODE_LIST", json::json!(nodes));
 
-    let (stream_num, stream_schema_num, mem_size) = get_stream_schema_status();
+    let (stream_num, stream_schema_num, mem_size) = get_stream_schema_status().await;
     stats.insert("STREAM_SCHEMA", json::json!({"stream_num": stream_num,"stream_schema_num": stream_schema_num, "mem_size": mem_size}));
 
     let stream_num = cache::stats::get_stream_stats_len();
@@ -163,15 +170,16 @@ pub async fn cache_status() -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(stats))
 }
 
-fn get_stream_schema_status() -> (usize, usize, usize) {
+async fn get_stream_schema_status() -> (usize, usize, usize) {
     let mut stream_num = 0;
     let mut stream_schema_num = 0;
     let mut mem_size = 0;
-    for item in STREAM_SCHEMAS.iter() {
+    let r = STREAM_SCHEMAS.read().await;
+    for (key, val) in r.iter() {
         stream_num += 1;
         mem_size += std::mem::size_of::<Vec<Schema>>();
-        mem_size += item.key().len();
-        for schema in item.value().iter() {
+        mem_size += key.len();
+        for schema in val.iter() {
             stream_schema_num += 1;
             for (key, val) in schema.metadata.iter() {
                 mem_size += std::mem::size_of::<HashMap<String, String>>();
@@ -262,5 +270,36 @@ async fn refresh_token_with_dex(req: actix_web::HttpRequest) -> HttpResponse {
     match refresh_token(&token).await {
         Ok(token_response) => HttpResponse::Ok().json(token_response),
         Err(_) => HttpResponse::Unauthorized().finish(),
+    }
+}
+
+#[put("/node/enable")]
+async fn enable_node(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let node_id = LOCAL_NODE_UUID.clone();
+    let Some(mut node) = cluster::get_node_by_uuid(&node_id) else {
+        return Ok(MetaHttpResponse::not_found("node not found"));
+    };
+
+    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string()).unwrap();
+    let enable = match query.get("value") {
+        Some(v) => v.parse::<bool>().unwrap_or_default(),
+        None => false,
+    };
+    node.scheduled = enable;
+    match cluster::update_node(&node_id, &node).await {
+        Ok(_) => Ok(MetaHttpResponse::json(true)),
+        Err(e) => Ok(MetaHttpResponse::internal_error(e)),
+    }
+}
+
+#[put("/node/flush")]
+async fn flush_node() -> Result<HttpResponse, Error> {
+    if !is_ingester(&LOCAL_NODE_ROLE) {
+        return Ok(MetaHttpResponse::not_found("local node is not an ingester"));
+    };
+
+    match ingester::flush_all().await {
+        Ok(_) => Ok(MetaHttpResponse::json(true)),
+        Err(e) => Ok(MetaHttpResponse::internal_error(e)),
     }
 }

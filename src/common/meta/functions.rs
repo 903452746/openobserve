@@ -47,6 +47,8 @@ pub struct StreamOrder {
     pub order: u8,
     #[serde(default)]
     pub stream_type: StreamType,
+    #[serde(default)]
+    pub is_removed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -59,6 +61,8 @@ pub struct StreamTransform {
     pub order: u8,
     #[serde(default)]
     pub stream_type: StreamType,
+    #[serde(default)]
+    pub is_removed: bool,
 }
 
 impl PartialEq for StreamTransform {
@@ -81,6 +85,7 @@ impl Transform {
                     stream: stream.stream.clone(),
                     order: stream.order,
                     stream_type: stream.stream_type,
+                    is_removed: stream.is_removed,
                 })
             }
         }
@@ -137,8 +142,9 @@ pub struct VRLResultResolver {
 
 #[cfg(test)]
 mod tests {
+    use config::utils::json;
+
     use super::*;
-    use crate::common::utils::json;
 
     #[test]
     fn test_functions() {
@@ -152,6 +158,7 @@ mod tests {
                 stream: "test".to_string(),
                 order: 1,
                 stream_type: StreamType::Logs,
+                is_removed: false,
             }]),
         };
 

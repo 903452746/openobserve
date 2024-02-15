@@ -12,18 +12,17 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
+#[cfg(feature = "enterprise")]
+use std::collections::HashSet;
 use std::io::Error;
 
 use actix_web::{get, http, post, web, HttpRequest, HttpResponse};
+use config::utils::time::{parse_milliseconds, parse_str_to_timestamp_micros};
+use infra::errors;
 use promql_parser::parser;
 
 use crate::{
-    common::{
-        infra::errors,
-        meta::{self, http::HttpResponse as MetaHttpResponse},
-        utils::time::{parse_milliseconds, parse_str_to_timestamp_micros},
-    },
+    common::meta::{self, http::HttpResponse as MetaHttpResponse},
     service::{metrics, promql, promql::MetricsQueryRequest},
 };
 
@@ -118,8 +117,9 @@ pub async fn remote_write(
 pub async fn query_get(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestQuery>,
+    in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    query(&org_id.into_inner(), req.into_inner()).await
+    query(&org_id.into_inner(), req.into_inner(), in_req).await
 }
 
 #[post("/{org_id}/prometheus/api/v1/query")]
@@ -127,16 +127,63 @@ pub async fn query_post(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestQuery>,
     web::Form(form): web::Form<meta::prom::RequestQuery>,
+    in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
     let req = if form.query.is_some() {
         form
     } else {
         req.into_inner()
     };
-    query(&org_id.into_inner(), req).await
+    query(&org_id.into_inner(), req, in_req).await
 }
 
-async fn query(org_id: &str, req: meta::prom::RequestQuery) -> Result<HttpResponse, Error> {
+async fn query(
+    org_id: &str,
+    req: meta::prom::RequestQuery,
+    _in_req: HttpRequest,
+) -> Result<HttpResponse, Error> {
+    let user_id = _in_req.headers().get("user_id").unwrap();
+    let user_email = user_id.to_str().unwrap();
+    #[cfg(feature = "enterprise")]
+    {
+        use crate::common::{
+            infra::config::USERS,
+            utils::auth::{is_root_user, AuthExtractor},
+        };
+
+        let ast = parser::parse(&req.query.clone().unwrap()).unwrap();
+        let mut visitor = promql::name_visitor::MetricNameVisitor {
+            name: HashSet::new(),
+        };
+        promql_parser::util::walk_expr(&mut visitor, &ast).unwrap();
+
+        if !is_root_user(user_email) {
+            for name in visitor.name {
+                let user: meta::user::User = USERS
+                    .get(&format!("{org_id}/{}", user_email))
+                    .unwrap()
+                    .clone();
+                if user.is_external
+                    && !crate::handler::http::auth::validator::check_permissions(
+                        user_email,
+                        AuthExtractor {
+                            auth: "".to_string(),
+                            method: "GET".to_string(),
+                            o2_type: format!("{}:{}", "metrics", name),
+                            org_id: org_id.to_string(),
+                            bypass_check: false,
+                            parent_id: "".to_string(),
+                        },
+                        Some(user.role),
+                    )
+                    .await
+                {
+                    return Ok(MetaHttpResponse::forbidden("Unauthorized Access"));
+                }
+            }
+        }
+    }
+
     let start = match req.time {
         None => chrono::Utc::now().timestamp_micros(),
         Some(v) => match parse_str_to_timestamp_micros(&v) {
@@ -162,7 +209,7 @@ async fn query(org_id: &str, req: meta::prom::RequestQuery) -> Result<HttpRespon
         step: 300_000_000, // 5m
     };
 
-    search(org_id, timeout, &req).await
+    search(org_id, timeout, &req, user_email).await
 }
 
 /// prometheus range queries
@@ -222,8 +269,9 @@ async fn query(org_id: &str, req: meta::prom::RequestQuery) -> Result<HttpRespon
 pub async fn query_range_get(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestRangeQuery>,
+    in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    query_range(&org_id.into_inner(), req.into_inner()).await
+    query_range(&org_id.into_inner(), req.into_inner(), in_req).await
 }
 
 #[post("/{org_id}/prometheus/api/v1/query_range")]
@@ -231,19 +279,63 @@ pub async fn query_range_post(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestRangeQuery>,
     web::Form(form): web::Form<meta::prom::RequestRangeQuery>,
+    in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
     let req = if form.query.is_some() {
         form
     } else {
         req.into_inner()
     };
-    query_range(&org_id.into_inner(), req).await
+    query_range(&org_id.into_inner(), req, in_req).await
 }
 
 async fn query_range(
     org_id: &str,
     req: meta::prom::RequestRangeQuery,
+    _in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
+    let user_id = _in_req.headers().get("user_id").unwrap();
+    let user_email = user_id.to_str().unwrap();
+    #[cfg(feature = "enterprise")]
+    {
+        use crate::common::{
+            infra::config::USERS,
+            utils::auth::{is_root_user, AuthExtractor},
+        };
+
+        let ast = parser::parse(&req.query.clone().unwrap()).unwrap();
+        let mut visitor = promql::name_visitor::MetricNameVisitor {
+            name: HashSet::new(),
+        };
+        promql_parser::util::walk_expr(&mut visitor, &ast).unwrap();
+
+        if !is_root_user(user_email) {
+            for name in visitor.name {
+                let user: meta::user::User = USERS
+                    .get(&format!("{org_id}/{}", user_email))
+                    .unwrap()
+                    .clone();
+                if user.is_external
+                    && !crate::handler::http::auth::validator::check_permissions(
+                        user_email,
+                        AuthExtractor {
+                            auth: "".to_string(),
+                            method: "GET".to_string(),
+                            o2_type: format!("{}:{}", "metrics", name),
+                            org_id: org_id.to_string(),
+                            bypass_check: false,
+                            parent_id: "".to_string(),
+                        },
+                        Some(user.role),
+                    )
+                    .await
+                {
+                    return Ok(MetaHttpResponse::forbidden("Unauthorized Access"));
+                }
+            }
+        }
+    }
+
     let start = match req.start {
         None => chrono::Utc::now().timestamp_micros(),
         Some(v) => match parse_str_to_timestamp_micros(&v) {
@@ -305,7 +397,7 @@ async fn query_range(
         end,
         step,
     };
-    search(org_id, timeout, &req).await
+    search(org_id, timeout, &req, user_email).await
 }
 
 /// prometheus query metric metadata
@@ -410,14 +502,16 @@ pub async fn metadata(
 pub async fn series_get(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestSeries>,
+    _in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    series(&org_id, req.into_inner()).await
+    series(&org_id, req.into_inner(), _in_req).await
 }
 
 #[post("/{org_id}/prometheus/api/v1/series")]
 pub async fn series_post(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestSeries>,
+    _in_req: HttpRequest,
     web::Form(form): web::Form<meta::prom::RequestSeries>,
 ) -> Result<HttpResponse, Error> {
     let req = if form.matcher.is_some() || form.start.is_some() || form.end.is_some() {
@@ -425,10 +519,14 @@ pub async fn series_post(
     } else {
         req.into_inner()
     };
-    series(&org_id, req).await
+    series(&org_id, req, _in_req).await
 }
 
-async fn series(org_id: &str, req: meta::prom::RequestSeries) -> Result<HttpResponse, Error> {
+async fn series(
+    org_id: &str,
+    req: meta::prom::RequestSeries,
+    _in_req: HttpRequest,
+) -> Result<HttpResponse, Error> {
     let meta::prom::RequestSeries {
         matcher,
         start,
@@ -442,6 +540,50 @@ async fn series(org_id: &str, req: meta::prom::RequestSeries) -> Result<HttpResp
             );
         }
     };
+
+    #[cfg(feature = "enterprise")]
+    {
+        use crate::common::{
+            infra::config::USERS,
+            utils::auth::{is_root_user, AuthExtractor},
+        };
+
+        let metric_name = match selector
+            .as_ref()
+            .and_then(metrics::prom::try_into_metric_name)
+        {
+            Some(name) => name,
+            None => "".to_string(),
+        };
+
+        let user_id = _in_req.headers().get("user_id").unwrap();
+        let user_email = user_id.to_str().unwrap();
+
+        if !is_root_user(user_email) {
+            let user: meta::user::User = USERS
+                .get(&format!("{org_id}/{}", user_email))
+                .unwrap()
+                .clone();
+            if user.is_external
+                && !crate::handler::http::auth::validator::check_permissions(
+                    user_email,
+                    AuthExtractor {
+                        auth: "".to_string(),
+                        method: "GET".to_string(),
+                        o2_type: format!("{}:{}", "metrics", metric_name),
+                        org_id: org_id.to_string(),
+                        bypass_check: false,
+                        parent_id: "".to_string(),
+                    },
+                    Some(user.role),
+                )
+                .await
+            {
+                return Ok(MetaHttpResponse::forbidden("Unauthorized Access"));
+            }
+        }
+    }
+
     Ok(
         match metrics::prom::get_series(org_id, selector, start, end).await {
             Ok(resp) => HttpResponse::Ok().json(promql::ApiFuncResponse::ok(resp)),
@@ -622,8 +764,8 @@ fn validate_metadata_params(
                 let err = if sel.name.is_none()
                     && sel
                         .matchers
-                        .find_matcher_value(meta::prom::NAME_LABEL)
-                        .is_none()
+                        .find_matchers(meta::prom::NAME_LABEL)
+                        .is_empty()
                 {
                     Some("match[] argument must start with a metric name, e.g. `match[]=up`")
                 } else if sel.offset.is_some() {
@@ -683,8 +825,9 @@ fn validate_metadata_params(
 pub async fn format_query_get(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestFormatQuery>,
+    _in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
-    format_query(&org_id, &req.query)
+    format_query(&org_id, &req.query, _in_req)
 }
 
 #[post("/{org_id}/prometheus/api/v1/format_query")]
@@ -692,16 +835,17 @@ pub async fn format_query_post(
     org_id: web::Path<String>,
     req: web::Query<meta::prom::RequestFormatQuery>,
     web::Form(form): web::Form<meta::prom::RequestFormatQuery>,
+    _in_req: HttpRequest,
 ) -> Result<HttpResponse, Error> {
     let query = if !form.query.is_empty() {
         &form.query
     } else {
         &req.query
     };
-    format_query(&org_id, query)
+    format_query(&org_id, query, _in_req)
 }
 
-fn format_query(_org_id: &str, query: &str) -> Result<HttpResponse, Error> {
+fn format_query(_org_id: &str, query: &str, _in_req: HttpRequest) -> Result<HttpResponse, Error> {
     let expr = match promql_parser::parser::parse(query) {
         Ok(expr) => expr,
         Err(err) => {
@@ -730,8 +874,9 @@ async fn search(
     org_id: &str,
     timeout: i64,
     req: &MetricsQueryRequest,
+    user_email: &str,
 ) -> Result<HttpResponse, Error> {
-    match promql::search::search(org_id, req, timeout).await {
+    match promql::search::search(org_id, req, timeout, user_email).await {
         Ok(data) => Ok(HttpResponse::Ok().json(promql::QueryResponse {
             status: promql::Status::Success,
             data: Some(promql::QueryResult {

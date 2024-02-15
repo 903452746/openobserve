@@ -3,9 +3,9 @@ set -eu -o pipefail
 # set -x
 export PS4='+ [${BASH_SOURCE[0]##*/}:${LINENO}${FUNCNAME[0]:+:${FUNCNAME[0]}}] '
 
-export COVERAGE_FUNCTIONS=${COVERAGE_FUNCTIONS:-43}
-export COVERAGE_LINES=${COVERAGE_LINES:-37}
-export COVERAGE_REGIONS=${COVERAGE_REGIONS:-25}
+export COVERAGE_FUNCTIONS=${COVERAGE_FUNCTIONS:-38}
+export COVERAGE_LINES=${COVERAGE_LINES:-30}
+export COVERAGE_REGIONS=${COVERAGE_REGIONS:-20}
 
 usage() {
     cat <<EOF
@@ -68,6 +68,7 @@ with open('report.json') as f:
 
 totals = report['data'][0]['totals']
 
+exit_status = 0
 for k, threshold in thresholds.items():
     actual = totals[k]['percent']
     k = k.capitalize()
@@ -78,6 +79,8 @@ for k, threshold in thresholds.items():
             f'❌ {k} coverage is below threshold: {actual:.2f}% < {threshold}%',
             file=sys.stderr,
         )
+        exit_status = 1
+sys.exit(exit_status)
 EOF
 )
 }

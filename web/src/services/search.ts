@@ -35,6 +35,7 @@ const search = {
     size,
     query_context,
     query_fn,
+    stream_type,
   }: {
     org_identifier: string;
     index: string;
@@ -42,8 +43,9 @@ const search = {
     size: string;
     query_context: any;
     query_fn: any;
+    stream_type: string;
   }) => {
-    let url = `/api/${org_identifier}/${index}/_around?key=${key}&size=${size}&sql=${query_context}`;
+    let url = `/api/${org_identifier}/${index}/_around?key=${key}&size=${size}&sql=${query_context}&type=${stream_type}`;
     if (query_fn.trim() != "") {
       url = url + `&query_fn=${query_fn}`;
     }
@@ -101,6 +103,7 @@ const search = {
     end_time,
     from,
     size,
+    stream_name,
   }: {
     org_identifier: string;
     filter: string;
@@ -108,9 +111,22 @@ const search = {
     end_time: number;
     from: number;
     size: number;
+    stream_name: string;
   }) => {
-    const url = `/api/${org_identifier}/traces/latest?filter=${filter}&start_time=${start_time}&end_time=${end_time}&from=${from}&size=${size}`;
+    const url = `/api/${org_identifier}/${stream_name}/traces/latest?filter=${filter}&start_time=${start_time}&end_time=${end_time}&from=${from}&size=${size}`;
     return http().get(url);
+  },
+  partition: ({
+    org_identifier,
+    query,
+    page_type = "logs",
+  }: {
+    org_identifier: string;
+    query: any;
+    page_type: string;
+  }) => {
+    const url = `/api/${org_identifier}/_search_partition?type=${page_type}`;
+    return http().post(url, query);
   },
 };
 

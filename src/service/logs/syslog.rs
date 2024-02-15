@@ -16,15 +16,22 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use actix_web::{http, HttpResponse};
+use anyhow::Result;
 use chrono::{Duration, Utc};
-use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
+use config::{
+    cluster,
+    meta::stream::StreamType,
+    metrics,
+    utils::{flatten, json, time::parse_timestamp_micro_from_value},
+    CONFIG, DISTINCT_FIELDS,
+};
 use datafusion::arrow::datatypes::Schema;
 use syslog_loose::{Message, ProcId, Protocol};
 
 use super::StreamMeta;
 use crate::{
     common::{
-        infra::{cluster, config::SYSLOG_ROUTES},
+        infra::config::SYSLOG_ROUTES,
         meta::{
             alerts::Alert,
             http::HttpResponse as MetaHttpResponse,
@@ -32,7 +39,6 @@ use crate::{
             stream::{SchemaRecords, StreamParams},
             syslog::SyslogRoute,
         },
-        utils::{flatten, json, time::parse_timestamp_micro_from_value},
     },
     service::{
         db, distinct_values, get_formatted_stream_name,
@@ -41,7 +47,7 @@ use crate::{
     },
 };
 
-pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow::Error> {
+pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse> {
     let start = std::time::Instant::now();
     let ip = addr.ip();
     let matching_route = get_org_for_ip(ip).await;
@@ -76,7 +82,7 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
     }
 
     // check if we are allowed to ingest
-    if db::compact::retention::is_deleting_stream(org_id, stream_name, StreamType::Logs, None) {
+    if db::compact::retention::is_deleting_stream(org_id, StreamType::Logs, stream_name, None) {
         return Ok(
             HttpResponse::InternalServerError().json(MetaHttpResponse::error(
                 http::StatusCode::INTERNAL_SERVER_ERROR.into(),
@@ -89,7 +95,7 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
     let mut stream_status = StreamStatus::new(stream_name);
     let mut distinct_values = Vec::with_capacity(16);
 
-    let mut trigger: TriggerAlertData = None;
+    let mut trigger: Option<TriggerAlertData> = None;
 
     let partition_det =
         crate::service::ingestion::get_stream_partition_keys(stream_name, &stream_schema_map).await;
@@ -129,13 +135,21 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
             &mut runtime,
         )?;
     }
+
     if value.is_null() || !value.is_object() {
         stream_status.status.failed += 1; // transform failed or dropped
+        return Ok(HttpResponse::Ok().json(IngestionResponse::new(
+            http::StatusCode::OK.into(),
+            vec![stream_status],
+        ))); // just return
     }
     // End row based transform
 
     // get json object
-    let local_val = value.as_object_mut().unwrap();
+    let mut local_val = match value.take() {
+        json::Value::Object(v) => v,
+        _ => unreachable!(),
+    };
 
     // handle timestamp
     let timestamp = match local_val.get(&CONFIG.common.column_timestamp) {
@@ -156,6 +170,23 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
         CONFIG.common.column_timestamp.clone(),
         json::Value::Number(timestamp.into()),
     );
+
+    let mut to_add_distinct_values = vec![];
+    // get distinct_value item
+    for field in DISTINCT_FIELDS.iter() {
+        if let Some(val) = local_val.get(field) {
+            if !val.is_null() {
+                to_add_distinct_values.push(distinct_values::DvItem {
+                    stream_type: StreamType::Logs,
+                    stream_name: stream_name.to_string(),
+                    field_name: field.to_string(),
+                    field_value: val.as_str().unwrap().to_string(),
+                    filter_name: "".to_string(),
+                    filter_value: "".to_string(),
+                });
+            }
+        }
+    }
 
     let local_trigger = match super::add_valid_record(
         &StreamMeta {
@@ -185,20 +216,7 @@ pub async fn ingest(msg: &str, addr: SocketAddr) -> Result<HttpResponse, anyhow:
     }
 
     // get distinct_value item
-    for field in DISTINCT_FIELDS.iter() {
-        if let Some(val) = local_val.get(field) {
-            if !val.is_null() {
-                distinct_values.push(distinct_values::DvItem {
-                    stream_type: StreamType::Logs,
-                    stream_name: stream_name.to_string(),
-                    field_name: field.to_string(),
-                    field_value: val.as_str().unwrap().to_string(),
-                    filter_name: "".to_string(),
-                    filter_value: "".to_string(),
-                });
-            }
-        }
-    }
+    distinct_values.extend(to_add_distinct_values);
 
     // write data to wal
     let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
@@ -318,7 +336,7 @@ mod tests {
 
     use super::*;
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_ingest() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let raw = r#"<190>2019-02-13T21:53:30.605850+00:00 74794bfb6795 liblogging-stdlog: [origin software="rsyslogd" swVersion="8.24.0" x-pid="9043" x-info="http://www.rsyslog.com"] This is a test message"#;

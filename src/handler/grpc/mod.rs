@@ -13,13 +13,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use config::meta::stream::{FileKey, FileMeta};
-use uuid::Uuid;
-
-use crate::{
-    common::{meta, utils::json},
-    service::promql,
+use config::{
+    ider,
+    meta::stream::{FileKey, FileMeta},
+    utils::json,
 };
+
+use crate::{common::meta, service::promql};
 
 pub mod auth;
 pub mod request;
@@ -46,7 +46,7 @@ impl From<meta::search::Request> for cluster_rpc::SearchRequest {
         };
 
         let job = cluster_rpc::Job {
-            session_id: Uuid::new_v4().to_string(),
+            session_id: ider::uuid(),
             job: "".to_string(),
             stage: 0,
             partition: 0,
@@ -66,6 +66,7 @@ impl From<meta::search::Request> for cluster_rpc::SearchRequest {
             file_list: vec![],
             stream_type: "".to_string(),
             timeout: req.timeout,
+            work_group: "".to_string(),
         }
     }
 }
@@ -124,7 +125,7 @@ impl From<promql::MetricsQueryRequest> for cluster_rpc::MetricsQueryRequest {
         };
 
         let job = cluster_rpc::Job {
-            session_id: Uuid::new_v4().to_string(),
+            session_id: ider::uuid(),
             job: "".to_string(),
             stage: 0,
             partition: 0,
@@ -212,7 +213,7 @@ mod tests {
 
     use super::*;
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_get_file_meta() {
         let file_meta = FileMeta {
             min_ts: 1667978841110,
@@ -227,7 +228,7 @@ mod tests {
         assert_eq!(file_meta, resp);
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_search_convert() {
         let mut req = meta::search::Request {
             query: meta::search::Query {

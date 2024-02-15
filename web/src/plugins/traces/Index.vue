@@ -191,6 +191,7 @@ import { logsErrorMessage } from "@/utils/common";
 import useNotifications from "@/composables/useNotifications";
 import { getConsumableRelativeTime } from "@/utils/date";
 import { cloneDeep } from "lodash-es";
+import { computed } from "vue";
 
 export default defineComponent({
   name: "PageSearch",
@@ -271,6 +272,10 @@ export default defineComponent({
 
     searchObj.organizationIdetifier =
       store.state.selectedOrganization.identifier;
+
+    const selectedStreamName = computed(
+      () => searchObj.data.stream.selectedStream.value
+    );
 
     function getQueryTransform() {
       try {
@@ -365,8 +370,8 @@ export default defineComponent({
 
     function loadStreamLists() {
       try {
+        const queryParams = router.currentRoute.value.query;
         searchObj.data.stream.streamLists = [];
-        searchObj.data.stream.selectedStream = { label: "", value: "" };
         if (searchObj.data.streamResults.list.length > 0) {
           let lastUpdatedStreamTime = 0;
           let selectedStreamItemObj = {};
@@ -377,7 +382,12 @@ export default defineComponent({
             };
             searchObj.data.stream.streamLists.push(itemObj);
 
-            if (item.stats.doc_time_max >= lastUpdatedStreamTime) {
+            if (queryParams.stream === item.name) {
+              selectedStreamItemObj = itemObj;
+            } else if (
+              !queryParams.stream &&
+              item.stats.doc_time_max >= lastUpdatedStreamTime
+            ) {
               lastUpdatedStreamTime = item.stats.doc_time_max;
               selectedStreamItemObj = itemObj;
             }
@@ -386,6 +396,7 @@ export default defineComponent({
           if (selectedStreamItemObj.label != undefined) {
             searchObj.data.stream.selectedStream = selectedStreamItemObj;
           } else {
+            searchObj.data.stream.selectedStream = {};
             searchObj.loading = false;
             searchObj.data.queryResults = {};
             searchObj.data.sortedQueryResults = [];
@@ -559,7 +570,6 @@ export default defineComponent({
         req.query.sql = b64EncodeUnicode(req.query.sql);
 
         const queryParams = getUrlQueryParams();
-        console.log(queryParams);
         router.push({ query: queryParams });
         return req;
       } catch (e) {
@@ -757,6 +767,7 @@ export default defineComponent({
             filter: filter || "",
             size: queryReq.query.size,
             from: queryReq.query.from,
+            stream_name: selectedStreamName.value,
           })
           .then(async (res) => {
             searchObj.loading = false;
@@ -875,6 +886,7 @@ export default defineComponent({
             reference_parent_span_id: 1,
             reference_parent_trace_id: 1,
             start_time: 1,
+            end_time: 1,
           };
 
           const importantFields = {
@@ -1138,37 +1150,6 @@ export default defineComponent({
       getQueryData();
     };
 
-    const setQuery = (sqlMode: boolean) => {
-      if (sqlMode) {
-        let selectFields = "";
-        let whereClause = "";
-        let currentQuery = searchObj.data.query;
-        currentQuery = currentQuery.split("|");
-        if (currentQuery.length > 1) {
-          selectFields = "," + currentQuery[0].trim();
-          if (currentQuery[1].trim() != "") {
-            whereClause = "WHERE " + currentQuery[1].trim();
-          }
-        } else if (currentQuery[0].trim() != "") {
-          if (currentQuery[0].trim() != "") {
-            whereClause = "WHERE " + currentQuery[0].trim();
-          }
-        }
-        searchObj.data.query =
-          `SELECT *${selectFields} FROM "` +
-          searchObj.data.stream.selectedStream.value +
-          `" ` +
-          whereClause;
-
-        searchBarRef.value.udpateQuery();
-
-        searchObj.data.parsedQuery = parser.astify(searchObj.data.query);
-      } else {
-        searchObj.data.query = "";
-        searchBarRef.value.udpateQuery();
-      }
-    };
-
     function restoreUrlQueryParams() {
       const queryParams = router.currentRoute.value.query;
 
@@ -1192,6 +1173,16 @@ export default defineComponent({
 
       if (queryParams.filter_type) {
         searchObj.meta.filterType = queryParams.filter_type;
+      }
+
+      if (
+        queryParams.stream &&
+        searchObj.data.stream.selectedStream.value !== queryParams.stream
+      ) {
+        searchObj.data.stream.selectedStream = {
+          label: queryParams.stream,
+          value: queryParams.stream,
+        };
       }
     }
 
@@ -1236,6 +1227,8 @@ export default defineComponent({
     function getUrlQueryParams(getShareLink: false) {
       const date = searchObj.data.datetime;
       const query = {};
+
+      query["stream"] = selectedStreamName.value;
 
       if (date.type == "relative" && !getShareLink) {
         query["period"] = date.relativeTimePeriod;
@@ -1294,7 +1287,7 @@ export default defineComponent({
       // const filters = searchObj.data.stream.filters;
       const parser = new Parser();
 
-      const defaultQuery = "SELECT * FROM 'default' WHERE ";
+      const defaultQuery = `SELECT * FROM '${selectedStreamName.value}' WHERE `;
 
       const parsedQuery = parser.astify(defaultQuery + query);
 
@@ -1335,7 +1328,6 @@ export default defineComponent({
       updateGridColumns,
       getConsumableDateTime,
       runQueryFn,
-      setQuery,
       getTraceDetails,
       verifyOrganizationStatus,
       fieldValues,
@@ -1343,6 +1335,7 @@ export default defineComponent({
       refreshTimezone,
       indexListRef,
       copyTracesUrl,
+      extractFields,
     };
   },
   computed: {
@@ -1372,9 +1365,6 @@ export default defineComponent({
     },
     runQuery() {
       return this.searchObj.runQuery;
-    },
-    fullSQLMode() {
-      return this.searchObj.meta.sqlMode;
     },
   },
   watch: {
@@ -1414,11 +1404,15 @@ export default defineComponent({
     },
     changeStream: {
       handler(stream, oldStream) {
+        if (stream.value === oldStream.value) return;
         if (this.searchObj.data.stream.selectedStream.hasOwnProperty("value")) {
-          if (oldStream.value) this.searchObj.data.query = "";
-          if (oldStream.value) this.setQuery(this.searchObj.meta.sqlMode);
+          if (oldStream.value) {
+            this.searchObj.data.query = "";
+            this.searchObj.data.advanceFiltersQuery = "";
+          }
           setTimeout(() => {
             this.runQueryFn();
+            this.extractFields();
           }, 500);
         }
       },
@@ -1434,9 +1428,6 @@ export default defineComponent({
       if (this.searchObj.runQuery == true) {
         this.runQueryFn();
       }
-    },
-    fullSQLMode(newVal) {
-      this.setQuery(newVal);
     },
   },
 });

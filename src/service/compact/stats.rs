@@ -13,36 +13,27 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use config::CONFIG;
+use config::{cluster::LOCAL_NODE_UUID, CONFIG};
+use infra::{dist_lock, file_list as infra_file_list};
 use tokio::time;
 
-use crate::{
-    common::infra::{
-        cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-        dist_lock, file_list as infra_file_list,
-    },
-    service::db,
-};
+use crate::{common::infra::cluster::get_node_by_uuid, service::db};
 
 pub async fn update_stats_from_file_list() -> Result<(), anyhow::Error> {
-    // waiting for file list remote inited
-    loop {
-        if infra_file_list::get_initialised().await.unwrap_or_default() {
-            break;
-        };
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    }
-
     // get last offset
     let (mut offset, node) = db::compact::stats::get_offset().await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-        log::error!("[COMPACT] update stats from file_list is merging by {node}");
+        log::debug!("[COMPACT] update stats from file_list is processing by {node}");
         return Ok(());
     }
 
     // before starting, set current node to lock the job
     if node.is_empty() || LOCAL_NODE_UUID.ne(&node) {
-        offset = update_stats_lock_node().await?;
+        offset = match update_stats_lock_node().await {
+            Ok(Some(offset)) => offset,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(e),
+        }
     }
 
     // get latest offset
@@ -54,7 +45,7 @@ pub async fn update_stats_from_file_list() -> Result<(), anyhow::Error> {
     };
 
     // get stats from file_list
-    let orgs = db::schema::list_organizations_from_cache();
+    let orgs = db::schema::list_organizations_from_cache().await;
     for org_id in orgs {
         let stream_stats = infra_file_list::stats(&org_id, None, None, pk_value).await?;
         if !stream_stats.is_empty() {
@@ -69,7 +60,7 @@ pub async fn update_stats_from_file_list() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn update_stats_lock_node() -> Result<i64, anyhow::Error> {
+async fn update_stats_lock_node() -> Result<Option<i64>, anyhow::Error> {
     let lock_key = "compact/stream_stats/offset".to_string();
     let locker = dist_lock::lock(&lock_key, CONFIG.etcd.command_timeout).await?;
     // check the working node for the organization again, maybe other node locked it
@@ -77,18 +68,17 @@ async fn update_stats_lock_node() -> Result<i64, anyhow::Error> {
     let (offset, node) = db::compact::stats::get_offset().await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
         dist_lock::unlock(&locker).await?;
-        return Err(anyhow::anyhow!(
-            "[COMPACT] update stats from file_list is merging by {node}"
-        ));
+        log::debug!("[COMPACT] update stats from file_list is processing by {node}");
+        return Ok(None);
     }
 
     // bind the job to this node
-    if let Err(e) = db::compact::stats::set_offset(offset, Some(&LOCAL_NODE_UUID.clone())).await {
-        dist_lock::unlock(&locker).await?;
-        return Err(e);
-    }
-
+    let ret = db::compact::stats::set_offset(offset, Some(&LOCAL_NODE_UUID.clone())).await;
     // already bind to this node, we can unlock now
     dist_lock::unlock(&locker).await?;
-    Ok(offset)
+    if let Err(e) = ret {
+        Err(e)
+    } else {
+        Ok(Some(offset))
+    }
 }

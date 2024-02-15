@@ -17,28 +17,31 @@ use std::{collections::HashMap, sync::Arc};
 
 use actix_web::web;
 use chrono::{TimeZone, Utc};
-use config::{meta::stream::StreamType, metrics, utils::schema_ext::SchemaExt, FxIndexMap, CONFIG};
+use config::{
+    cluster,
+    meta::{stream::StreamType, usage::UsageType},
+    metrics,
+    utils::{json, schema_ext::SchemaExt, time::parse_i64_to_timestamp_micros},
+    FxIndexMap, CONFIG,
+};
 use datafusion::arrow::datatypes::Schema;
+use infra::{
+    cache::stats,
+    errors::{Error, Result},
+};
 use promql_parser::{label::MatchOp, parser};
 use prost::Message;
 
 use crate::{
     common::{
-        infra::{
-            cache::stats,
-            cluster::{self, LOCAL_NODE_UUID},
-            config::{METRIC_CLUSTER_LEADER, METRIC_CLUSTER_MAP},
-            errors::{Error, Result},
-        },
+        infra::config::{METRIC_CLUSTER_LEADER, METRIC_CLUSTER_MAP},
         meta::{
-            alerts::{self, Alert},
+            alerts,
             functions::StreamTransform,
             prom::*,
             search,
             stream::{PartitioningDetails, SchemaRecords},
-            usage::UsageType,
         },
-        utils::{json, time::parse_i64_to_timestamp_micros},
     },
     service::{
         db, format_stream_name,
@@ -84,9 +87,9 @@ pub async fn remote_write(
     let mut cluster_name = String::new();
     let mut metric_data_map: HashMap<String, HashMap<String, SchemaRecords>> = HashMap::new();
     let mut metric_schema_map: HashMap<String, Schema> = HashMap::new();
-    let mut schema_evoluted: HashMap<String, bool> = HashMap::new();
+    let mut schema_evolved: HashMap<String, bool> = HashMap::new();
     let mut stream_alerts_map: HashMap<String, Vec<alerts::Alert>> = HashMap::new();
-    let mut stream_trigger_map: HashMap<String, TriggerAlertData> = HashMap::new();
+    let mut stream_trigger_map: HashMap<String, Option<TriggerAlertData>> = HashMap::new();
     let mut stream_transform_map: HashMap<String, Vec<StreamTransform>> = HashMap::new();
     let mut stream_partitioning_map: HashMap<String, PartitioningDetails> = HashMap::new();
 
@@ -97,7 +100,6 @@ pub async fn remote_write(
         .map_err(|e| anyhow::anyhow!("Invalid protobuf: {}", e.to_string()))?;
 
     // parse metadata
-    let req_metadata_len = request.metadata.len();
     for item in request.metadata {
         let metric_name = format_stream_name(&item.metric_family_name.clone());
         let metadata = Metadata {
@@ -115,26 +117,6 @@ pub async fn remote_write(
             .await
             .unwrap();
     }
-
-    // TODO: delete for debug
-    let mut streams = std::collections::HashSet::new();
-    for series in request.timeseries.iter() {
-        let metric_name = match series.labels.iter().find(|label| label.name == NAME_LABEL) {
-            Some(v) => v.value.clone(),
-            None => continue,
-        };
-        streams.insert(metric_name);
-    }
-    log::info!(
-        "/prometheus/api/v1/write: metadatas: {}, streams: {}, samples: {}",
-        req_metadata_len,
-        streams.len(),
-        request
-            .timeseries
-            .iter()
-            .map(|ts| ts.samples.len())
-            .sum::<usize>(),
-    );
 
     // maybe empty, we can return immediately
     if request.timeseries.is_empty() {
@@ -337,24 +319,22 @@ pub async fn remote_write(
                 CONFIG.common.column_timestamp.clone(),
                 json::Value::Number(timestamp.into()),
             );
-            let value_str = crate::common::utils::json::to_string(&val_map).unwrap();
+            let value_str = config::utils::json::to_string(&val_map).unwrap();
 
             // check for schema evolution
-            if schema_evoluted.get(&metric_name).is_none() {
-                let record_val = json::Value::Object(val_map.to_owned());
-                if check_for_schema(
+            if schema_evolved.get(&metric_name).is_none()
+                && check_for_schema(
                     org_id,
                     &metric_name,
                     StreamType::Metrics,
                     &mut metric_schema_map,
-                    &record_val,
+                    val_map,
                     timestamp,
                 )
                 .await
                 .is_ok()
-                {
-                    schema_evoluted.insert(metric_name.to_owned(), true);
-                }
+            {
+                schema_evolved.insert(metric_name.to_owned(), true);
             }
 
             let schema = metric_schema_map
@@ -394,8 +374,7 @@ pub async fn remote_write(
                     metric_name.clone()
                 );
                 if let Some(alerts) = stream_alerts_map.get(&key) {
-                    let mut trigger_alerts: Vec<(Alert, Vec<json::Map<String, json::Value>>)> =
-                        Vec::new();
+                    let mut trigger_alerts: TriggerAlertData = Vec::new();
                     for alert in alerts {
                         if let Ok(Some(v)) = alert.evaluate(Some(val_map)).await {
                             trigger_alerts.push((alert.clone(), v));
@@ -420,8 +399,8 @@ pub async fn remote_write(
         // check if we are allowed to ingest
         if db::compact::retention::is_deleting_stream(
             org_id,
-            &stream_name,
             StreamType::Metrics,
+            &stream_name,
             None,
         ) {
             log::warn!("stream [{stream_name}] is being deleted");
@@ -476,7 +455,7 @@ pub async fn remote_write(
 
 pub(crate) async fn get_metadata(org_id: &str, req: RequestMetadata) -> Result<ResponseMetadata> {
     if req.limit == Some(0) {
-        return Ok(ahash::HashMap::default());
+        return Ok(hashbrown::HashMap::new());
     }
 
     let stream_type = StreamType::Metrics;
@@ -486,7 +465,7 @@ pub(crate) async fn get_metadata(org_id: &str, req: RequestMetadata) -> Result<R
             .await
             // `db::schema::get` never fails, so it's safe to unwrap
             .unwrap();
-        let mut resp = ahash::HashMap::default();
+        let mut resp = hashbrown::HashMap::new();
         if schema != Schema::empty() {
             resp.insert(
                 metric_name,
@@ -583,12 +562,12 @@ pub(crate) async fn get_series(
         .map(|f| f.name().as_str())
         .filter(|&s| s != CONFIG.common.column_timestamp && s != VALUE_LABEL && s != HASH_LABEL)
         .collect::<Vec<_>>()
-        .join(", ");
+        .join("\", \"");
     if label_names.is_empty() {
         return Ok(vec![]);
     }
 
-    let mut sql = format!("SELECT DISTINCT({HASH_LABEL}), {label_names} FROM {metric_name}");
+    let mut sql = format!("SELECT DISTINCT({HASH_LABEL}), \"{label_names}\" FROM {metric_name}");
     let mut sql_where = Vec::new();
     if let Some(selector) = selector {
         for mat in selector.matchers.matchers.iter() {
@@ -663,7 +642,7 @@ pub(crate) async fn get_labels(
         Err(_) => return Ok(vec![]),
         Ok(schemas) => schemas,
     };
-    let mut label_names = ahash::HashSet::default();
+    let mut label_names = hashbrown::HashSet::new();
     for schema in stream_schemas {
         if let Some(ref metric_name) = opt_metric_name {
             if *metric_name != schema.stream_name {
@@ -792,7 +771,7 @@ pub(crate) async fn get_label_values(
     Ok(label_values)
 }
 
-fn try_into_metric_name(selector: &parser::VectorSelector) -> Option<String> {
+pub(crate) fn try_into_metric_name(selector: &parser::VectorSelector) -> Option<String> {
     match &selector.name {
         Some(name) => {
             // `match[]` argument contains a metric name, e.g.
@@ -803,7 +782,11 @@ fn try_into_metric_name(selector: &parser::VectorSelector) -> Option<String> {
             // `match[]` argument does not contain a metric name.
             // Check if there is `__name__` among the matchers,
             // e.g. `match[]={__name__="zo_response_code",method="GET"}`
-            selector.matchers.find_matcher_value(NAME_LABEL)
+            selector
+                .matchers
+                .find_matchers(NAME_LABEL)
+                .first()
+                .map(|m| m.value.clone())
         }
     }
 }
@@ -828,7 +811,7 @@ async fn prom_ha_handler(
             ClusterLeader {
                 name: replica_label.to_owned(),
                 last_received: curr_ts,
-                updated_by: LOCAL_NODE_UUID.to_string(),
+                updated_by: cluster::LOCAL_NODE_UUID.to_string(),
             },
         );
         _accept_record = true;

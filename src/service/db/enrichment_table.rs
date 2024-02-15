@@ -15,15 +15,16 @@
 
 use std::collections::HashMap;
 
-use config::meta::stream::StreamType;
+use chrono::Utc;
+use config::{
+    meta::stream::StreamType,
+    utils::{json, time::BASE_TIME},
+};
+use infra::cache::stats;
 use vrl::prelude::NotNan;
 
 use crate::{
-    common::{
-        infra::cache::stats,
-        meta::{self, search::Request},
-        utils::json,
-    },
+    common::meta::{self, search::Request},
     service::search as SearchService,
 };
 
@@ -38,6 +39,8 @@ pub async fn get(org_id: &str, name: &str) -> Result<Vec<vrl::value::Value>, any
 
     let query = meta::search::Query {
         sql: format!("SELECT * FROM \"{name}\" limit {rec_num}"),
+        start_time: BASE_TIME.timestamp_micros(),
+        end_time: Utc::now().timestamp_micros(),
         sql_mode: "full".to_owned(),
         ..Default::default()
     };

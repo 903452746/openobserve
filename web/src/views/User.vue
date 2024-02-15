@@ -5,30 +5,16 @@
 </template>
 
 <script lang="ts">
-import { defineComponent } from "vue";
+import { defineComponent, ref, onBeforeMount } from "vue";
 import { useStore } from "vuex";
 import { useI18n } from "vue-i18n";
 import UsersCloud from "@/enterprise/components/users/User.vue";
-import UsersOpenSource from "@/components/users/User.vue";
+import UsersOpenSource from "@/components/iam/users/User.vue";
+
 import config from "@/aws-exports";
 
 export default defineComponent({
   name: "UserPage",
-  data() {
-    return {
-      componentName: "",
-      loadComponent: false,
-    };
-  },
-  created() {
-    // check condition here and set the componentName accordingly
-    if (config.isCloud == "true") {
-      this.componentName = "UsersCloud";
-    } else {
-      this.componentName = "UsersOpenSource";
-    }
-    this.loadComponent = true;
-  },
   components: {
     UsersCloud,
     UsersOpenSource,
@@ -37,7 +23,21 @@ export default defineComponent({
     const store = useStore();
     const { t } = useI18n();
 
-    return { store, t };
+    const componentName = ref("");
+
+    const loadComponent = ref(false);
+
+    onBeforeMount(() => {
+      if (config.isCloud == "true") {
+        componentName.value = "UsersCloud";
+      } else {
+        componentName.value = "UsersOpenSource";
+      }
+
+      loadComponent.value = true;
+    });
+
+    return { store, t, componentName, loadComponent };
   },
 });
 </script>

@@ -13,12 +13,10 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use ahash::HashMap;
-use config::meta::stream::StreamType;
+use config::{meta::stream::StreamType, utils::json::Value};
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-use crate::common::utils::json::Value;
 
 pub mod destinations;
 pub mod templates;
@@ -98,7 +96,8 @@ pub struct QueryCondition {
     pub query_type: QueryType,
     pub conditions: Option<Vec<Condition>>,
     pub sql: Option<String>,
-    pub promql: Option<String>,
+    pub promql: Option<String>,              // (cpu usage / cpu total)
+    pub promql_condition: Option<Condition>, // value >= 80
     pub aggregation: Option<Aggregation>,
 }
 
@@ -117,8 +116,20 @@ pub enum AggFunction {
     Min,
     #[serde(rename = "max")]
     Max,
+    #[serde(rename = "sum")]
+    Sum,
     #[serde(rename = "count")]
     Count,
+    #[serde(rename = "p50")]
+    P50,
+    #[serde(rename = "p75")]
+    P75,
+    #[serde(rename = "p90")]
+    P90,
+    #[serde(rename = "p95")]
+    P95,
+    #[serde(rename = "p99")]
+    P99,
 }
 
 impl ToString for AggFunction {
@@ -127,7 +138,13 @@ impl ToString for AggFunction {
             AggFunction::Avg => "avg".to_string(),
             AggFunction::Min => "min".to_string(),
             AggFunction::Max => "max".to_string(),
+            AggFunction::Sum => "sum".to_string(),
             AggFunction::Count => "count".to_string(),
+            AggFunction::P50 => "p50".to_string(),
+            AggFunction::P75 => "p75".to_string(),
+            AggFunction::P90 => "p90".to_string(),
+            AggFunction::P95 => "p95".to_string(),
+            AggFunction::P99 => "p99".to_string(),
         }
     }
 }
@@ -139,7 +156,13 @@ impl TryFrom<&str> for AggFunction {
             "avg" => AggFunction::Avg,
             "min" => AggFunction::Min,
             "max" => AggFunction::Max,
+            "sum" => AggFunction::Sum,
             "count" => AggFunction::Count,
+            "p50" => AggFunction::P50,
+            "p75" => AggFunction::P75,
+            "p90" => AggFunction::P90,
+            "p95" => AggFunction::P95,
+            "p99" => AggFunction::P99,
             _ => return Err("invalid aggregation function"),
         })
     }

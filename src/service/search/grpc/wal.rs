@@ -15,11 +15,13 @@
 
 use std::{io::Cursor, path::Path, sync::Arc};
 
-use ahash::AHashMap as HashMap;
 use arrow::array::{new_null_array, ArrayRef};
 use config::{
-    meta::stream::{FileKey, StreamType},
-    utils::parquet::{parse_time_range_from_filename, read_metadata_from_bytes},
+    meta::stream::{FileKey, PartitionTimeLevel, StreamType},
+    utils::{
+        file::{get_file_contents, scan_files},
+        parquet::{parse_time_range_from_filename, read_metadata_from_bytes},
+    },
     CONFIG,
 };
 use datafusion::{
@@ -27,23 +29,23 @@ use datafusion::{
     common::FileType,
 };
 use futures::future::try_join_all;
+use hashbrown::HashMap;
+use infra::{
+    cache::tmpfs,
+    errors::{Error, ErrorCodes},
+};
 use parquet::arrow::ParquetRecordBatchStreamBuilder;
 use tokio::time::Duration;
 use tracing::{info_span, Instrument};
 
 use crate::{
     common::{
-        infra::{
-            cache::tmpfs,
-            errors::{Error, ErrorCodes},
-            wal,
-        },
+        infra::wal,
         meta::{
             self,
             search::SearchType,
-            stream::{PartitionTimeLevel, ScanStats},
+            stream::{ScanStats, StreamPartition},
         },
-        utils::file::{get_file_contents, scan_files},
     },
     service::{
         db,
@@ -61,6 +63,7 @@ pub async fn search_parquet(
     session_id: &str,
     sql: Arc<Sql>,
     stream_type: StreamType,
+    work_group: &str,
     timeout: u64,
 ) -> super::SearchResult {
     let schema_latest = db::schema::get(&sql.org_id, &sql.stream_name, stream_type)
@@ -71,7 +74,14 @@ pub async fn search_parquet(
         unwrap_partition_time_level(schema_settings.partition_time_level, stream_type);
 
     // get file list
-    let mut files = get_file_list(session_id, &sql, stream_type, &partition_time_level).await?;
+    let mut files = get_file_list(
+        session_id,
+        &sql,
+        stream_type,
+        &partition_time_level,
+        &schema_settings.partition_keys,
+    )
+    .await?;
     if files.is_empty() {
         return Ok((HashMap::new(), ScanStats::new()));
     }
@@ -85,10 +95,7 @@ pub async fn search_parquet(
         let source_file = CONFIG.common.data_wal_dir.to_string() + file.key.as_str();
         match get_file_contents(&source_file) {
             Err(_) => {
-                log::error!(
-                    "[session_id {session_id}] skip wal parquet file: {} get file content error",
-                    &file.key
-                );
+                // file already deleted
                 files.retain(|x| x != file);
             }
             Ok(file_data) => {
@@ -96,6 +103,7 @@ pub async fn search_parquet(
                 let parquet_meta = read_metadata_from_bytes(&file_data)
                     .await
                     .unwrap_or_default();
+                scan_stats.records += parquet_meta.records;
                 scan_stats.original_size += parquet_meta.original_size;
                 if let Some((min_ts, max_ts)) = sql.meta.time_range {
                     if parquet_meta.min_ts <= max_ts && parquet_meta.max_ts >= min_ts {
@@ -210,6 +218,7 @@ pub async fn search_parquet(
                 } else {
                     SearchType::Normal
                 },
+                work_group: Some(work_group.to_string()),
             }
         } else {
             let id = format!("{session_id}-parquet-{ver}");
@@ -231,6 +240,7 @@ pub async fn search_parquet(
                 } else {
                     SearchType::Normal
                 },
+                work_group: Some(work_group.to_string()),
             }
         };
         let datafusion_span = info_span!(
@@ -299,6 +309,7 @@ pub async fn search_memtable(
     session_id: &str,
     sql: Arc<Sql>,
     stream_type: StreamType,
+    work_group: &str,
     timeout: u64,
 ) -> super::SearchResult {
     let schema_latest = db::schema::get(&sql.org_id, &sql.stream_name, stream_type)
@@ -337,7 +348,10 @@ pub async fn search_memtable(
     let mut batch_groups: HashMap<Arc<Schema>, Vec<RecordBatch>> = HashMap::with_capacity(2);
     for (schema, batch) in batches {
         let entry = batch_groups.entry(schema).or_default();
-        scan_stats.original_size += batch.iter().map(|r| r.data_json_size).sum::<usize>() as i64;
+        for r in batch.iter() {
+            scan_stats.records += r.data.num_rows() as i64;
+            scan_stats.original_size += r.data_json_size as i64;
+        }
         entry.extend(batch.into_iter().map(|r| r.data.clone()));
     }
 
@@ -399,6 +413,7 @@ pub async fn search_memtable(
             } else {
                 SearchType::Normal
             },
+            work_group: Some(work_group.to_string()),
         };
 
         let datafusion_span = info_span!(
@@ -463,6 +478,7 @@ async fn get_file_list(
     sql: &Sql,
     stream_type: StreamType,
     _partition_time_level: &PartitionTimeLevel,
+    partition_keys: &[StreamPartition],
 ) -> Result<Vec<FileKey>, Error> {
     let wal_dir = match Path::new(&CONFIG.common.data_wal_dir).canonicalize() {
         Ok(path) => {
@@ -522,7 +538,10 @@ async fn get_file_list(
                 continue;
             }
         }
-        if sql.match_source(&file_key, false, true, stream_type).await {
+        if sql
+            .match_source(&file_key, false, true, stream_type, partition_keys)
+            .await
+        {
             result.push(file_key);
         } else {
             wal::release_files(&[file.clone()]).await;

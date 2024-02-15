@@ -15,19 +15,18 @@
 
 use std::collections::HashMap;
 
+use config::utils::{base64, json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{
-    common::utils::{base64, json},
-    service::search::datafusion::storage::StorageType,
-};
+use crate::service::search::datafusion::storage::StorageType;
 
 #[derive(Clone, Debug)]
 pub struct Session {
     pub id: String,
     pub storage_type: StorageType,
     pub search_type: SearchType,
+    pub work_group: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,12 +175,15 @@ pub struct Response {
     #[serde(skip_serializing)]
     pub file_count: usize,
     pub scan_size: usize,
+    pub scan_records: usize,
     #[serde(default)]
     #[serde(skip_serializing_if = "String::is_empty")]
     pub response_type: String,
     #[serde(default)]
     #[serde(skip_serializing_if = "String::is_empty")]
     pub session_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub function_error: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, ToSchema)]
@@ -202,11 +204,13 @@ impl Response {
             size,
             file_count: 0,
             scan_size: 0,
+            scan_records: 0,
             columns: Vec::new(),
             hits: Vec::new(),
             aggs: HashMap::new(),
             response_type: "".to_string(),
             session_id: "".to_string(),
+            function_error: "".to_string(),
         }
     }
 
@@ -233,7 +237,9 @@ impl Response {
     pub fn set_local_took(&mut self, val: usize, wait: usize) {
         if self.took_detail.is_some() {
             self.took_detail.as_mut().unwrap().total = val;
-            self.took_detail.as_mut().unwrap().wait_queue = wait;
+            if wait > 0 {
+                self.took_detail.as_mut().unwrap().wait_queue = wait;
+            }
         }
     }
 
@@ -249,9 +255,29 @@ impl Response {
         self.scan_size = val;
     }
 
+    pub fn set_scan_records(&mut self, val: usize) {
+        self.scan_records = val;
+    }
+
     pub fn set_session_id(&mut self, session_id: String) {
         self.session_id = session_id;
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SearchPartitionRequest {
+    pub sql: String,
+    pub start_time: i64,
+    pub end_time: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct SearchPartitionResponse {
+    pub file_num: usize,
+    pub records: usize,
+    pub original_size: usize,
+    pub compressed_size: usize,
+    pub partitions: Vec<[i64; 2]>,
 }
 
 #[cfg(test)]

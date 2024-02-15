@@ -18,25 +18,25 @@ use std::{collections::HashMap, io::Error, sync::Arc};
 use actix_web::{http, web, HttpResponse};
 use chrono::{Duration, Utc};
 use config::{
-    meta::stream::StreamType, metrics, utils::schema_ext::SchemaExt, CONFIG, DISTINCT_FIELDS,
+    cluster,
+    meta::{
+        stream::{PartitionTimeLevel, StreamType},
+        usage::UsageType,
+    },
+    metrics,
+    utils::{flatten, json, schema_ext::SchemaExt},
+    CONFIG, DISTINCT_FIELDS,
 };
 use datafusion::arrow::datatypes::Schema;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use prost::Message;
 
 use crate::{
-    common::{
-        infra::cluster,
-        meta::{
-            alerts::Alert,
-            http::HttpResponse as MetaHttpResponse,
-            stream::{PartitionTimeLevel, SchemaRecords},
-            traces::{
-                Event, ExportTracePartialSuccess, ExportTraceServiceResponse, Span, SpanRefType,
-            },
-            usage::UsageType,
-        },
-        utils::{flatten, json},
+    common::meta::{
+        alerts::Alert,
+        http::HttpResponse as MetaHttpResponse,
+        stream::{SchemaRecords, StreamPartition},
+        traces::{Event, ExportTracePartialSuccess, ExportTraceServiceResponse, Span, SpanRefType},
     },
     service::{
         db, distinct_values, format_partition_key, format_stream_name,
@@ -120,7 +120,7 @@ pub async fn traces_json(
     )
     .await;
 
-    let mut partition_keys: Vec<String> = vec![];
+    let mut partition_keys: Vec<StreamPartition> = vec![];
     let mut partition_time_level =
         PartitionTimeLevel::from(CONFIG.limit.traces_file_retention.as_str());
     if stream_schema.has_partition_keys {
@@ -152,7 +152,7 @@ pub async fn traces_json(
     );
     // End Register Transforms for stream
 
-    let mut trigger: TriggerAlertData = None;
+    let mut trigger: Option<TriggerAlertData> = None;
 
     let mut service_name: String = traces_stream_name.to_string();
     // let export_req: ExportTraceServiceRequest =
@@ -167,16 +167,8 @@ pub async fn traces_json(
         }
     };
     let spans = match body.get("resourceSpans") {
-        Some(v) => match v.as_array() {
-            Some(v) => v,
-            None => {
-                return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
-                    http::StatusCode::BAD_REQUEST.into(),
-                    "Invalid json: the structure must be {{\"resourceSpans\":[]}}".to_string(),
-                )));
-            }
-        },
-        None => {
+        Some(json::Value::Array(v)) => v,
+        _ => {
             return Ok(HttpResponse::BadRequest().json(MetaHttpResponse::error(
                 http::StatusCode::BAD_REQUEST.into(),
                 "Invalid json: the structure must be {{\"resourceSpans\":[]}}".to_string(),
@@ -330,7 +322,10 @@ pub async fn traces_json(
                     }
                     // End row based transform */
                     // get json object
-                    let record_val = value.as_object_mut().unwrap();
+                    let mut record_val = match value.take() {
+                        json::Value::Object(v) => v,
+                        _ => unreachable!(),
+                    };
 
                     record_val.insert(
                         CONFIG.common.column_timestamp.clone(),
@@ -364,7 +359,7 @@ pub async fn traces_json(
                         traces_stream_name,
                         StreamType::Traces,
                         &mut traces_schema_map,
-                        &json::Value::Object(record_val.clone()),
+                        &record_val,
                         timestamp.try_into().unwrap(),
                     )
                     .await;
@@ -374,12 +369,9 @@ pub async fn traces_json(
                         let key =
                             format!("{}/{}/{}", &org_id, StreamType::Traces, traces_stream_name);
                         if let Some(alerts) = stream_alerts_map.get(&key) {
-                            let mut trigger_alerts: Vec<(
-                                Alert,
-                                Vec<json::Map<String, json::Value>>,
-                            )> = Vec::new();
+                            let mut trigger_alerts: TriggerAlertData = Vec::new();
                             for alert in alerts {
-                                if let Ok(Some(v)) = alert.evaluate(Some(record_val)).await {
+                                if let Ok(Some(v)) = alert.evaluate(Some(&record_val)).await {
                                     trigger_alerts.push((alert.clone(), v));
                                 }
                             }
@@ -399,7 +391,7 @@ pub async fn traces_json(
                         timestamp.try_into().unwrap(),
                         &partition_keys,
                         partition_time_level,
-                        record_val,
+                        &record_val,
                         Some(&schema_key),
                     );
 
@@ -414,9 +406,9 @@ pub async fn traces_json(
                         records: vec![],
                         records_size: 0,
                     });
-                    let record_val = record_val.to_owned();
+                    // let record_val = record_val.to_owned();
                     let record_val = json::Value::Object(record_val);
-                    let record_size = json::to_vec(&record_val).unwrap_or_default().len();
+                    let record_size = json::estimate_json_bytes(&record_val);
                     hour_buf.records.push(Arc::new(record_val));
                     hour_buf.records_size += record_size;
                 }

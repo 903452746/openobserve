@@ -19,30 +19,32 @@ use std::{
 };
 
 use actix_web::http;
+use anyhow::Result;
 use chrono::{Duration, Utc};
-use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
+use config::{
+    meta::{stream::StreamType, usage::UsageType},
+    metrics,
+    utils::{flatten, json, time::parse_timestamp_micro_from_value},
+    CONFIG, DISTINCT_FIELDS,
+};
 use datafusion::arrow::datatypes::Schema;
 use flate2::read::GzDecoder;
 use vrl::compiler::runtime::Runtime;
 
 use crate::{
-    common::{
-        meta::{
-            alerts::Alert,
-            functions::{StreamTransform, VRLResultResolver},
-            ingestion::{
-                AWSRecordType, GCPIngestionResponse, IngestionData, IngestionDataIter,
-                IngestionError, IngestionRequest, IngestionResponse, KinesisFHData,
-                KinesisFHIngestionResponse, StreamStatus,
-            },
-            stream::{SchemaRecords, StreamParams},
-            usage::UsageType,
+    common::meta::{
+        alerts::Alert,
+        functions::{StreamTransform, VRLResultResolver},
+        ingestion::{
+            AWSRecordType, GCPIngestionResponse, IngestionData, IngestionDataIter, IngestionError,
+            IngestionRequest, IngestionResponse, KinesisFHData, KinesisFHIngestionResponse,
+            StreamStatus,
         },
-        utils::{flatten, json, time::parse_timestamp_micro_from_value},
+        stream::{SchemaRecords, StreamParams},
     },
     service::{
         distinct_values, get_formatted_stream_name,
-        ingestion::{evaluate_trigger, is_ingestion_allowed, write_file, TriggerAlertData},
+        ingestion::{check_ingestion_allowed, evaluate_trigger, write_file, TriggerAlertData},
         logs::StreamMeta,
         schema::get_upto_discard_error,
         usage::report_request_usage_stats,
@@ -54,15 +56,14 @@ pub async fn ingest(
     in_stream_name: &str,
     in_req: IngestionRequest<'_>,
     thread_id: usize,
-) -> Result<IngestionResponse, anyhow::Error> {
+    user_email: &str,
+) -> Result<IngestionResponse> {
     let start = std::time::Instant::now();
     // check stream
     let mut stream_schema_map: HashMap<String, Schema> = HashMap::new();
     let mut stream_params = StreamParams::new(org_id, in_stream_name, StreamType::Logs);
     let stream_name = &get_formatted_stream_name(&mut stream_params, &mut stream_schema_map).await;
-    if let Some(value) = is_ingestion_allowed(org_id, Some(stream_name)) {
-        return Err(value);
-    }
+    check_ingestion_allowed(org_id, Some(stream_name))?;
 
     // check memtable
     if let Err(e) = ingester::check_memtable_size() {
@@ -98,7 +99,7 @@ pub async fn ingest(
 
     let mut stream_status = StreamStatus::new(stream_name);
     let mut distinct_values = Vec::with_capacity(16);
-    let mut trigger: TriggerAlertData = None;
+    let mut trigger: Option<TriggerAlertData> = None;
 
     let partition_det =
         crate::service::ingestion::get_stream_partition_keys(stream_name, &stream_schema_map).await;
@@ -148,11 +149,31 @@ pub async fn ingest(
             }
         };
 
-        let local_val = res.as_object_mut().unwrap();
-        if let Err(e) = handle_timestamp(local_val, min_ts) {
+        let mut local_val = match res.take() {
+            json::Value::Object(val) => val,
+            _ => unreachable!(),
+        };
+        if let Err(e) = handle_timestamp(&mut local_val, min_ts) {
             stream_status.status.failed += 1;
             stream_status.status.error = e.to_string();
             continue;
+        }
+
+        let mut to_add_distinct_values = vec![];
+        // get distinct_value item
+        for field in DISTINCT_FIELDS.iter() {
+            if let Some(val) = local_val.get(field) {
+                if !val.is_null() {
+                    to_add_distinct_values.push(distinct_values::DvItem {
+                        stream_type: StreamType::Logs,
+                        stream_name: stream_name.to_string(),
+                        field_name: field.to_string(),
+                        field_value: val.as_str().unwrap().to_string(),
+                        filter_name: "".to_string(),
+                        filter_value: "".to_string(),
+                    });
+                }
+            }
         }
 
         let local_trigger = match super::add_valid_record(
@@ -182,21 +203,8 @@ pub async fn ingest(
             trigger = local_trigger;
         }
 
-        // get distinct_value item
-        for field in DISTINCT_FIELDS.iter() {
-            if let Some(val) = local_val.get(field) {
-                if !val.is_null() {
-                    distinct_values.push(distinct_values::DvItem {
-                        stream_type: StreamType::Logs,
-                        stream_name: stream_name.to_string(),
-                        field_name: field.to_string(),
-                        field_value: val.as_str().unwrap().to_string(),
-                        filter_name: "".to_string(),
-                        filter_value: "".to_string(),
-                    });
-                }
-            }
-        }
+        // add distinct values
+        distinct_values.extend(to_add_distinct_values);
     }
 
     // write data to wal
@@ -237,6 +245,7 @@ pub async fn ingest(
         ])
         .inc();
     req_stats.response_time = start.elapsed().as_secs_f64();
+    req_stats.user_email = Some(user_email.to_string());
 
     // report data usage
     report_request_usage_stats(
@@ -268,7 +277,7 @@ pub fn apply_functions<'a>(
     stream_vrl_map: &'a HashMap<String, VRLResultResolver>,
     stream_name: &'a str,
     runtime: &mut Runtime,
-) -> Result<json::Value, anyhow::Error> {
+) -> Result<json::Value> {
     let mut value = flatten::flatten(item)?;
 
     if !local_trans.is_empty() {
@@ -475,7 +484,7 @@ impl<'a> IngestionData<'a> {
 pub fn decode_and_decompress(
     encoded_data: &str,
 ) -> Result<(String, AWSRecordType), Box<dyn std::error::Error>> {
-    let decoded_data = crate::common::utils::base64::decode_raw(encoded_data)?;
+    let decoded_data = config::utils::base64::decode_raw(encoded_data)?;
     let mut gz = GzDecoder::new(&decoded_data[..]);
     let mut decompressed_data = String::new();
     match gz.read_to_string(&mut decompressed_data) {

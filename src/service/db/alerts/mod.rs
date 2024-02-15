@@ -15,16 +15,16 @@
 
 use std::sync::Arc;
 
-use config::meta::stream::StreamType;
+use config::{
+    cluster::{is_alert_manager, LOCAL_NODE_ROLE},
+    meta::stream::StreamType,
+    utils::json,
+};
+use infra::db as infra_db;
 
 use crate::common::{
-    infra::{
-        cluster::{is_alert_manager, LOCAL_NODE_ROLE},
-        config::STREAM_ALERTS,
-        db as infra_db,
-    },
+    infra::config::STREAM_ALERTS,
     meta::alerts::{triggers::Trigger, Alert},
-    utils::json,
 };
 
 pub mod alert_manager;
@@ -60,15 +60,17 @@ pub async fn set(
     org_id: &str,
     stream_type: StreamType,
     stream_name: &str,
-    name: &str,
-    alert: Alert,
+    alert: &Alert,
 ) -> Result<(), anyhow::Error> {
     let db = infra_db::get_db().await;
-    let key = format!("/alerts/{org_id}/{stream_type}/{stream_name}/{name}");
+    let key = format!(
+        "/alerts/{org_id}/{stream_type}/{stream_name}/{}",
+        alert.name
+    );
     if let Err(e) = db
         .put(
             &key,
-            json::to_vec(&alert).unwrap().into(),
+            json::to_vec(alert).unwrap().into(),
             infra_db::NEED_WATCH,
         )
         .await

@@ -18,25 +18,22 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-use ahash::AHashMap;
 use chrono::Duration;
 use config::{
     meta::stream::{FileKey, StreamType},
+    utils::str::find,
     CONFIG, SQL_FULL_TEXT_SEARCH_FIELDS,
 };
 use datafusion::arrow::datatypes::{DataType, Schema};
+use infra::errors::{Error, ErrorCodes};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::{
-        infra::errors::{Error, ErrorCodes},
-        meta::{
-            sql::{Sql as MetaSql, SqlOperator},
-            stream::StreamParams,
-        },
-        utils::str::find,
+    common::meta::{
+        sql::{Sql as MetaSql, SqlOperator},
+        stream::{StreamParams, StreamPartition},
     },
     handler::grpc::cluster_rpc,
     service::{db, search::match_source, stream::get_stream_setting_fts_fields},
@@ -53,7 +50,6 @@ static RE_ONLY_GROUPBY: Lazy<Regex> =
 static RE_SELECT_FIELD: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)select (.*) from[ ]+query").unwrap());
 static RE_SELECT_FROM: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)SELECT (.*) FROM").unwrap());
-static RE_TIMESTAMP_EMPTY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i) where (.*)").unwrap());
 static RE_WHERE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i) where (.*)").unwrap());
 
 static RE_ONLY_WHERE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i) where ").unwrap());
@@ -72,7 +68,7 @@ pub struct Sql {
     pub stream_name: String,
     pub meta: MetaSql,
     pub fulltext: Vec<(String, String)>,
-    pub aggs: AHashMap<String, (String, MetaSql)>,
+    pub aggs: hashbrown::HashMap<String, (String, MetaSql)>,
     pub fields: Vec<String>,
     pub sql_mode: SqlMode,
     pub fast_mode: bool, /* there is no where, no group by, no aggregatioin, we can just get
@@ -111,7 +107,7 @@ impl Display for SqlMode {
 impl Sql {
     pub async fn new(req: &cluster_rpc::SearchRequest) -> Result<Sql, Error> {
         let req_query = req.query.as_ref().unwrap();
-        let mut req_time_range = (req_query.start_time, req_query.end_time);
+        let req_time_range = (req_query.start_time, req_query.end_time);
         let org_id = req.org_id.clone();
         let stream_type = StreamType::from(req.stream_type.as_str());
 
@@ -145,11 +141,7 @@ impl Sql {
 
         // check sql_mode
         let sql_mode: SqlMode = req_query.sql_mode.as_str().into();
-        let mut track_total_hits = if sql_mode.eq(&SqlMode::Full) {
-            false
-        } else {
-            req_query.track_total_hits
-        };
+        let track_total_hits = req_query.track_total_hits;
 
         // check SQL limitation
         // in context mode, disallow, [limit|offset|group by|having|join|union]
@@ -224,7 +216,7 @@ impl Sql {
         };
         origin_sql = origin_sql.replace(caps.get(0).unwrap().as_str(), " FROM tbl ");
 
-        // Hack _timestamp
+        // Hack select for _timestamp
         if !sql_mode.eq(&SqlMode::Full) && meta.order_by.is_empty() && !origin_sql.contains('*') {
             let caps = RE_SELECT_FROM.captures(origin_sql.as_str()).unwrap();
             let cap_str = caps.get(1).unwrap().as_str();
@@ -236,7 +228,7 @@ impl Sql {
             }
         }
 
-        // check time_range
+        // check time_range values
         if req_time_range.0 > 0
             && req_time_range.0 < Duration::seconds(1).num_microseconds().unwrap()
         {
@@ -257,13 +249,9 @@ impl Sql {
             )));
         }
 
-        // Hack time_range
-        let meta_time_range_is_empty =
-            meta.time_range.is_none() || meta.time_range.unwrap() == (0, 0);
+        // Hack time_range for sql
+        let meta_time_range_is_empty = meta.time_range.is_none() || meta.time_range == Some((0, 0));
         if meta_time_range_is_empty && (req_time_range.0 > 0 || req_time_range.1 > 0) {
-            if req_time_range.1 == 0 {
-                req_time_range.1 = chrono::Utc::now().timestamp_micros();
-            }
             meta.time_range = Some(req_time_range); // update meta
         };
         if let Some(time_range) = meta.time_range {
@@ -283,17 +271,28 @@ impl Sql {
                 "".to_string()
             };
             if !time_range_sql.is_empty() && meta_time_range_is_empty {
-                match RE_TIMESTAMP_EMPTY.captures(origin_sql.as_str()) {
+                match RE_WHERE.captures(origin_sql.as_str()) {
                     Some(caps) => {
                         let mut where_str = caps.get(1).unwrap().as_str().to_string();
-                        if !meta.order_by.is_empty() {
-                            where_str = where_str
-                                [0..where_str.to_lowercase().rfind(" order ").unwrap()]
-                                .to_string();
-                        }
                         if !meta.group_by.is_empty() {
                             where_str = where_str
                                 [0..where_str.to_lowercase().rfind(" group ").unwrap()]
+                                .to_string();
+                        } else if meta.having {
+                            where_str = where_str
+                                [0..where_str.to_lowercase().rfind(" having ").unwrap()]
+                                .to_string();
+                        } else if !meta.order_by.is_empty() {
+                            where_str = where_str
+                                [0..where_str.to_lowercase().rfind(" order ").unwrap()]
+                                .to_string();
+                        } else if meta.limit > 0 {
+                            where_str = where_str
+                                [0..where_str.to_lowercase().rfind(" limit ").unwrap()]
+                                .to_string();
+                        } else if meta.offset > 0 {
+                            where_str = where_str
+                                [0..where_str.to_lowercase().rfind(" offset ").unwrap()]
                                 .to_string();
                         }
                         let pos_start = origin_sql.find(where_str.as_str()).unwrap();
@@ -314,7 +313,7 @@ impl Sql {
             }
         }
 
-        // Hack offset limit
+        // Hack offset limit and sort by for sql
         if meta.limit == 0 {
             meta.offset = req_query.from as usize;
             meta.limit = req_query.size as usize;
@@ -325,8 +324,20 @@ impl Sql {
             }
             origin_sql = if meta.order_by.is_empty() && !sql_mode.eq(&SqlMode::Full) {
                 let sort_by = if req_query.sort_by.is_empty() {
+                    meta.order_by = vec![(CONFIG.common.column_timestamp.to_string(), true)];
                     format!("{} DESC", CONFIG.common.column_timestamp)
                 } else {
+                    if req_query.sort_by.to_uppercase().ends_with(" DESC") {
+                        meta.order_by = vec![(
+                            req_query.sort_by[0..req_query.sort_by.len() - 5].to_string(),
+                            true,
+                        )];
+                    } else if req_query.sort_by.to_uppercase().ends_with(" ASC") {
+                        meta.order_by = vec![(
+                            req_query.sort_by[0..req_query.sort_by.len() - 4].to_string(),
+                            false,
+                        )];
+                    }
                     req_query.sort_by.clone()
                 };
                 format!(
@@ -496,16 +507,13 @@ impl Sql {
         }
 
         // Hack for aggregation
-        if !req_aggs.is_empty() && meta.limit > 0 {
-            track_total_hits = true;
-        }
         if track_total_hits {
             req_aggs.insert(
                 "_count".to_string(),
                 String::from("SELECT COUNT(*) as num from query"),
             );
         }
-        let mut aggs = AHashMap::new();
+        let mut aggs = hashbrown::HashMap::new();
         for (key, sql) in &req_aggs {
             let mut sql = sql.to_string();
             if let Some(caps) = RE_ONLY_FROM.captures(&sql) {
@@ -630,8 +638,21 @@ impl Sql {
         match_min_ts_only: bool,
         is_wal: bool,
         stream_type: StreamType,
+        partition_keys: &[StreamPartition],
     ) -> bool {
-        let filters = generate_filter_from_quick_text(&self.meta.quick_text);
+        let mut filters = generate_filter_from_quick_text(&self.meta.quick_text);
+        // rewrite partition filters
+        let partition_keys: HashMap<&str, &StreamPartition> = partition_keys
+            .iter()
+            .map(|v| (v.field.as_str(), v))
+            .collect();
+        for entry in filters.iter_mut() {
+            if let Some(partition_key) = partition_keys.get(entry.0) {
+                for val in entry.1.iter_mut() {
+                    *val = partition_key.get_partition_value(val);
+                }
+            }
+        }
         match_source(
             StreamParams::new(&self.org_id, &self.stream_name, stream_type),
             self.meta.time_range,
@@ -646,7 +667,7 @@ impl Sql {
 
 pub fn generate_filter_from_quick_text(
     data: &[(String, String, SqlOperator)],
-) -> Vec<(&str, Vec<&str>)> {
+) -> Vec<(&str, Vec<String>)> {
     let quick_text_len = data.len();
     let mut filters = HashMap::with_capacity(quick_text_len);
     for i in 0..quick_text_len {
@@ -655,7 +676,7 @@ pub fn generate_filter_from_quick_text(
             || (op == &SqlOperator::Or && (i + 1 == quick_text_len || k == &data[i + 1].0))
         {
             let entry = filters.entry(k.as_str()).or_insert_with(Vec::new);
-            entry.push(v.as_str());
+            entry.push(v.to_string());
         } else {
             filters.clear();
             break;
@@ -810,7 +831,7 @@ fn split_sql_token(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_sql_works() {
         let org_id = "test_org";
         let col = "_timestamp";
@@ -846,7 +867,7 @@ mod tests {
         assert!(check_field_in_use(&resp, col));
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_sql_contexts() {
         let sqls = [
             ("select * from table1", true, (0, 0)),
@@ -913,6 +934,11 @@ mod tests {
                 false,
                 (0, 0),
             ),
+            (
+                "select abc, count(*) as cnt from table1 where match_all('abc') and str_match(log,'abc') group by abc having cnt > 1 order by _timestamp desc limit 10",
+                false,
+                (0, 0),
+            ),
         ];
 
         let org_id = "test_org";
@@ -959,7 +985,7 @@ mod tests {
         }
     }
 
-    #[actix_web::test]
+    #[tokio::test]
     async fn test_sql_full() {
         let sqls = [
             ("select * from table1", true, 0, (0, 0)),
@@ -1024,6 +1050,12 @@ mod tests {
                 "select DISTINCT field1, field2, field3 FROM table1",
                 true,
                 0,
+                (0, 0),
+            ),
+            (
+                "SELECT trace_id, MIN(start_time) AS start_time FROM table1 WHERE service_name ='APISIX-B' GROUP BY trace_id ORDER BY start_time DESC LIMIT 10",
+                true,
+                10,
                 (0, 0),
             ),
         ];

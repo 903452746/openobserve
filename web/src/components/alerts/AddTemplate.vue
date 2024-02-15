@@ -121,29 +121,35 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <div>alert_name, alert_type</div>
             <div>alert_period, alert_operator, alert_threshold</div>
             <div>alert_count, alert_agg_value</div>
-            <div>alert_start_time, alert_end_time</div>
-            <div><b>row</b> as a line template variable</div>
+            <div>alert_start_time, alert_end_time, alert_url</div>
+            <div><b>rows</b> multiple lines of row template</div>
             <div><b>All of the stream fields are variables.</b></div>
+            <div>{rows:N} {var:N} used to limit rows or string length.</div>
           </div>
           <div class="q-pb-md q-px-xs">
             <div class="text-bold text-body-1 q-pb-sm">
               {{ t("alert_templates.variable_usage_examples") }}:
             </div>
             <div
-              v-for="template in sampleTemplates"
+              v-for="(template, index) in sampleTemplates"
               class="q-pb-md"
               :key="template.name"
+              :data-test="`add-template-sample-template-${index}`"
             >
               <div class="flex justify-between items-center">
                 <div class="q-pb-xs">{{ template.name }}</div>
                 <q-icon
+                  data-test="add-template-sample-template-copy-btn"
                   class="cursor-pointer"
                   name="content_copy"
                   size="14px"
                   @click="copyTemplateBody(template.body)"
                 />
               </div>
-              <div class="add-template q-px-sm rounded-borders">
+              <div
+                data-test="add-template-sample-template-text"
+                class="add-template q-px-sm rounded-borders"
+              >
                 <pre class="example-template-body q-my-0">
                     {{ template.body }}
                   </pre
@@ -312,31 +318,61 @@ const saveTemplate = () => {
     timeout: 2000,
   });
 
-  templateService
-    .create({
-      org_identifier: store.state.selectedOrganization.identifier,
-      template_name: formData.value.name,
-      data: {
-        name: formData.value.name.trim(),
-        body: formData.value.body,
-      },
-    })
-    .then(() => {
-      dismiss();
-      emit("get:templates");
-      emit("cancel:hideform");
-      q.notify({
-        type: "positive",
-        message: `Template Saved Successfully.`,
+  if (isUpdatingTemplate.value) {
+    templateService
+      .update({
+        org_identifier: store.state.selectedOrganization.identifier,
+        template_name: formData.value.name,
+        data: {
+          name: formData.value.name.trim(),
+          body: formData.value.body,
+        },
+      })
+      .then(() => {
+        dismiss();
+        emit("get:templates");
+        emit("cancel:hideform");
+        q.notify({
+          type: "positive",
+          message: `Template Saved Successfully.`,
+        });
+      })
+      .catch((err) => {
+        dismiss();
+        q.notify({
+          type: "negative",
+          message: err.response.data.error,
+        });
       });
-    })
-    .catch((err) => {
-      dismiss();
-      q.notify({
-        type: "negative",
-        message: err.response.data.error,
-      });
-    });
+  } else {
+    {
+      templateService
+        .create({
+          org_identifier: store.state.selectedOrganization.identifier,
+          template_name: formData.value.name,
+          data: {
+            name: formData.value.name.trim(),
+            body: formData.value.body,
+          },
+        })
+        .then(() => {
+          dismiss();
+          emit("get:templates");
+          emit("cancel:hideform");
+          q.notify({
+            type: "positive",
+            message: `Template Saved Successfully.`,
+          });
+        })
+        .catch((err) => {
+          dismiss();
+          q.notify({
+            type: "negative",
+            message: err.response.data.error,
+          });
+        });
+    }
+  }
 };
 const copyTemplateBody = (text: any) => {
   copyToClipboard(JSON.parse(JSON.stringify(text))).then(() =>

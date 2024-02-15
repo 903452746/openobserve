@@ -185,6 +185,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <div class="col-12 q-py-sm">
           <div class="q-py-sm">
             <q-toggle
+              data-test="add-destination-skip-tls-verify-toggle"
               class="q-mt-sm"
               v-model="formData.skip_tls_verify"
               :label="t('alert_destinations.skip_tls_verify')"
@@ -315,34 +316,67 @@ const saveDestination = () => {
   apiHeaders.value.forEach((header) => {
     if (header["key"] && header["value"]) headers[header.key] = header.value;
   });
-  destinationService
-    .create({
-      org_identifier: store.state.selectedOrganization.identifier,
-      destination_name: formData.value.name,
-      data: {
-        url: formData.value.url,
-        method: formData.value.method,
-        skip_tls_verify: formData.value.skip_tls_verify,
-        template: formData.value.template,
-        headers: headers,
-      },
-    })
-    .then(() => {
-      dismiss();
-      emit("get:destinations");
-      emit("cancel:hideform");
-      q.notify({
-        type: "positive",
-        message: `Destination saved successfully.`,
+  if (isUpdatingDestination.value) {
+    destinationService
+      .update({
+        org_identifier: store.state.selectedOrganization.identifier,
+        destination_name: formData.value.name,
+        data: {
+          url: formData.value.url,
+          method: formData.value.method,
+          skip_tls_verify: formData.value.skip_tls_verify,
+          template: formData.value.template,
+          headers: headers,
+          name: formData.value.name,
+        },
+      })
+      .then(() => {
+        dismiss();
+        emit("get:destinations");
+        emit("cancel:hideform");
+        q.notify({
+          type: "positive",
+          message: `Destination saved successfully.`,
+        });
+      })
+      .catch((err) => {
+        dismiss();
+        q.notify({
+          type: "negative",
+          message: err.response.data.error,
+        });
       });
-    })
-    .catch((err) => {
-      dismiss();
-      q.notify({
-        type: "negative",
-        message: err.response.data.error,
+  } else {
+    destinationService
+      .create({
+        org_identifier: store.state.selectedOrganization.identifier,
+        destination_name: formData.value.name,
+        data: {
+          url: formData.value.url,
+          method: formData.value.method,
+          skip_tls_verify: formData.value.skip_tls_verify,
+          template: formData.value.template,
+          headers: headers,
+          name: formData.value.name,
+        },
+      })
+      .then(() => {
+        dismiss();
+        emit("get:destinations");
+        emit("cancel:hideform");
+        q.notify({
+          type: "positive",
+          message: `Destination saved successfully.`,
+        });
+      })
+      .catch((err) => {
+        dismiss();
+        q.notify({
+          type: "negative",
+          message: err.response.data.error,
+        });
       });
-    });
+  }
 };
 const addApiHeader = (key: string = "", value: string = "") => {
   apiHeaders.value.push({ key: key, value: value, uuid: getUUID() });

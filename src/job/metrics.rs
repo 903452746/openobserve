@@ -15,18 +15,19 @@
 
 use std::path::Path;
 
-use ahash::HashMap;
 use config::{
+    cluster,
     meta::{cluster::Role, stream::StreamType},
-    metrics, CONFIG,
+    metrics,
+    utils::file::scan_files,
+    CONFIG,
 };
+use hashbrown::HashMap;
+use infra::{cache, db::get_db};
 use tokio::time;
 
 use crate::{
-    common::{
-        infra::{cache, cluster, config::USERS},
-        utils::file::scan_files,
-    },
+    common::infra::{cluster::get_cached_online_nodes, config::USERS},
     service::db,
 };
 
@@ -70,7 +71,7 @@ async fn load_ingest_wal_used_bytes() -> Result<(), anyhow::Error> {
     let pattern = format!("{}files/", &CONFIG.common.data_wal_dir);
     let mut files = scan_files(&pattern, "parquet");
     files.extend(scan_files(&pattern, "json"));
-    let mut sizes = HashMap::default();
+    let mut sizes = HashMap::new();
     for file in files {
         let local_file = file.to_owned();
         let local_path = Path::new(&file).canonicalize().unwrap();
@@ -99,7 +100,7 @@ async fn load_ingest_wal_used_bytes() -> Result<(), anyhow::Error> {
 }
 
 async fn update_metadata_metrics() -> Result<(), anyhow::Error> {
-    let db = crate::common::infra::db::get_db().await;
+    let db = get_db().await;
     let stats = db.stats().await?;
     metrics::META_STORAGE_BYTES
         .with_label_values(&[])
@@ -112,7 +113,7 @@ async fn update_metadata_metrics() -> Result<(), anyhow::Error> {
         metrics::META_NUM_NODES.with_label_values(&["all"]).set(1);
     } else {
         metrics::META_NUM_NODES.reset();
-        let nodes = cluster::get_cached_online_nodes();
+        let nodes = get_cached_online_nodes();
         if nodes.is_some() {
             for node in nodes.unwrap() {
                 if cluster::is_ingester(&node.role) {
@@ -145,13 +146,13 @@ async fn update_metadata_metrics() -> Result<(), anyhow::Error> {
     }
 
     let stream_types = [StreamType::Logs, StreamType::Metrics, StreamType::Traces];
-    let orgs = db::schema::list_organizations_from_cache();
+    let orgs = db::schema::list_organizations_from_cache().await;
     metrics::META_NUM_ORGANIZATIONS
         .with_label_values(&[])
         .set(orgs.len() as i64);
     for org_id in &orgs {
         for stream_type in stream_types {
-            let streams = db::schema::list_streams_from_cache(org_id, stream_type);
+            let streams = db::schema::list_streams_from_cache(org_id, stream_type).await;
             if !streams.is_empty() {
                 metrics::META_NUM_STREAMS
                     .with_label_values(&[org_id.as_str(), stream_type.to_string().as_str()])

@@ -15,28 +15,26 @@
 
 use std::sync::Arc;
 
-use ahash::AHashMap as HashMap;
 use config::{
     is_local_disk_storage,
-    meta::stream::{FileKey, StreamType},
+    meta::stream::{FileKey, PartitionTimeLevel, StreamType},
     CONFIG,
 };
 use datafusion::{arrow::record_batch::RecordBatch, common::FileType};
 use futures::future::try_join_all;
+use hashbrown::HashMap;
+use infra::{
+    cache::file_data,
+    errors::{Error, ErrorCodes},
+};
 use tokio::{sync::Semaphore, time::Duration};
 use tracing::{info_span, Instrument};
 
 use crate::{
-    common::{
-        infra::{
-            cache::file_data,
-            errors::{Error, ErrorCodes},
-        },
-        meta::{
-            self,
-            search::SearchType,
-            stream::{PartitionTimeLevel, ScanStats},
-        },
+    common::meta::{
+        self,
+        search::SearchType,
+        stream::{ScanStats, StreamPartition},
     },
     service::{
         db, file_list,
@@ -55,6 +53,7 @@ pub async fn search(
     sql: Arc<Sql>,
     file_list: &[FileKey],
     stream_type: StreamType,
+    work_group: &str,
     timeout: u64,
 ) -> super::SearchResult {
     // fetch all schema versions, group files by version
@@ -82,15 +81,25 @@ pub async fn search(
 
     // get file list
     let files = match file_list.is_empty() {
-        true => get_file_list(session_id, &sql, stream_type, partition_time_level).await?,
+        true => {
+            get_file_list(
+                session_id,
+                &sql,
+                stream_type,
+                partition_time_level,
+                &stream_settings.partition_keys,
+            )
+            .await?
+        }
         false => file_list.to_vec(),
     };
     if files.is_empty() {
         return Ok((HashMap::new(), ScanStats::default()));
     }
     log::info!(
-        "[session_id {session_id}] search->storage: org {}, stream {}, load file_list num {}",
+        "[session_id {session_id}] search->storage: stream {}/{}/{}, load file_list num {}",
         &sql.org_id,
+        &stream_type,
         &sql.stream_name,
         files.len(),
     );
@@ -144,8 +153,9 @@ pub async fn search(
     }
 
     log::info!(
-        "[session_id {session_id}] search->storage: org {}, stream {}, load files {}, scan_size {}, compressed_size {}",
+        "[session_id {session_id}] search->storage: stream {}/{}/{}, load files {}, scan_size {}, compressed_size {}",
         &sql.org_id,
+        &stream_type,
         &sql.stream_name,
         scan_stats.files,
         scan_stats.original_size,
@@ -165,8 +175,9 @@ pub async fn search(
         }
     }
     log::info!(
-        "[session_id {session_id}] search->storage: org {}, stream {}, load files {}, into {:?} cache done",
+        "[session_id {session_id}] search->storage: stream {}/{}/{}, load files {}, into {:?} cache done",
         &sql.org_id,
+        &stream_type,
         &sql.stream_name,
         scan_stats.files,
         cache_type,
@@ -188,6 +199,7 @@ pub async fn search(
             } else {
                 SearchType::Normal
             },
+            work_group: Some(work_group.to_string()),
         };
         // cacluate the diff between latest schema and group schema
         let mut diff_fields = HashMap::new();
@@ -269,7 +281,15 @@ async fn get_file_list(
     sql: &Sql,
     stream_type: StreamType,
     time_level: PartitionTimeLevel,
+    partition_keys: &[StreamPartition],
 ) -> Result<Vec<FileKey>, Error> {
+    log::debug!(
+        "[session_id {session_id}] search->storage: get file_list in grpc, stream {}/{}/{}, time_range {:?}",
+        &sql.org_id,
+        &stream_type,
+        &sql.stream_name,
+        &sql.meta.time_range
+    );
     let (time_min, time_max) = sql.meta.time_range.unwrap();
     let file_list = match file_list::query(
         &sql.org_id,
@@ -293,7 +313,10 @@ async fn get_file_list(
 
     let mut files = Vec::with_capacity(file_list.len());
     for file in file_list {
-        if sql.match_source(&file, false, false, stream_type).await {
+        if sql
+            .match_source(&file, false, false, stream_type, partition_keys)
+            .await
+        {
             files.push(file.to_owned());
         }
     }
@@ -336,7 +359,9 @@ async fn cache_parquet_files(
         let task: tokio::task::JoinHandle<Option<String>> = tokio::task::spawn(async move {
             let ret = match cache_type {
                 file_data::CacheType::Memory => {
-                    if !file_data::memory::exist(&file_name).await {
+                    if !file_data::memory::exist(&file_name).await
+                        && !file_data::disk::exist(&file_name).await
+                    {
                         file_data::memory::download(&session_id, &file_name)
                             .await
                             .err()
@@ -356,8 +381,11 @@ async fn cache_parquet_files(
                 _ => None,
             };
             let ret = if let Some(e) = ret {
-                if e.to_string().to_lowercase().contains("not found") {
+                if e.to_string().to_lowercase().contains("not found")
+                    || e.to_string().to_lowercase().contains("data size is zero")
+                {
                     // delete file from file list
+                    log::warn!("found invalid file: {}", file_name);
                     if let Err(e) = file_list::delete_parquet_file(&file_name, true).await {
                         log::error!(
                             "[session_id {session_id}] search->storage: delete from file_list err: {}",

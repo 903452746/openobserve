@@ -18,9 +18,10 @@ use std::{collections::HashMap, io::BufReader, sync::Arc};
 use actix_web::{http, web};
 use anyhow::{anyhow, Result};
 use config::{
-    meta::stream::StreamType,
+    cluster,
+    meta::{stream::StreamType, usage::UsageType},
     metrics,
-    utils::{schema::infer_json_schema, schema_ext::SchemaExt},
+    utils::{flatten, json, schema::infer_json_schema, schema_ext::SchemaExt, time},
     CONFIG,
 };
 use datafusion::arrow::datatypes::Schema;
@@ -28,15 +29,11 @@ use vrl::compiler::runtime::Runtime;
 
 use super::get_exclude_labels;
 use crate::{
-    common::{
-        infra::cluster,
-        meta::{
-            ingestion::{IngestionResponse, StreamStatus},
-            prom::{Metadata, HASH_LABEL, METADATA_LABEL, NAME_LABEL, TYPE_LABEL, VALUE_LABEL},
-            stream::{PartitioningDetails, SchemaRecords},
-            usage::UsageType,
-        },
-        utils::{flatten, json, time},
+    common::meta::{
+        authz::Authz,
+        ingestion::{IngestionResponse, StreamStatus},
+        prom::{Metadata, HASH_LABEL, METADATA_LABEL, NAME_LABEL, TYPE_LABEL, VALUE_LABEL},
+        stream::{PartitioningDetails, SchemaRecords},
     },
     service::{
         db, format_stream_name,
@@ -208,18 +205,23 @@ pub async fn ingest(org_id: &str, body: web::Bytes, thread_id: usize) -> Result<
                     false,
                 )
                 .await?;
+                crate::common::utils::auth::set_ownership(
+                    org_id,
+                    &StreamType::Metrics.to_string(),
+                    Authz::new(&stream_name),
+                )
+                .await;
             }
             stream_schema_map.insert(stream_name.clone(), schema);
         }
 
         // check for schema evolution
-        let record_val = json::Value::Object(record.to_owned());
         let _ = check_for_schema(
             org_id,
             &stream_name,
             StreamType::Metrics,
             &mut stream_schema_map,
-            &record_val,
+            record,
             timestamp,
         )
         .await;
@@ -278,8 +280,8 @@ pub async fn ingest(org_id: &str, body: web::Bytes, thread_id: usize) -> Result<
         // check if we are allowed to ingest
         if db::compact::retention::is_deleting_stream(
             org_id,
-            &stream_name,
             StreamType::Metrics,
+            &stream_name,
             None,
         ) {
             log::warn!("stream [{stream_name}] is being deleted");

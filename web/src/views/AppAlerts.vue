@@ -29,6 +29,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             indicator-color="transparent"
             inline-label
             vertical
+            class="q-mx-xs"
           >
             <q-route-tab
               data-test="alert-alerts-tab"
@@ -82,10 +83,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, onActivated, onBeforeMount } from "vue";
+import { defineComponent, ref, onBeforeMount, watch } from "vue";
 import { useStore } from "vuex";
 import { useRouter } from "vue-router";
-import { useQuasar } from "quasar";
 import { useI18n } from "vue-i18n";
 import templateService from "@/services/alert_templates";
 import destinationService from "@/services/alert_destination";
@@ -99,11 +99,19 @@ export default defineComponent({
     const activeTab: any = ref("destinations");
     const templates = ref([]);
     const destinations = ref([]);
-    const splitterModel = ref(220);
+    const splitterModel = ref(160);
 
     onBeforeMount(() => {
       redirectRoute();
     });
+
+    watch(
+      () => router.currentRoute.value.name,
+      (routeName) => {
+        // This is handled for browser back button, as it was redirecting to this app alerts page and not alert list page
+        if (routeName === "alerts") router.back();
+      }
+    );
 
     const redirectRoute = () => {
       if (router.currentRoute.value.name === "alerts") {
@@ -159,13 +167,14 @@ export default defineComponent({
 .alerts-tabs {
   .q-tabs {
     &--vertical {
-      margin: 20px 16px 0 16px;
+      margin: 16px 8px 0 8px;
       .q-tab {
         justify-content: flex-start;
         padding: 0 1rem 0 1.25rem;
         border-radius: 0.5rem;
         margin-bottom: 0.5rem;
         text-transform: capitalize;
+        min-height: 40px !important;
         &__content.tab_content {
           .q-tab {
             &__icon + &__label {

@@ -20,29 +20,24 @@ use std::{
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use config::{
+    cluster::LOCAL_NODE_UUID,
     ider, is_local_disk_storage,
-    meta::stream::{FileKey, FileMeta, StreamType},
+    meta::stream::{FileKey, FileMeta, PartitionTimeLevel, StreamStats, StreamType},
+    utils::{json, time::BASE_TIME},
     CONFIG,
 };
+use infra::{cache, dist_lock, file_list as infra_file_list, storage};
 
 use crate::{
-    common::{
-        infra::{
-            cache,
-            cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-            dist_lock, file_list as infra_file_list, storage,
-        },
-        meta::stream::{PartitionTimeLevel, StreamStats},
-        utils::{json, time::BASE_TIME},
-    },
+    common::infra::cluster::get_node_by_uuid,
     service::{db, file_list},
 };
 
 pub async fn delete_by_stream(
     lifecycle_end: &str,
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
 ) -> Result<(), anyhow::Error> {
     // get schema
     let stats = cache::stats::get_stream_stats(org_id, stream_name, stream_type);
@@ -63,8 +58,8 @@ pub async fn delete_by_stream(
         let lifecycle_end = lifecycle_end.format("%Y-%m-%d").to_string();
         return db::compact::retention::delete_stream(
             org_id,
-            stream_name,
             stream_type,
+            stream_name,
             Some((lifecycle_start, lifecycle_end.as_str())),
         )
         .await;
@@ -73,8 +68,8 @@ pub async fn delete_by_stream(
     // delete files
     db::compact::retention::delete_stream(
         org_id,
-        stream_name,
         stream_type,
+        stream_name,
         Some((lifecycle_start, lifecycle_end)),
     )
     .await
@@ -82,12 +77,12 @@ pub async fn delete_by_stream(
 
 pub async fn delete_all(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
 ) -> Result<(), anyhow::Error> {
     let lock_key = format!("compact/retention/{org_id}/{stream_type}/{stream_name}");
     let locker = dist_lock::lock(&lock_key, CONFIG.etcd.command_timeout).await?;
-    let node = db::compact::retention::get_stream(org_id, stream_name, stream_type, None).await;
+    let node = db::compact::retention::get_stream(org_id, stream_type, stream_name, None).await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
         log::error!("[COMPACT] stream {org_id}/{stream_type}/{stream_name} is deleting by {node}");
         dist_lock::unlock(&locker).await?;
@@ -95,17 +90,21 @@ pub async fn delete_all(
     }
 
     // before start merging, set current node to lock the stream
-    db::compact::retention::process_stream(
+    let ret = db::compact::retention::process_stream(
         org_id,
-        stream_name,
         stream_type,
+        stream_name,
         None,
         &LOCAL_NODE_UUID.clone(),
     )
-    .await?;
+    .await;
     // already bind to this node, we can unlock now
     dist_lock::unlock(&locker).await?;
     drop(locker);
+    ret?;
+
+    let start_time = BASE_TIME.timestamp_micros();
+    let end_time = Utc::now().timestamp_micros();
 
     if is_local_disk_storage() {
         let data_dir = format!(
@@ -125,8 +124,8 @@ pub async fn delete_all(
             stream_name,
             stream_type,
             PartitionTimeLevel::Unset,
-            0,
-            0,
+            start_time,
+            end_time,
             true,
         )
         .await?;
@@ -155,7 +154,7 @@ pub async fn delete_all(
     }
 
     // delete from file list
-    delete_from_file_list(org_id, stream_name, stream_type, (0, 0)).await?;
+    delete_from_file_list(org_id, stream_type, stream_name, (start_time, end_time)).await?;
     log::info!(
         "deleted file list for: {}/{}/{}/all",
         org_id,
@@ -164,7 +163,7 @@ pub async fn delete_all(
     );
 
     // mark delete done
-    db::compact::retention::delete_stream_done(org_id, stream_name, stream_type, None).await?;
+    db::compact::retention::delete_stream_done(org_id, stream_type, stream_name, None).await?;
     log::info!(
         "deleted stream all: {}/{}/{}",
         org_id,
@@ -177,14 +176,14 @@ pub async fn delete_all(
 
 pub async fn delete_by_date(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
     date_range: (&str, &str),
 ) -> Result<(), anyhow::Error> {
     let lock_key = format!("compact/retention/{org_id}/{stream_type}/{stream_name}");
     let locker = dist_lock::lock(&lock_key, CONFIG.etcd.command_timeout).await?;
     let node =
-        db::compact::retention::get_stream(org_id, stream_name, stream_type, Some(date_range))
+        db::compact::retention::get_stream(org_id, stream_type, stream_name, Some(date_range))
             .await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
         log::error!(
@@ -196,17 +195,18 @@ pub async fn delete_by_date(
     }
 
     // before start merging, set current node to lock the stream
-    db::compact::retention::process_stream(
+    let ret = db::compact::retention::process_stream(
         org_id,
-        stream_name,
         stream_type,
+        stream_name,
         Some(date_range),
         &LOCAL_NODE_UUID.clone(),
     )
-    .await?;
+    .await;
     // already bind to this node, we can unlock now
     dist_lock::unlock(&locker).await?;
     drop(locker);
+    ret?;
 
     let mut date_start =
         DateTime::parse_from_rfc3339(&format!("{}T00:00:00Z", date_range.0))?.with_timezone(&Utc);
@@ -271,7 +271,7 @@ pub async fn delete_by_date(
     }
 
     // delete from file list
-    delete_from_file_list(org_id, stream_name, stream_type, time_range).await?;
+    delete_from_file_list(org_id, stream_type, stream_name, time_range).await?;
 
     // update stream stats retention time
     let mut stats = cache::stats::get_stream_stats(org_id, stream_name, stream_type);
@@ -298,14 +298,14 @@ pub async fn delete_by_date(
     }
 
     // mark delete done
-    db::compact::retention::delete_stream_done(org_id, stream_name, stream_type, Some(date_range))
+    db::compact::retention::delete_stream_done(org_id, stream_type, stream_name, Some(date_range))
         .await
 }
 
 async fn delete_from_file_list(
     org_id: &str,
-    stream_name: &str,
     stream_type: StreamType,
+    stream_name: &str,
     time_range: (i64, i64),
 ) -> Result<(), anyhow::Error> {
     let files = file_list::query(
@@ -440,8 +440,7 @@ async fn write_file_list_s3(
             let mut cache_success = true;
             for event in &events {
                 if let Err(e) =
-                    db::file_list::progress(&event.key, Some(&event.meta), event.deleted, false)
-                        .await
+                    db::file_list::progress(&event.key, Some(&event.meta), event.deleted).await
                 {
                     cache_success = false;
                     log::error!(
@@ -473,4 +472,30 @@ async fn write_file_list_s3(
         db::compact::file_list::set_delete(&key).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_delete_by_stream() {
+        infra_file_list::create_table().await.unwrap();
+        let org_id = "test";
+        let stream_name = "test";
+        let stream_type = config::meta::stream::StreamType::Logs;
+        let lifecycle_end = "2023-01-01";
+        delete_by_stream(lifecycle_end, org_id, stream_type, stream_name)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_all() {
+        infra_file_list::create_table().await.unwrap();
+        let org_id = "test";
+        let stream_name = "test";
+        let stream_type = config::meta::stream::StreamType::Logs;
+        delete_all(org_id, stream_type, stream_name).await.unwrap();
+    }
 }

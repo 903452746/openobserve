@@ -18,21 +18,15 @@ use std::{
     sync::Arc,
 };
 
-use ahash::AHashMap;
 use bytes::Buf;
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
-use config::{ider, meta::stream::FileKey, CONFIG};
+use config::{cluster::LOCAL_NODE_UUID, ider, meta::stream::FileKey, utils::json, CONFIG};
+use hashbrown::HashMap;
+use infra::{dist_lock, storage};
 use tokio::sync::{RwLock, Semaphore};
 
 use crate::{
-    common::{
-        infra::{
-            cluster::{get_node_by_uuid, LOCAL_NODE_UUID},
-            config::STREAM_SCHEMAS,
-            dist_lock, storage,
-        },
-        utils::json,
-    },
+    common::infra::{cluster::get_node_by_uuid, config::STREAM_SCHEMAS},
     service::db,
 };
 
@@ -64,13 +58,14 @@ pub async fn run_merge(offset: i64) -> Result<(), anyhow::Error> {
     if offset == 0 {
         // get earilest date from schema
         offset = time_now.timestamp_micros();
-        for item in STREAM_SCHEMAS.iter() {
-            if let Some(val) = item.value().first().unwrap().metadata.get("created_at") {
+        let r = STREAM_SCHEMAS.read().await;
+        for (key, val) in r.iter() {
+            if let Some(val) = val.first().unwrap().metadata.get("created_at") {
                 let time_min = val.parse().unwrap();
                 if time_min == 0 {
                     log::info!(
                         "[COMPACT] file_list stream [{}] created_at is 0, just skip",
-                        item.key()
+                        key
                     );
                     continue;
                 }
@@ -79,6 +74,7 @@ pub async fn run_merge(offset: i64) -> Result<(), anyhow::Error> {
                 }
             }
         }
+        drop(r);
     }
 
     // still not found, just return
@@ -201,16 +197,17 @@ async fn merge_file_list(offset: i64) -> Result<(), anyhow::Error> {
     let locker = dist_lock::lock(&lock_key, CONFIG.etcd.command_timeout).await?;
     let node = db::compact::file_list::get_process(offset).await;
     if !node.is_empty() && LOCAL_NODE_UUID.ne(&node) && get_node_by_uuid(&node).is_some() {
-        log::error!("[COMPACT] list_list offset [{offset}] is merging by {node}");
+        log::debug!("[COMPACT] list_list offset [{offset}] is processing by {node}");
         dist_lock::unlock(&locker).await?;
         return Ok(()); // not this node, just skip
     }
 
     // before start merging, set current node to lock the offset
-    db::compact::file_list::set_process(offset, &LOCAL_NODE_UUID.clone()).await?;
+    let ret = db::compact::file_list::set_process(offset, &LOCAL_NODE_UUID.clone()).await;
     // already bind to this node, we can unlock now
     dist_lock::unlock(&locker).await?;
     drop(locker);
+    ret?;
 
     // get all small file list keys in this hour
     let offset_time = Utc.timestamp_nanos(offset * 1000);
@@ -228,8 +225,8 @@ async fn merge_file_list(offset: i64) -> Result<(), anyhow::Error> {
     );
 
     // filter deleted file keys
-    let filter_file_keys: Arc<RwLock<AHashMap<String, FileKey>>> =
-        Arc::new(RwLock::new(AHashMap::default()));
+    let filter_file_keys: Arc<RwLock<HashMap<String, FileKey>>> =
+        Arc::new(RwLock::new(HashMap::new()));
     let semaphore = std::sync::Arc::new(Semaphore::new(CONFIG.limit.file_move_thread_num));
     let mut tasks = Vec::new();
     for file in file_list.clone() {

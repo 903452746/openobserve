@@ -27,7 +27,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           </div>
         </div>
         <div class="col-auto">
-          <q-btn v-close-popup="true" round flat icon="cancel" />
+          <q-btn
+            v-close-popup="true"
+            round
+            flat
+            icon="cancel"
+            data-test="dashboard-add-cancel"
+          />
         </div>
       </div>
     </q-card-section>
@@ -40,6 +46,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           :readonly="beingUpdated"
           :disabled="beingUpdated"
           :label="t('dashboard.id')"
+          data-test="dashboard-id"
         />
         <q-input
           v-model="dashboardData.name"
@@ -47,7 +54,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           color="input-border"
           bg-color="input-bg"
           class="q-py-md showLabelOnTop"
-          data-test="dashboard-name"
+          data-test="add-dashboard-name"
           stack-label
           outlined
           filled
@@ -66,6 +73,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           outlined
           filled
           dense
+          data-test="add-dashboard-description"
         />
 
         <span>&nbsp;</span>
@@ -80,6 +88,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             text-color="light-text"
             padding="sm md"
             no-caps
+            data-test="dashboard-add-cancel"
           />
           <q-btn
             data-test="dashboard-add-submit"
@@ -178,40 +187,48 @@ export default defineComponent({
             role: "",
             owner: store.state.userInfo.name,
             created: new Date().toISOString(),
-            panels: [],
-            version: 2,
+            tabs: [
+              {
+                panels: [],
+                name: "Default",
+                tabId: "default",
+              },
+            ],
+            version: 3,
           };
-          
+
           callDashboard = dashboardService.create(
             store.state.selectedOrganization.identifier,
             baseObj,
             selectedFolder.value.value ?? "default"
           );
         }
-        await callDashboard
-          .then(async (res: { data: any }) => {
-            const data = convertDashboardSchemaVersion(
-              res.data["v" + res.data.version]
-            );
+        try {
+          const res = await callDashboard;
 
-            //update store
-            await getAllDashboards(store, selectedFolder.value.value);
-            emit("updated", data.dashboardId, selectedFolder.value.value);
-            dashboardData.value = {
-              id: "",
-              name: "",
-              description: "",
-            };
-            await addDashboardForm.value.resetValidation();
-          })
-          .catch((err: any) => {
-            $q.notify({
-              type: "negative",
-              message: JSON.stringify(
-                err.response.data["error"] || "Dashboard creation failed."
-              ),
-            });
+          const data = convertDashboardSchemaVersion(
+            res?.data["v" + res?.data?.version]
+          );
+
+          //update store
+          await getAllDashboards(store, selectedFolder.value.value);
+          emit("updated", data.dashboardId, selectedFolder.value.value);
+          dashboardData.value = {
+            id: "",
+            name: "",
+            description: "",
+          };
+          await addDashboardForm.value.resetValidation();
+          $q.notify({
+            type: "positive",
+            message: `Dashboard added successfully.`,
           });
+        } catch (err: any) {
+          $q.notify({
+            type: "negative",
+            message: err?.message ?? "Dashboard creation failed.",
+          });
+        }
       });
     });
 

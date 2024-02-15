@@ -19,7 +19,14 @@ use actix_web::{http, HttpResponse};
 use bytes::BytesMut;
 use chrono::{Duration, Utc};
 use config::{
-    meta::stream::StreamType, metrics, utils::schema_ext::SchemaExt, CONFIG, DISTINCT_FIELDS,
+    cluster,
+    meta::{
+        stream::{PartitionTimeLevel, StreamType},
+        usage::UsageType,
+    },
+    metrics,
+    utils::{flatten, json, schema_ext::SchemaExt},
+    CONFIG, DISTINCT_FIELDS,
 };
 use datafusion::arrow::datatypes::Schema;
 use opentelemetry::trace::{SpanId, TraceId};
@@ -32,16 +39,11 @@ use opentelemetry_proto::tonic::{
 use prost::Message;
 
 use crate::{
-    common::{
-        infra::cluster,
-        meta::{
-            alerts::Alert,
-            http::HttpResponse as MetaHttpResponse,
-            stream::{PartitionTimeLevel, SchemaRecords},
-            traces::{Event, Span, SpanRefType},
-            usage::UsageType,
-        },
-        utils::{flatten, json},
+    common::meta::{
+        alerts::Alert,
+        http::HttpResponse as MetaHttpResponse,
+        stream::{SchemaRecords, StreamPartition},
+        traces::{Event, Span, SpanRefType},
     },
     service::{
         db, distinct_values, format_partition_key, format_stream_name,
@@ -115,7 +117,7 @@ pub async fn handle_trace_request(
     )
     .await;
 
-    let mut partition_keys: Vec<String> = vec![];
+    let mut partition_keys: Vec<StreamPartition> = vec![];
     let mut partition_time_level =
         PartitionTimeLevel::from(CONFIG.limit.traces_file_retention.as_str());
     if stream_schema.has_partition_keys {
@@ -147,7 +149,7 @@ pub async fn handle_trace_request(
     );
     // End Register Transforms for stream
 
-    let mut trigger: TriggerAlertData = None;
+    let mut trigger: Option<TriggerAlertData> = None;
 
     let min_ts =
         (Utc::now() - Duration::hours(CONFIG.limit.ingest_allowed_upto)).timestamp_micros();
@@ -266,7 +268,10 @@ pub async fn handle_trace_request(
                 }
                 // End row based transform */
                 // get json object
-                let record_val = value.as_object_mut().unwrap();
+                let mut record_val = match value.take() {
+                    json::Value::Object(v) => v,
+                    _ => unreachable!(""),
+                };
 
                 record_val.insert(
                     CONFIG.common.column_timestamp.clone(),
@@ -300,7 +305,7 @@ pub async fn handle_trace_request(
                     traces_stream_name,
                     StreamType::Traces,
                     &mut traces_schema_map,
-                    &json::Value::Object(record_val.clone()),
+                    &record_val,
                     timestamp.try_into().unwrap(),
                 )
                 .await;
@@ -309,10 +314,9 @@ pub async fn handle_trace_request(
                     // Start check for alert trigger
                     let key = format!("{}/{}/{}", &org_id, StreamType::Traces, traces_stream_name);
                     if let Some(alerts) = stream_alerts_map.get(&key) {
-                        let mut trigger_alerts: Vec<(Alert, Vec<json::Map<String, json::Value>>)> =
-                            Vec::new();
+                        let mut trigger_alerts: TriggerAlertData = Vec::new();
                         for alert in alerts {
-                            if let Ok(Some(v)) = alert.evaluate(Some(record_val)).await {
+                            if let Ok(Some(v)) = alert.evaluate(Some(&record_val)).await {
                                 trigger_alerts.push((alert.clone(), v));
                             }
                         }
@@ -332,7 +336,7 @@ pub async fn handle_trace_request(
                     timestamp.try_into().unwrap(),
                     &partition_keys,
                     partition_time_level,
-                    record_val,
+                    &record_val,
                     Some(&schema_key),
                 );
 
@@ -347,9 +351,9 @@ pub async fn handle_trace_request(
                     records: vec![],
                     records_size: 0,
                 });
-                let record_val = record_val.to_owned();
+                // let record_val = record_val.to_owned();
                 let record_val = json::Value::Object(record_val);
-                let record_size = json::to_vec(&record_val).unwrap_or_default().len();
+                let record_size = json::estimate_json_bytes(&record_val);
                 hour_buf.records.push(Arc::new(record_val));
                 hour_buf.records_size += record_size;
 

@@ -16,6 +16,33 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <template>
   <div class="column index-menu">
+    <q-select
+      data-test="log-search-index-list-select-stream"
+      v-model="searchObj.data.stream.selectedStream"
+      :label="
+        searchObj.data.stream.selectedStream.label
+          ? ''
+          : t('search.selectIndex')
+      "
+      :options="streamOptions"
+      data-cy="index-dropdown"
+      input-debounce="0"
+      behavior="menu"
+      filled
+      borderless
+      dense
+      use-input
+      hide-selected
+      fill-input
+      @filter="filterStreamFn"
+      @update:model-value="onStreamChange"
+    >
+      <template #no-option>
+        <q-item>
+          <q-item-section> {{ t("search.noResult") }}</q-item-section>
+        </q-item>
+      </template>
+    </q-select>
     <div class="index-table q-mt-xs">
       <q-table
         data-test="log-search-index-list-fields-table"
@@ -112,6 +139,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 </template>
                 <template v-else-if="searchObj.meta.filterType === 'basic'">
                   <advanced-values-filter
+                    :key="searchObj.data.stream.selectedStream.value"
                     :row="props.row"
                     v-model:isOpen="fieldValues[props.row.name].isOpen"
                     v-model:values="fieldValues[props.row.name].values"
@@ -184,7 +212,8 @@ export default defineComponent({
     BasicValuesFilter,
     AdvancedValuesFilter,
   },
-  setup() {
+  emits: ["update:changeStream"],
+  setup(props, { emit }) {
     const store = useStore();
     const router = useRouter();
     const { t } = useI18n();
@@ -219,6 +248,10 @@ export default defineComponent({
       {
         deep: true,
       }
+    );
+
+    const selectedStreamName = computed(
+      () => searchObj.data.stream.selectedStream.value
     );
 
     const expandedFilters: Ref<string[]> = ref([]);
@@ -301,7 +334,7 @@ export default defineComponent({
     const getFieldValues = (name: string) => {
       fieldValues.value[name].size *= 2;
 
-      let query_context = `SELECT * FROM 'default' WHERE ${name} is not null`;
+      let query_context = `SELECT * FROM ${selectedStreamName.value} WHERE ${name} is not null`;
 
       if (searchObj.data.editorValue.trim().length)
         query_context += " AND " + searchObj.data.editorValue;
@@ -405,48 +438,52 @@ export default defineComponent({
       values: string[],
       prevValues: string[]
     ) => {
-      const parser = new Parser();
+      try {
+        const parser = new Parser();
 
-      const valuesString = values
-        .map((value: string) => "'" + value + "'")
-        .join(",");
+        const valuesString = values
+          .map((value: string) => "'" + value + "'")
+          .join(",");
 
-      let query = "SELECT * FROM 'default'";
+        let query = `SELECT * FROM '${selectedStreamName.value}' `;
 
-      if (!searchObj.data.editorValue?.length) {
-        searchObj.data.editorValue = `${column} IN (${valuesString})`;
-      } else if (!prevValues.length) {
-        searchObj.data.editorValue += ` AND ${column} IN (${valuesString})`;
+        if (!searchObj.data.editorValue?.length) {
+          searchObj.data.editorValue = `${column} IN (${valuesString})`;
+        } else if (!prevValues.length) {
+          searchObj.data.editorValue += ` AND ${column} IN (${valuesString})`;
+        }
+
+        query += " WHERE " + searchObj.data.editorValue;
+
+        const parsedQuery: any = parser.astify(query);
+
+        if (!values.length) {
+          parsedQuery.where = removeCondition(parsedQuery.where, column);
+        } else if (prevValues.length) {
+          modifyWhereClause(parsedQuery?.where, column, values);
+        }
+
+        // Convert the AST back to SQL query
+        let modifiedQuery = parser.sqlify(parsedQuery);
+        if (modifiedQuery) {
+          searchObj.data.editorValue = (modifiedQuery.split("WHERE")[1] || "")
+            .replace(/`/g, "")
+            .trim();
+
+          // Saving query in this variable, as while switching back from advance to basic we don't have to recreate the query from filters
+          searchObj.data.advanceFiltersQuery = searchObj.data.editorValue;
+        }
+
+        if (
+          column === "service_name" &&
+          expandedFilters.value.includes("operation_name")
+        )
+          getSpecialFieldsValues("operation_name");
+
+        filterExpandedFieldValues();
+      } catch (e) {
+        console.log("Error while creating query from filters");
       }
-
-      query += " WHERE " + searchObj.data.editorValue;
-
-      const parsedQuery: any = parser.astify(query);
-
-      if (!values.length) {
-        parsedQuery.where = removeCondition(parsedQuery.where, column);
-      } else if (prevValues.length) {
-        modifyWhereClause(parsedQuery?.where, column, values);
-      }
-
-      // Convert the AST back to SQL query
-      let modifiedQuery = parser.sqlify(parsedQuery);
-      if (modifiedQuery) {
-        searchObj.data.editorValue = (modifiedQuery.split("WHERE")[1] || "")
-          .replace(/`/g, "")
-          .trim();
-
-        // Saving query in this variable, as while switching back from advance to basic we don't have to recreate the query from filters
-        searchObj.data.advanceFiltersQuery = searchObj.data.editorValue;
-      }
-
-      if (
-        column === "service_name" &&
-        expandedFilters.value.includes("operation_name")
-      )
-        getSpecialFieldsValues("operation_name");
-
-      filterExpandedFieldValues();
     };
 
     const filterExpandedFieldValues = () => {
@@ -465,7 +502,7 @@ export default defineComponent({
         getSpecialFieldsValues("service_name");
       }
 
-      let query_context = "SELECT * FROM 'default'";
+      let query_context = `SELECT * FROM ${selectedStreamName.value} `;
 
       fields.forEach((field, index) => {
         if (index) query_context += ` AND ${field} is not null `;
@@ -602,7 +639,7 @@ export default defineComponent({
           field.values.map((value: any) => {
             values.add(value.zo_sql_key);
             return {
-              key: value.zo_sql_key ? value.zo_sql_key : "null",
+              key: value.zo_sql_key?.toString() ? value.zo_sql_key : "null",
               count: formatLargeNumber(value.zo_sql_num),
             };
           }) || [];
@@ -612,7 +649,7 @@ export default defineComponent({
             if (values.has(value)) return;
             else
               fieldValues.value[field.field]["values"].unshift({
-                key: value,
+                key: value?.toString() || "null",
                 count: "0",
               });
           }
@@ -620,48 +657,13 @@ export default defineComponent({
       });
     };
 
-    // const getFullQuery = () => {
-    //   let query = "SELECT * FROM 'default'";
-    //   if (searchObj.data.editorValue)
-    //     return query + " WHERE " + searchObj.data.editorValue;
-    //   else return query;
-    // };
-
-    // const handleDuration = () => {
-    //   if (
-    //     searchObj.data.editorValue.indexOf("duration >=") > -1 &&
-    //     searchObj.data.editorValue.indexOf("duration <=") > -1
-    //   ) {
-    //     const parser = new Parser();
-
-    //     const parsedQuery = parser.astify(getFullQuery());
-    //     modifyWhereClause(parsedQuery.where, "duration", [
-    //       duration.value.input,
-    //     ]);
-
-    //     // Convert the AST back to SQL query
-    //     let modifiedQuery = parser.sqlify(parsedQuery);
-    //     if (modifiedQuery) {
-    //       searchObj.data.editorValue = (modifiedQuery.split("WHERE")[1] || "")
-    //         .replace(/`/g, "")
-    //         .trim();
-
-    //       // Saving query in this variable, as while switching back from advance to basic we don't have to recreate the query from filters
-    //       searchObj.data.advanceFiltersQuery = searchObj.data.editorValue;
-    //     }
-    //   } else {
-    //     if (searchObj.data.editorValue) {
-    //       searchObj.data.editorValue += ` AND duration >= ${duration.value.input.min} AND duration <= ${duration.value.input.max}`;
-    //     } else {
-    //       searchObj.data.editorValue += `duration >= ${duration.value.input.min} AND duration <= ${duration.value.input.max}`;
-    //     }
-    //   }
-    // };
-
-    // const handleSliderDuration = () => {
-    //   handleDuration();
-    //   handleDuration();
-    // };
+    const onStreamChange = (stream: any) => {
+      searchObj.data.stream.selectedStream = stream;
+      searchObj.data.query = "";
+      searchObj.data.editorValue = "";
+      searchObj.data.resultGrid.currentPage = 0;
+      emit("update:changeStream");
+    };
 
     return {
       t,
@@ -684,6 +686,7 @@ export default defineComponent({
       handleFilterCreator,
       getFieldValues,
       filterExpandedFieldValues,
+      onStreamChange,
     };
   },
 });
@@ -691,7 +694,7 @@ export default defineComponent({
 
 <style lang="scss" scoped>
 .traces-field-table {
-  height: calc(100vh - 144px) !important;
+  height: calc(100vh - 184px) !important;
 }
 .q-menu {
   box-shadow: 0px 3px 15px rgba(0, 0, 0, 0.1);

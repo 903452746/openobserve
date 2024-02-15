@@ -13,9 +13,10 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
+use strum::EnumIter;
 use utoipa::ToSchema;
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -185,15 +186,27 @@ pub struct UpdateUser {
     pub token: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, ToSchema, EnumIter)]
 pub enum UserRole {
     #[serde(rename = "admin")]
-    Admin,
-    #[serde(rename = "member")]
     #[default]
+    Admin,
+    #[serde(rename = "member")] // admin in OpenSource
     Member,
     #[serde(rename = "root")]
     Root,
+    #[cfg(feature = "enterprise")]
+    #[serde(rename = "viewer")] // read only user
+    Viewer,
+    #[cfg(feature = "enterprise")]
+    #[serde(rename = "user")] // No access only login user
+    User,
+    #[cfg(feature = "enterprise")]
+    #[serde(rename = "editor")]
+    Editor,
+    #[cfg(feature = "enterprise")]
+    #[serde(rename = "service_account")]
+    ServiceAccount,
 }
 
 impl fmt::Display for UserRole {
@@ -202,6 +215,57 @@ impl fmt::Display for UserRole {
             UserRole::Admin => write!(f, "admin"),
             UserRole::Member => write!(f, "member"),
             UserRole::Root => write!(f, "root"),
+            #[cfg(feature = "enterprise")]
+            UserRole::Viewer => write!(f, "viewer"),
+            #[cfg(feature = "enterprise")]
+            UserRole::Editor => write!(f, "editor"),
+            #[cfg(feature = "enterprise")]
+            UserRole::User => write!(f, "user"),
+            #[cfg(feature = "enterprise")]
+            UserRole::ServiceAccount => write!(f, "service_account"),
+        }
+    }
+}
+
+impl UserRole {
+    pub fn get_label(&self) -> String {
+        match self {
+            UserRole::Admin => "Admin".to_string(),
+            UserRole::Member => "Member".to_string(),
+            UserRole::Root => "Root".to_string(),
+            #[cfg(feature = "enterprise")]
+            UserRole::Viewer => "Viewer".to_string(),
+            #[cfg(feature = "enterprise")]
+            UserRole::Editor => "Editor".to_string(),
+            #[cfg(feature = "enterprise")]
+            UserRole::User => "User".to_string(),
+            #[cfg(feature = "enterprise")]
+            UserRole::ServiceAccount => "Service Account".to_string(),
+        }
+    }
+}
+
+// Implementing FromStr for UserRole
+impl FromStr for UserRole {
+    type Err = ();
+
+    fn from_str(input: &str) -> Result<UserRole, Self::Err> {
+        match input {
+            "admin" => Ok(UserRole::Admin),
+            "member" => Ok(UserRole::Member),
+            "root" => Ok(UserRole::Root),
+            #[cfg(feature = "enterprise")]
+            "viewer" => Ok(UserRole::Viewer),
+            #[cfg(feature = "enterprise")]
+            "editor" => Ok(UserRole::Editor),
+            #[cfg(feature = "enterprise")]
+            "user" => Ok(UserRole::User),
+            #[cfg(feature = "enterprise")]
+            "service_account" => Ok(UserRole::ServiceAccount),
+            #[cfg(feature = "enterprise")]
+            _ => Ok(UserRole::User),
+            #[cfg(not(feature = "enterprise"))]
+            _ => Ok(UserRole::Admin),
         }
     }
 }
@@ -239,10 +303,38 @@ pub struct SignInResponse {
 pub struct TokenValidationResponse {
     pub is_valid: bool,
     pub user_email: String,
+    pub is_internal_user: bool,
+    pub user_role: Option<UserRole>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 pub struct RoleOrg {
     pub role: UserRole,
     pub org: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct UserGroup {
+    pub name: String,
+    pub users: Option<std::collections::HashSet<String>>,
+    pub roles: Option<std::collections::HashSet<String>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct UserGroupRequest {
+    pub add_users: Option<std::collections::HashSet<String>>,
+    pub remove_users: Option<std::collections::HashSet<String>>,
+    pub add_roles: Option<std::collections::HashSet<String>>,
+    pub remove_roles: Option<std::collections::HashSet<String>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct UserRoleRequest {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct RolesResponse {
+    pub label: String,
+    pub value: String,
 }

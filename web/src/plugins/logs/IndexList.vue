@@ -79,7 +79,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             >
               <!-- TODO OK : Repeated code make seperate component to display field  -->
               <div
-                v-if="props.row.ftsKey || !props.row.isSchemaField"
+                v-if="
+                  props.row.ftsKey ||
+                  !props.row.isSchemaField ||
+                  !props.row.showValues
+                "
                 class="field-container flex content-center ellipsis q-pl-lg q-pr-sm"
                 :title="props.row.name"
               >
@@ -427,7 +431,10 @@ export default defineComponent({
       updatedLocalLogFilterField();
     }
 
-    const openFilterCreator = (event: any, { name, ftsKey, isSchemaField }: any) => {
+    const openFilterCreator = (
+      event: any,
+      { name, ftsKey, isSchemaField }: any
+    ) => {
       if (ftsKey) {
         event.stopPropagation();
         event.preventDefault();
@@ -474,12 +481,12 @@ export default defineComponent({
       try {
         let query_context = "";
         let query = searchObj.data.query;
-        if (searchObj.meta.sqlMode == true) {
+        if (searchObj.meta.sqlMode && query.trim().length) {
           const parsedSQL: any = parser.astify(query);
           //hack add time stamp column to parsedSQL if not already added
           query_context =
             b64EncodeUnicode(parser.sqlify(parsedSQL).replace(/`/g, '"')) || "";
-        } else {
+        } else if (query.trim().length) {
           let parseQuery = query.split("|");
           let queryFunctions = "";
           let whereClause = "";
@@ -546,6 +553,7 @@ export default defineComponent({
             size: 10,
             query_context: query_context,
             query_fn: query_fn,
+            type: searchObj.data.stream.streamType,
           })
           .then((res: any) => {
             if (res.data.hits.length) {
@@ -553,7 +561,9 @@ export default defineComponent({
                 .find((field: any) => field.field === name)
                 .values.map((value: any) => {
                   return {
-                    key: value.zo_sql_key ? value.zo_sql_key : "null",
+                    key: value.zo_sql_key?.toString()
+                      ? value.zo_sql_key
+                      : "null",
                     count: formatLargeNumber(value.zo_sql_num),
                   };
                 });
@@ -563,6 +573,7 @@ export default defineComponent({
             fieldValues.value[name]["isLoading"] = false;
           });
       } catch (err) {
+        console.log(err);
         $q.notify({
           type: "negative",
           message: "Error while fetching field values",

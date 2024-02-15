@@ -18,7 +18,13 @@ use std::{collections::HashMap, sync::Arc};
 use actix_web::{http, HttpResponse};
 use bytes::BytesMut;
 use chrono::Utc;
-use config::{meta::stream::StreamType, metrics, utils::schema_ext::SchemaExt, CONFIG};
+use config::{
+    cluster,
+    meta::{stream::StreamType, usage::UsageType},
+    metrics,
+    utils::{flatten, json, schema_ext::SchemaExt},
+    CONFIG,
+};
 use datafusion::arrow::datatypes::Schema;
 use opentelemetry::trace::{SpanId, TraceId};
 use opentelemetry_proto::tonic::{
@@ -28,16 +34,11 @@ use opentelemetry_proto::tonic::{
 use prost::Message;
 
 use crate::{
-    common::{
-        infra::cluster,
-        meta::{
-            alerts::{self, Alert},
-            http::HttpResponse as MetaHttpResponse,
-            prom::*,
-            stream::{PartitioningDetails, SchemaRecords},
-            usage::UsageType,
-        },
-        utils::{flatten, json},
+    common::meta::{
+        alerts,
+        http::HttpResponse as MetaHttpResponse,
+        prom::*,
+        stream::{PartitioningDetails, SchemaRecords},
     },
     service::{
         db, format_stream_name,
@@ -89,9 +90,9 @@ pub async fn handle_grpc_request(
     let mut runtime = crate::service::ingestion::init_functions_runtime();
     let mut metric_data_map: HashMap<String, HashMap<String, SchemaRecords>> = HashMap::new();
     let mut metric_schema_map: HashMap<String, Schema> = HashMap::new();
-    let mut schema_evoluted: HashMap<String, bool> = HashMap::new();
+    let mut schema_evolved: HashMap<String, bool> = HashMap::new();
     let mut stream_alerts_map: HashMap<String, Vec<alerts::Alert>> = HashMap::new();
-    let mut stream_trigger_map: HashMap<String, TriggerAlertData> = HashMap::new();
+    let mut stream_trigger_map: HashMap<String, Option<TriggerAlertData>> = HashMap::new();
     let mut stream_partitioning_map: HashMap<String, PartitioningDetails> = HashMap::new();
 
     for resource_metric in &request.resource_metrics {
@@ -284,27 +285,29 @@ pub async fn handle_grpc_request(
                     let value_str = json::to_string(&val_map).unwrap();
 
                     // check for schema evolution
-                    if schema_evoluted.get(local_metric_name).is_none() {
-                        let record_val = json::Value::Object(val_map.to_owned());
-                        if check_for_schema(
+                    if schema_evolved.get(local_metric_name).is_none()
+                        && check_for_schema(
                             org_id,
                             local_metric_name,
                             StreamType::Metrics,
                             &mut metric_schema_map,
-                            &record_val,
+                            val_map,
                             timestamp,
                         )
                         .await
                         .is_ok()
-                        {
-                            schema_evoluted.insert(local_metric_name.to_owned(), true);
-                        }
+                    {
+                        schema_evolved.insert(local_metric_name.to_owned(), true);
                     }
 
                     let buf = metric_data_map
                         .entry(local_metric_name.to_owned())
                         .or_default();
-                    let schema = metric_schema_map.get(local_metric_name).unwrap().clone();
+                    let schema = metric_schema_map
+                        .get(local_metric_name)
+                        .unwrap()
+                        .clone()
+                        .with_metadata(HashMap::new());
                     let schema_key = schema.hash_key();
                     // get hour key
                     let hour_key = crate::service::ingestion::get_wal_time_key(
@@ -336,10 +339,7 @@ pub async fn handle_grpc_request(
                             local_metric_name.clone()
                         );
                         if let Some(alerts) = stream_alerts_map.get(&key) {
-                            let mut trigger_alerts: Vec<(
-                                Alert,
-                                Vec<json::Map<String, json::Value>>,
-                            )> = Vec::new();
+                            let mut trigger_alerts: TriggerAlertData = Vec::new();
                             for alert in alerts {
                                 if let Ok(Some(v)) = alert.evaluate(Some(val_map)).await {
                                     trigger_alerts.push((alert.clone(), v));
@@ -367,8 +367,8 @@ pub async fn handle_grpc_request(
         // check if we are allowed to ingest
         if db::compact::retention::is_deleting_stream(
             org_id,
-            &stream_name,
             StreamType::Metrics,
+            &stream_name,
             None,
         ) {
             log::warn!("stream [{stream_name}] is being deleted");

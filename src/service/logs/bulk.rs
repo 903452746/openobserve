@@ -19,25 +19,27 @@ use std::{
 };
 
 use actix_web::web;
+use anyhow::{anyhow, Error, Result};
 use chrono::{Duration, Utc};
-use config::{meta::stream::StreamType, metrics, CONFIG, DISTINCT_FIELDS};
+use config::{
+    cluster,
+    meta::{stream::StreamType, usage::UsageType},
+    metrics,
+    utils::{flatten, json, time::parse_timestamp_micro_from_value},
+    CONFIG, DISTINCT_FIELDS,
+};
 use datafusion::arrow::datatypes::Schema;
 
 use super::StreamMeta;
 use crate::{
-    common::{
-        infra::cluster,
-        meta::{
-            alerts::Alert,
-            functions::{StreamTransform, VRLResultResolver},
-            ingestion::{
-                BulkResponse, BulkResponseError, BulkResponseItem, BulkStreamData, RecordStatus,
-                StreamSchemaChk,
-            },
-            stream::PartitioningDetails,
-            usage::UsageType,
+    common::meta::{
+        alerts::Alert,
+        functions::{StreamTransform, VRLResultResolver},
+        ingestion::{
+            BulkResponse, BulkResponseError, BulkResponseItem, BulkStreamData, RecordStatus,
+            StreamSchemaChk,
         },
-        utils::{flatten, json, time::parse_timestamp_micro_from_value},
+        stream::PartitioningDetails,
     },
     service::{
         db, distinct_values,
@@ -55,20 +57,19 @@ pub async fn ingest(
     org_id: &str,
     body: web::Bytes,
     thread_id: usize,
+    user_email: &str,
 ) -> Result<BulkResponse, anyhow::Error> {
     let start = std::time::Instant::now();
     if !cluster::is_ingester(&cluster::LOCAL_NODE_ROLE) {
-        return Err(anyhow::anyhow!("not an ingester"));
+        return Err(anyhow!("not an ingester"));
     }
 
     if !db::file_list::BLOCKED_ORGS.is_empty() && db::file_list::BLOCKED_ORGS.contains(&org_id) {
-        return Err(anyhow::anyhow!("Quota exceeded for this organization"));
+        return Err(anyhow!("Quota exceeded for this organization"));
     }
 
     // check memtable
-    if let Err(e) = ingester::check_memtable_size() {
-        return Err(anyhow::Error::msg(e.to_string()));
-    }
+    ingester::check_memtable_size().map_err(|e| Error::msg(e.to_string()))?;
 
     // let mut errors = false;
     let mut bulk_res = BulkResponse {
@@ -95,7 +96,7 @@ pub async fn ingest(
     let mut action = String::from("");
     let mut stream_name = String::from("");
     let mut doc_id = String::from("");
-    let mut stream_trigger_map: HashMap<String, TriggerAlertData> = HashMap::new();
+    let mut stream_trigger_map: HashMap<String, Option<TriggerAlertData>> = HashMap::new();
 
     let mut next_line_is_data = false;
     let reader = BufReader::new(body.as_ref());
@@ -202,7 +203,11 @@ pub async fn ingest(
             // End row based transform
 
             // get json object
-            let local_val = value.as_object_mut().unwrap();
+            let mut local_val = match value.take() {
+                json::Value::Object(v) => v,
+                _ => unreachable!(),
+            };
+
             // set _id
             if !doc_id.is_empty() {
                 local_val.insert("_id".to_string(), json::Value::String(doc_id.clone()));
@@ -260,6 +265,23 @@ pub async fn ingest(
             let mut status = RecordStatus::default();
             let need_trigger = !stream_trigger_map.contains_key(&stream_name);
 
+            let mut to_add_distinct_values = vec![];
+            // get distinct_value items
+            for field in DISTINCT_FIELDS.iter() {
+                if let Some(val) = local_val.get(field) {
+                    if !val.is_null() {
+                        to_add_distinct_values.push(distinct_values::DvItem {
+                            stream_type: StreamType::Logs,
+                            stream_name: stream_name.clone(),
+                            field_name: field.to_string(),
+                            field_value: val.as_str().unwrap().to_string(),
+                            filter_name: "".to_string(),
+                            filter_value: "".to_string(),
+                        });
+                    }
+                }
+            }
+
             let local_trigger = match super::add_valid_record(
                 &StreamMeta {
                     org_id: org_id.to_string(),
@@ -296,20 +318,7 @@ pub async fn ingest(
             }
 
             // get distinct_value item
-            for field in DISTINCT_FIELDS.iter() {
-                if let Some(val) = local_val.get(field) {
-                    if !val.is_null() {
-                        distinct_values.push(distinct_values::DvItem {
-                            stream_type: StreamType::Logs,
-                            stream_name: stream_name.clone(),
-                            field_name: field.to_string(),
-                            field_value: val.as_str().unwrap().to_string(),
-                            filter_name: "".to_string(),
-                            filter_value: "".to_string(),
-                        });
-                    }
-                }
-            }
+            distinct_values.extend(to_add_distinct_values);
 
             if status.failed > 0 {
                 bulk_res.errors = true;
@@ -341,7 +350,7 @@ pub async fn ingest(
     let writer = ingester::get_writer(thread_id, org_id, &StreamType::Logs.to_string()).await;
     for (stream_name, stream_data) in stream_data_map {
         // check if we are allowed to ingest
-        if db::compact::retention::is_deleting_stream(org_id, &stream_name, StreamType::Logs, None)
+        if db::compact::retention::is_deleting_stream(org_id, StreamType::Logs, &stream_name, None)
         {
             log::warn!("stream [{stream_name}] is being deleted");
             continue;
@@ -349,6 +358,7 @@ pub async fn ingest(
         // write to file
         let mut req_stats = write_file(&writer, &stream_name, stream_data.data).await;
         req_stats.response_time += time;
+        req_stats.user_email = Some(user_email.to_string());
         // metric + data usage
         let fns_length: usize = stream_transform_map.values().map(|v| v.len()).sum();
         report_request_usage_stats(
